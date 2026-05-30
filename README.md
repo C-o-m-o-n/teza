@@ -1,95 +1,86 @@
-# TETRIO Clone
+# TEZA
 
-A faithful browser-based re-implementation of [TETR.IO](https://tetr.io), built from publicly available reverse-engineering documentation, community format specs, and the official TETR.IO replay file schema.
+> **teza.ke &nbsp;·&nbsp; Built in Kenya 🇰🇪**
 
-> **AI Disclosure:** This project was designed and implemented in collaboration with [Claude](https://claude.ai) (Anthropic, Claude Sonnet 4.6). All architecture, documentation, and source code were produced through a directed conversation between the project author and the AI assistant. Claude contributed system design, algorithm implementation, inline documentation, and this README. Every non-trivial decision is explained in the phase docs and inline comments.
+A competitive multiplayer block-stacking game — a faithful reimplementation of [TETR.IO](https://tetr.io) mechanics built from publicly available reverse-engineering documentation.
+
+*Teza* is Swahili for **"to play"**.
+
+> **AI Disclosure:** This project was designed and implemented in collaboration with [Claude](https://claude.ai) (Anthropic, Claude Sonnet 4.6). All architecture, documentation, and source code were produced through a directed conversation between the project author and the AI assistant. Claude contributed system design, algorithm implementation, protocol engineering, inline documentation, and this README. Every non-trivial decision is explained in the phase docs and inline code comments.
+
+---
+
+## Quick Start (Phase 3 — Multiplayer)
+
+```bash
+npm install
+npm start
+# Open http://localhost:3000 in two tabs
+# Tab 1: Create Room → share the 6-char code
+# Tab 2: Enter code → Join → match starts
+```
+
+No build step. Node.js ≥ 18 required.
 
 ---
 
 ## Project Goal
 
-To build a complete TETR.IO clone in stages — each phase fully playable and documented — using only public information:
+Build a complete TETR.IO clone in documented phases — each fully playable — using only public information:
 
-- The official TETR.IO `.ttr` / `.ttrm` replay format spec
+- Official TETR.IO `.ttr` / `.ttrm` replay format spec
 - Community reverse-engineering (Poyo's Ribbon protocol docs, awesome-tetrio)
-- The TETR.IO open-source acknowledgements page
 - TetrisWiki documentation on guideline mechanics
 - osk's (the developer's) public Discord messages
 
-No decompilation, no proprietary access, no ToS violations.
+No decompilation. No proprietary access. No ToS violations.
 
 ---
 
 ## Phases
 
-| Phase | File | Status | Scope |
-|---|---|---|---|
-| **Phase 1** | `tetrio-clone-phase1.html` | ✅ Complete | Solo engine: PRNG, SRS, lock delay, Sprint/Blitz |
-| **Phase 2** | `tetrio-clone-phase2.html` | ✅ Complete | T-spins, B2B, garbage table, attack system, Sandbox |
-| **Phase 3** | *(in progress)* | 🔧 Planned | Ribbon WebSocket, 1v1 multiplayer, room system |
-| **Phase 4** | *(planned)* | 📋 Planned | Glicko-2 / Tetra Rating, leaderboard |
+| Phase | Status | Scope |
+|---|---|---|
+| **Phase 1** | ✅ Complete | Solo engine: MINSTD PRNG, SRS, lock delay, Sprint/Blitz |
+| **Phase 2** | ✅ Complete | T-spins, B2B chains, garbage system, attack table, Sandbox |
+| **Phase 3** | ✅ Complete | Ribbon WebSocket, 1v1 multiplayer, room system, client-side prediction |
+| **Phase 4** | 🔧 Planned | Glicko-2 / TR rating, matchmaking, spectator mode, replays |
 
 ---
 
-## Quick Start
+## Architecture
 
-No build step. No dependencies.
-
-```bash
-# Clone or download the repo
-# Open any phase file directly in a browser:
-open tetrio-clone-phase2.html
+```
+teza-phase3/
+├── shared/engine.js   ← Deterministic game core (Node.js + browser)
+├── server/server.js   ← Authoritative server + Ribbon protocol
+├── client/index.html  ← Browser client + rendering + input
+└── package.json
 ```
 
-Works in Chrome, Firefox, Safari, Edge. Requires ES2020 (BigInt support).
+### The Determinism Principle
 
----
-
-## Architecture Summary
-
-### The PRNG Foundation
-
-Every randomness decision in TETR.IO flows from a single **MINSTD Linear Congruential Generator**:
+The entire game — piece order, garbage holes, board state — flows from a single **MINSTD PRNG** seeded per match:
 
 ```
 X(n+1) = (16807 × X(n)) mod 2147483647
 ```
 
-One instance per match, seeded by the server (or timestamp in solo play). The same state drives:
-1. Fisher-Yates 7-bag shuffle (piece order)
-2. Garbage hole column selection
-3. Scatter column re-rolls (sickness system)
+This means `{ seed, inputs[] }` is enough to reconstruct any game. Replays, anti-cheat, and spectating all follow from this.
 
-This is why `.ttr` replay files only need `{ seed, inputs[] }` — the entire game is reconstructable.
+### Ribbon Protocol (Simplified)
 
-### Fixed 60Hz Timestep
+Every WebSocket message carries a sequence/ack envelope:
 
-Physics runs at exactly 60 ticks/second via a **delta-time accumulator**, independent of monitor refresh rate. The fractional remainder of the accumulator is the **subframe** value stored in replay inputs.
-
-```
-accumulator += (now - lastTime)
-while accumulator >= 16.666ms:
-    tick()
-    accumulator -= 16.666ms
-render()
+```json
+{ "t": "input", "s": 42, "a": 38, "d": { "input": { "type": "hardDrop" } } }
 ```
 
-### T-Spin Detection Pipeline
+Both sides buffer the last 100 sent packets. On reconnect, the client sends its last `a` (ack ID) and the server replays any missed packets — games survive brief disconnects without desyncing.
 
-```
-Player presses rotate
-  → tryRotate() returns { piece, kickIndex }
-  → lastKickIndex = kickIndex
-  → lastSpinType = 'candidate'   (if T-piece)
+### Client-Side Prediction
 
-Player presses move or soft-drop
-  → lastSpinType = null           (spin voided)
-
-Piece locks
-  → detectTSpin(board, piece, lastKickIndex)
-  → 3-corner rule + kick index → 'tspin' | 'mini' | null
-  → attack calculated from result
-```
+Inputs are applied to the **local engine immediately** for zero-latency feel, then forwarded to the server. The server is authoritative on conflicts (garbage, game-over, opponent state).
 
 ---
 
@@ -100,7 +91,7 @@ Piece locks
 | `← →` | Move |
 | `↑` | Rotate CW |
 | `Z` | Rotate CCW |
-| `A` | Rotate 180° (TETR.IO custom) |
+| `A` | Rotate 180° |
 | `↓` | Soft drop |
 | `Space` | Hard drop |
 | `C` / `Shift` | Hold |
@@ -110,10 +101,11 @@ Piece locks
 
 ## Documentation
 
-Each phase has its own detailed doc:
-
-- [`PHASE1.md`](./PHASE1.md) — PRNG, SRS, board system, fixed timestep
-- [`PHASE2.md`](./PHASE2.md) — T-spin detection, B2B, attack table, garbage system
+| File | Contents |
+|---|---|
+| [`PHASE1.md`](./PHASE1.md) | MINSTD PRNG, SRS, fixed timestep, board coordinate system |
+| [`PHASE2.md`](./PHASE2.md) | T-spin detection, B2B chains, attack table, garbage sickness |
+| [`PHASE3.md`](./PHASE3.md) | Ribbon protocol, shared engine, client prediction, room system |
 
 ---
 
@@ -121,17 +113,22 @@ Each phase has its own detailed doc:
 
 | Source | Used For |
 |---|---|
-| [TETR.IO GitHub (Issues / Format Specs)](https://github.com/tetrio/issues) | Replay format, input key names |
-| [TetrisWiki — TETR.IO](https://tetris.wiki/TETR.IO) | MINSTD formula, confirmed mechanics |
+| [TETR.IO GitHub](https://github.com/tetrio/issues) | Replay format, input key names |
+| [TetrisWiki — TETR.IO](https://tetris.wiki/TETR.IO) | MINSTD formula, mechanics |
 | [TetrisWiki — T-spin](https://tetris.wiki/T-spin) | 3-corner rule |
 | [TetrisWiki — SRS](https://tetris.wiki/Super_Rotation_System) | Kick tables |
 | [awesome-tetrio](https://github.com/Sup3rFire/awesome-tetrio) | Community resource index |
 | Poyo's TETR.IO Bot Docs | Ribbon protocol, garbage PRNG ordering |
-| Community-documented attack table | TETR.IO Discord (archived) |
-| osk public Discord messages | 180° kick table, sickness system |
+| TETR.IO Discord (archived) | Attack table, 180° kicks, sickness system |
 
 ---
 
 ## License
 
-This project is an independent fan re-implementation for educational purposes. TETR.IO is created by osk and is not affiliated with this project. Tetris® is a trademark of The Tetris Company.
+Fan reimplementation for educational purposes.  
+TETR.IO is created by osk and is not affiliated with this project.  
+Tetris® is a trademark of The Tetris Company.
+
+---
+
+*TEZA — teza.ke — Built in Kenya 🇰🇪*

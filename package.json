@@ -1,0 +1,17 @@
+{
+  "name": "teza-server",
+  "version": "0.3.0",
+  "description": "TEZA — Multiplayer block game server. Built in Kenya 🇰🇪",
+  "main": "server/server.js",
+  "scripts": {
+    "start": "node server/server.js",
+    "dev":   "node --watch server/server.js"
+  },
+  "dependencies": {
+    "ws": "^8.17.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "license": "MIT"
+}
