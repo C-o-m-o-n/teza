@@ -1,0 +1,1667 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>TETRIO Clone — Phase 2</title>
+<style>
+/*
+ * ============================================================
+ * TETRIO CLONE — PHASE 2: T-SPIN DETECTION, B2B CHAINS,
+ *                          GARBAGE SYSTEM & ATTACK TABLE
+ * ============================================================
+ *
+ * WHAT'S NEW IN PHASE 2:
+ *   - T-spin detection (3-corner rule + kick validation)
+ *   - T-spin Mini detection (immobile detection fallback)
+ *   - Back-to-Back (B2B) chain tracking & multiplier
+ *   - TETR.IO Multiplier combo system (replaces standard combos)
+ *   - Full attack/garbage table matching TETR.IO values
+ *   - Garbage column persistence + "sickness" scatter system
+ *   - Garbage queue with windup warning display
+ *   - All Clear (Perfect Clear) detection
+ *   - APM (Attacks Per Minute) stat
+ *   - Action popups (visual feedback: "T-Spin!", "B2B!", etc.)
+ *
+ * CARRIES FORWARD FROM PHASE 1 (unchanged):
+ *   - MINSTD PRNG, 7-bag, SRS + 180° kicks
+ *   - Fixed 60Hz tick loop / subframe accumulator
+ *   - Lock delay (30-tick, 15-reset cap)
+ *   - Sprint / Blitz modes
+ *   - Hold, ghost, next queue
+ * ============================================================
+ */
+
+:root {
+  --bg:        #0a0a0f;
+  --surface:   #111118;
+  --surface2:  #1a1a24;
+  --border:    #2a2a3a;
+  --text:      #e8e8f0;
+  --text-dim:  #6a6a8a;
+  --accent:    #7c6fff;
+  --danger:    #ff4c4c;
+  --success:   #3ddc84;
+  --warn:      #f7a130;
+
+  --col-I: #41b0d8;
+  --col-O: #f7d000;
+  --col-T: #b642d4;
+  --col-S: #3ddc84;
+  --col-Z: #e84545;
+  --col-J: #3c6bff;
+  --col-L: #ff7b2e;
+  --col-G: #444460;
+
+  font-family: 'Courier New', monospace;
+}
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  min-height: 100vh;
+  padding: 20px;
+  user-select: none;
+}
+
+h1 {
+  font-size: 13px;
+  letter-spacing: 4px;
+  text-transform: uppercase;
+  color: var(--text-dim);
+  margin-bottom: 20px;
+}
+
+#game-wrap {
+  display: flex;
+  gap: 16px;
+  align-items: flex-start;
+}
+
+.panel-left  { width: 100px; display: flex; flex-direction: column; gap: 14px; }
+.panel-right { width: 100px; display: flex; flex-direction: column; gap: 8px; }
+
+.panel-label {
+  font-size: 9px;
+  letter-spacing: 2px;
+  text-transform: uppercase;
+  color: var(--text-dim);
+  margin-bottom: 4px;
+}
+
+.mini-canvas {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  display: block;
+}
+
+.stat { display: flex; flex-direction: column; gap: 2px; }
+.stat-label {
+  font-size: 9px;
+  letter-spacing: 2px;
+  text-transform: uppercase;
+  color: var(--text-dim);
+}
+.stat-value {
+  font-size: 18px;
+  font-weight: bold;
+  color: var(--text);
+  letter-spacing: 1px;
+}
+.stat-value.big { font-size: 24px; }
+
+#board-canvas {
+  display: block;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  image-rendering: pixelated;
+}
+
+#overlay {
+  position: absolute;
+  top: 0; left: 0;
+  width: 100%; height: 100%;
+  background: rgba(10,10,15,0.88);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 14px;
+  z-index: 10;
+}
+
+#board-wrap { position: relative; }
+
+/* ── ACTION POPUP ─────────────────────────────────────────── */
+/*
+ * These float above the board and animate out.
+ * Triggered on T-spins, B2B, All-Clear, Quad, etc.
+ */
+#action-popup {
+  position: absolute;
+  right: -110px;
+  top: 50%;
+  transform: translateY(-50%);
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+  pointer-events: none;
+  width: 105px;
+}
+
+.popup-line {
+  font-size: 10px;
+  letter-spacing: 1.5px;
+  text-transform: uppercase;
+  padding: 3px 6px;
+  opacity: 0;
+  transform: translateX(10px);
+  transition: opacity 0.08s, transform 0.08s;
+  white-space: nowrap;
+}
+.popup-line.show {
+  opacity: 1;
+  transform: translateX(0);
+}
+
+/* ── GARBAGE METER ──────────────────────────────────────────── */
+/*
+ * The vertical bar on the right side of the board shows
+ * queued incoming garbage — like TETR.IO's red bar.
+ */
+#garbage-meter {
+  position: absolute;
+  right: -10px;
+  top: 0;
+  width: 6px;
+  height: 100%;
+  display: flex;
+  flex-direction: column-reverse;
+  gap: 1px;
+}
+
+.garbage-block {
+  width: 100%;
+  background: var(--danger);
+  border-radius: 1px;
+  flex-shrink: 0;
+}
+
+.overlay-title {
+  font-size: 11px;
+  letter-spacing: 4px;
+  text-transform: uppercase;
+  color: var(--text-dim);
+}
+.overlay-sub {
+  font-size: 24px;
+  letter-spacing: 2px;
+  color: var(--text);
+  text-align: center;
+  max-width: 260px;
+}
+
+.btn-row { display: flex; gap: 8px; margin-top: 8px; }
+button {
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  color: var(--text);
+  font-family: inherit;
+  font-size: 10px;
+  letter-spacing: 2px;
+  text-transform: uppercase;
+  padding: 8px 16px;
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s;
+}
+button:hover { background: var(--border); border-color: var(--accent); }
+button.active { border-color: var(--accent); color: var(--accent); }
+
+#footer {
+  margin-top: 20px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+}
+.controls-hint {
+  font-size: 9px;
+  letter-spacing: 2px;
+  color: var(--text-dim);
+  text-align: center;
+  line-height: 1.8;
+}
+
+/* ── B2B INDICATOR ──────────────────────────────────────────── */
+#b2b-bar {
+  height: 3px;
+  background: var(--accent);
+  width: 0%;
+  transition: width 0.2s;
+  margin-top: 2px;
+  border-radius: 2px;
+}
+</style>
+</head>
+<body>
+
+<h1>TETRIO Clone · Phase 2</h1>
+
+<div id="game-wrap">
+
+  <!-- LEFT PANEL -->
+  <div class="panel-left">
+    <div>
+      <div class="panel-label">Hold</div>
+      <canvas id="hold-canvas" class="mini-canvas" width="90" height="65"></canvas>
+    </div>
+    <div class="stat">
+      <span class="stat-label">Score</span>
+      <span class="stat-value big" id="stat-score">0</span>
+    </div>
+    <div class="stat">
+      <span class="stat-label">Attack</span>
+      <span class="stat-value" id="stat-attack">0</span>
+    </div>
+    <div class="stat">
+      <span class="stat-label">Lines</span>
+      <span class="stat-value" id="stat-lines">0</span>
+    </div>
+    <div class="stat">
+      <span class="stat-label">B2B</span>
+      <span class="stat-value" id="stat-b2b">—</span>
+      <div id="b2b-bar"></div>
+    </div>
+    <div class="stat">
+      <span class="stat-label" id="mode-label">Time</span>
+      <span class="stat-value" id="stat-mode">0:00</span>
+    </div>
+    <div class="stat">
+      <span class="stat-label">APM</span>
+      <span class="stat-value" id="stat-apm">0</span>
+    </div>
+    <div class="stat">
+      <span class="stat-label">PPS</span>
+      <span class="stat-value" id="stat-pps">0.00</span>
+    </div>
+  </div>
+
+  <!-- BOARD -->
+  <div id="board-wrap">
+    <canvas id="board-canvas" width="280" height="560"></canvas>
+
+    <!-- Action popup (T-spin!, B2B!, etc.) -->
+    <div id="action-popup">
+      <div class="popup-line" id="pop-pc"   style="color:#f7d000">ALL CLEAR</div>
+      <div class="popup-line" id="pop-b2b"  style="color:#7c6fff">B2B</div>
+      <div class="popup-line" id="pop-spin" style="color:#b642d4"></div>
+      <div class="popup-line" id="pop-clr"  style="color:#e8e8f0"></div>
+      <div class="popup-line" id="pop-cmb"  style="color:#f7a130"></div>
+    </div>
+
+    <!-- Garbage incoming meter -->
+    <div id="garbage-meter"></div>
+
+    <div id="overlay">
+      <span class="overlay-title">TETRIO Clone · Phase 2</span>
+      <span class="overlay-sub" id="overlay-msg">T-Spins · B2B · Garbage</span>
+      <div class="btn-row">
+        <button id="btn-sprint" class="active">Sprint 40L</button>
+        <button id="btn-blitz">Blitz 2:00</button>
+        <button id="btn-sandbox">Sandbox</button>
+      </div>
+      <button id="btn-start">Start</button>
+    </div>
+  </div>
+
+  <!-- RIGHT PANEL -->
+  <div class="panel-right">
+    <div class="panel-label">Next</div>
+    <canvas id="next-canvas" class="mini-canvas" width="90" height="360"></canvas>
+  </div>
+
+</div>
+
+<div id="footer">
+  <div class="btn-row" style="margin-top:0">
+    <button id="btn-restart" style="display:none">Restart</button>
+  </div>
+  <div class="controls-hint">
+    ← → Move &nbsp;·&nbsp; ↑ CW &nbsp;·&nbsp; Z CCW &nbsp;·&nbsp; A 180° &nbsp;·&nbsp; ↓ Soft &nbsp;·&nbsp; Space Hard &nbsp;·&nbsp; C Hold &nbsp;·&nbsp; P Pause
+  </div>
+</div>
+
+<script>
+'use strict';
+
+/* ============================================================
+ * SECTION 1 — MINSTD PRNG (unchanged from Phase 1)
+ * ============================================================
+ * X(n+1) = (16807 * X(n)) mod 2147483647
+ * Uses BigInt to avoid float precision loss above 2^53.
+ */
+class MINSTD {
+  constructor(seed) {
+    this.state = (Math.abs(Math.floor(seed)) % 2147483646) + 1;
+  }
+  next() {
+    this.state = Number(
+      (BigInt(16807) * BigInt(this.state)) % BigInt(2147483647)
+    );
+    return (this.state - 1) / 2147483646;
+  }
+  nextInt(n) { return Math.floor(this.next() * n); }
+}
+
+
+/* ============================================================
+ * SECTION 2 — PIECE DEFINITIONS (unchanged from Phase 1)
+ * ============================================================ */
+const PIECES = {
+  I: { color:'#41b0d8', states:[
+    [[-1,0],[-1,1],[-1,2],[-1,3]],
+    [[-2,2],[-1,2],[0,2],[1,2]],
+    [[0,0],[0,1],[0,2],[0,3]],
+    [[-2,1],[-1,1],[0,1],[1,1]],
+  ]},
+  O: { color:'#f7d000', states:[
+    [[-1,1],[-1,2],[0,1],[0,2]],
+    [[-1,1],[-1,2],[0,1],[0,2]],
+    [[-1,1],[-1,2],[0,1],[0,2]],
+    [[-1,1],[-1,2],[0,1],[0,2]],
+  ]},
+  T: { color:'#b642d4', states:[
+    [[-1,1],[0,0],[0,1],[0,2]],
+    [[-1,1],[0,1],[0,2],[1,1]],
+    [[0,0],[0,1],[0,2],[1,1]],
+    [[-1,1],[0,0],[0,1],[1,1]],
+  ]},
+  S: { color:'#3ddc84', states:[
+    [[-1,1],[-1,2],[0,0],[0,1]],
+    [[-1,1],[0,1],[0,2],[1,2]],
+    [[0,1],[0,2],[1,0],[1,1]],
+    [[-1,0],[0,0],[0,1],[1,1]],
+  ]},
+  Z: { color:'#e84545', states:[
+    [[-1,0],[-1,1],[0,1],[0,2]],
+    [[-1,2],[0,1],[0,2],[1,1]],
+    [[0,0],[0,1],[1,1],[1,2]],
+    [[-1,1],[0,0],[0,1],[1,0]],
+  ]},
+  J: { color:'#3c6bff', states:[
+    [[-1,0],[0,0],[0,1],[0,2]],
+    [[-1,1],[-1,2],[0,1],[1,1]],
+    [[0,0],[0,1],[0,2],[1,2]],
+    [[-1,1],[0,1],[1,0],[1,1]],
+  ]},
+  L: { color:'#ff7b2e', states:[
+    [[-1,2],[0,0],[0,1],[0,2]],
+    [[-1,1],[0,1],[1,1],[1,2]],
+    [[0,0],[0,1],[0,2],[1,0]],
+    [[-1,0],[-1,1],[0,1],[1,1]],
+  ]},
+};
+const PIECE_NAMES = ['I','O','T','S','Z','J','L'];
+
+
+/* ============================================================
+ * SECTION 3 — SRS KICK TABLES (unchanged from Phase 1)
+ * ============================================================ */
+const SRS_KICKS_JLSTZ = {
+  '0>1':[[ 0,-1],[-1,-1],[2,0],[2,-1]],
+  '1>0':[[ 0, 1],[1, 1],[-2,0],[-2, 1]],
+  '1>2':[[ 0, 1],[1, 1],[-2,0],[-2, 1]],
+  '2>1':[[ 0,-1],[-1,-1],[2,0],[2,-1]],
+  '2>3':[[ 0, 1],[-1, 1],[2,0],[2, 1]],
+  '3>2':[[ 0,-1],[1,-1],[-2,0],[-2,-1]],
+  '3>0':[[ 0,-1],[1,-1],[-2,0],[-2,-1]],
+  '0>3':[[ 0, 1],[-1, 1],[2,0],[2, 1]],
+};
+const SRS_KICKS_I = {
+  '0>1':[[ 0,-2],[0, 1],[-1,-2],[2, 1]],
+  '1>0':[[ 0, 2],[0,-1],[1, 2],[-2,-1]],
+  '1>2':[[ 0,-1],[0, 2],[2,-1],[-1, 2]],
+  '2>1':[[ 0, 1],[0,-2],[-2, 1],[1,-2]],
+  '2>3':[[ 0, 2],[0,-1],[-1, 2],[2,-1]],
+  '3>2':[[ 0,-2],[0, 1],[1,-2],[-2, 1]],
+  '3>0':[[ 0, 1],[0,-2],[2, 1],[-1,-2]],
+  '0>3':[[ 0,-1],[0, 2],[-2,-1],[1, 2]],
+};
+const KICKS_180 = {
+  0:[[ 0, 0],[0,-1],[0, 1],[-1, 0],[1, 0]],
+  1:[[ 0, 0],[1, 0],[-1,0],[0, 1],[0,-1]],
+  2:[[ 0, 0],[0, 1],[0,-1],[1, 0],[-1, 0]],
+  3:[[ 0, 0],[-1,0],[1, 0],[0,-1],[0, 1]],
+};
+
+
+/* ============================================================
+ * SECTION 4 — 7-BAG RANDOMIZER (unchanged from Phase 1)
+ * ============================================================ */
+class BagRandomizer {
+  constructor(prng) {
+    this.prng = prng;
+    this.queue = [];
+    this._fillBag();
+    this._fillBag();
+  }
+  _fillBag() {
+    const bag = [...PIECE_NAMES];
+    for (let i = 6; i > 0; i--) {
+      const j = this.prng.nextInt(i + 1);
+      [bag[i], bag[j]] = [bag[j], bag[i]];
+    }
+    this.queue.push(...bag);
+  }
+  next() {
+    if (this.queue.length < 6) this._fillBag();
+    return this.queue.shift();
+  }
+  peek(n = 5) {
+    while (this.queue.length < n + 1) this._fillBag();
+    return this.queue.slice(0, n);
+  }
+}
+
+
+/* ============================================================
+ * SECTION 5 — BOARD HELPERS (unchanged from Phase 1)
+ * ============================================================ */
+const TOTAL_ROWS = 40;
+const VIS_START  = 20;
+const COLS       = 10;
+const VIS_ROWS   = 20;
+
+function createBoard() {
+  return Array.from({length: TOTAL_ROWS}, () => new Array(COLS).fill(0));
+}
+function isValid(board, cells) {
+  for (const [r, c] of cells) {
+    if (c < 0 || c >= COLS) return false;
+    if (r >= TOTAL_ROWS) return false;
+    if (r >= 0 && board[r][c]) return false;
+  }
+  return true;
+}
+function lockPiece(board, cells, color) {
+  for (const [r, c] of cells) {
+    if (r >= 0) board[r][c] = color;
+  }
+}
+function clearLines(board) {
+  let cleared = 0;
+  for (let r = TOTAL_ROWS - 1; r >= 0; r--) {
+    if (board[r].every(c => c !== 0)) {
+      board.splice(r, 1);
+      board.unshift(new Array(COLS).fill(0));
+      cleared++;
+      r++;
+    }
+  }
+  return cleared;
+}
+
+
+/* ============================================================
+ * SECTION 6 — ACTIVE PIECE (unchanged from Phase 1)
+ * ============================================================ */
+function spawnPiece(type) {
+  return { type, rot: 0, row: VIS_START - 1, col: 3 };
+}
+function getCells(piece) {
+  return PIECES[piece.type].states[piece.rot]
+    .map(([dr, dc]) => [piece.row + dr, piece.col + dc]);
+}
+function isValid2(board, cells) { return isValid(board, cells); }
+function tryMove(board, piece, dr, dc) {
+  const moved = { ...piece, row: piece.row + dr, col: piece.col + dc };
+  return isValid(board, getCells(moved)) ? moved : null;
+}
+
+/*
+ * tryRotate now also returns metadata needed for T-spin detection:
+ * { piece, kickUsed, kickIndex }
+ * kickUsed: the [dr,dc] kick that succeeded (or [0,0] for no kick)
+ * kickIndex: index in the kick array (0 = no kick / first try)
+ */
+function tryRotate(board, piece, dir) {
+  const fromRot = piece.rot;
+  const toRot   = dir === 2 ? (fromRot + 2) % 4 : ((fromRot + dir) + 4) % 4;
+  const rotated = { ...piece, rot: toRot };
+
+  if (dir === 2) {
+    for (const [dr, dc] of KICKS_180[fromRot]) {
+      const kicked = { ...rotated, row: rotated.row + dr, col: rotated.col + dc };
+      if (isValid(board, getCells(kicked)))
+        return { piece: kicked, kickUsed: [dr, dc], kickIndex: 0 };
+    }
+    return null;
+  }
+
+  const key   = `${fromRot}>${toRot}`;
+  const table = piece.type === 'I' ? SRS_KICKS_I : SRS_KICKS_JLSTZ;
+  const kicks = table[key] || [];
+
+  if (isValid(board, getCells(rotated)))
+    return { piece: rotated, kickUsed: [0, 0], kickIndex: -1 };
+
+  for (let i = 0; i < kicks.length; i++) {
+    const [dr, dc] = kicks[i];
+    const kicked = { ...rotated, row: rotated.row + dr, col: rotated.col + dc };
+    if (isValid(board, getCells(kicked)))
+      return { piece: kicked, kickUsed: [dr, dc], kickIndex: i };
+  }
+  return null;
+}
+
+function getGhost(board, piece) {
+  let ghost = { ...piece };
+  while (true) {
+    const d = { ...ghost, row: ghost.row + 1 };
+    if (!isValid(board, getCells(d))) break;
+    ghost = d;
+  }
+  return ghost;
+}
+
+
+/* ============================================================
+ * SECTION 7 — T-SPIN DETECTION
+ * ============================================================
+ *
+ * TETR.IO uses the "3-corner rule" for T-spin detection:
+ *
+ * The T-piece has 4 diagonal corners relative to its center:
+ *   front-left, front-right, back-left, back-right
+ *   (where "front" is the direction the T's bump points)
+ *
+ * FULL T-SPIN: 3 or more corners are occupied (by wall or block)
+ *   AND the last rotation used kick index 3 or 4 (the "far" kicks)
+ *   OR all 4 corners are occupied (always a full T-spin).
+ *
+ * T-SPIN MINI: 3+ corners occupied but only front 2 corners filled
+ *   (back corners are empty — the T barely squeezed in).
+ *   Minis score less: 1 line = 100pts, 2 lines = 400pts.
+ *
+ * IMMOBILE DETECTION (All-Mini mode, Phase 2 scope):
+ *   If the T cannot move in any of the 4 cardinal directions
+ *   after placement, it counts as a T-spin regardless of kicks.
+ *   TETR.IO uses this for All-Spin / All-Mini modes.
+ *   We detect it here but only apply it for T pieces.
+ *
+ * Corner layout relative to T pivot (rotation 0 = spawn):
+ *   Rot 0 (flat): front = bottom, back = top
+ *     front-left  = [+1, -1]  front-right = [+1, +1]
+ *     back-left   = [-1, -1]  back-right  = [-1, +1]
+ *
+ * The corners rotate with the piece's rotation state.
+ */
+
+// Corner offsets [dr, dc] for each T rotation state
+// [back-left, back-right, front-left, front-right]
+const T_CORNERS = [
+  // rot 0: T bump points up, flat side down
+  [[-1,-1],[-1,1],[1,-1],[1,1]],
+  // rot 1: T bump points right
+  [[-1,-1],[1,-1],[-1,1],[1,1]],
+  // rot 2: T bump points down
+  [[1,-1],[1,1],[-1,-1],[-1,1]],
+  // rot 3: T bump points left
+  [[-1,1],[1,1],[-1,-1],[1,-1]],
+];
+
+/*
+ * Front corners by rotation (indices into T_CORNERS[rot]):
+ * indices 2 and 3 are always the front pair.
+ */
+
+function isCellFilled(board, r, c) {
+  if (c < 0 || c >= COLS || r >= TOTAL_ROWS) return true;  // wall = filled
+  if (r < 0) return false;                                   // above board = empty
+  return board[r][c] !== 0;
+}
+
+/**
+ * Detect T-spin after a T-piece rotation.
+ *
+ * @param {Array} board
+ * @param {Object} piece   - The T-piece AFTER rotation
+ * @param {number} kickIndex - Index of the kick used (-1 = no kick)
+ * @returns {'tspin' | 'mini' | null}
+ */
+function detectTSpin(board, piece, kickIndex) {
+  if (piece.type !== 'T') return null;
+
+  const [pr, pc] = [piece.row, piece.col];
+  const corners  = T_CORNERS[piece.rot];
+
+  // Count filled corners
+  const filled = corners.map(([dr, dc]) => isCellFilled(board, pr + dr, pc + dc));
+  const filledCount  = filled.filter(Boolean).length;
+  const frontFilled  = filled[2] && filled[3];  // Both front corners
+  const backFilled   = filled[0] && filled[1];  // Both back corners
+
+  if (filledCount < 3) return null;  // Not enough corners — no spin
+
+  // 3+ corners filled:
+  // If both FRONT corners are filled and at least one BACK corner → full T-spin
+  // If both BACK corners are filled but not both front → T-spin Mini
+  // Kick index 3 or 4 (the "far" SRS kicks) always = full T-spin
+  if (kickIndex >= 3) return 'tspin';
+  if (frontFilled)    return 'tspin';
+  if (filledCount === 4) return 'tspin';
+  return 'mini';
+}
+
+/**
+ * Immobile detection: check if T cannot move in any 4 directions.
+ * Used as a fallback T-spin confirmation in some edge cases.
+ */
+function isImmobile(board, piece) {
+  return (
+    !tryMove(board, piece, -1, 0) &&
+    !tryMove(board, piece,  1, 0) &&
+    !tryMove(board, piece,  0,-1) &&
+    !tryMove(board, piece,  0, 1)
+  );
+}
+
+
+/* ============================================================
+ * SECTION 8 — ATTACK / GARBAGE TABLE
+ * ============================================================
+ *
+ * TETR.IO uses a custom attack table that differs from standard
+ * Tetris Guideline in several key ways:
+ *
+ * 1. MULTIPLIER COMBO SYSTEM:
+ *    Instead of a flat +1 per combo, TETR.IO uses a multiplier
+ *    that gets applied to the BASE attack. This is the
+ *    "Multiplier combo" that nerfs 4-wides heavily.
+ *
+ * 2. B2B CHARGING (Back-to-Back):
+ *    Each consecutive B2B-eligible clear adds +1 to a "surge"
+ *    counter. At B2B level 4+, a "Surge" is released worth
+ *    extra lines. The B2B bonus is +1 for levels 1-3, then
+ *    scales by sqrt-ish formula for higher levels.
+ *
+ * 3. ALL CLEAR (Perfect Clear):
+ *    Clearing the entire board awards 10 lines of attack.
+ *    This overrides any other attack calculation for that clear.
+ *
+ * BASE ATTACK TABLE (lines sent for clear type):
+ *   Single    → 0 lines
+ *   Double    → 1 line
+ *   Triple    → 2 lines
+ *   Quad      → 4 lines
+ *   T-spin 0  → 0 lines (T-spin with no clear)
+ *   T-spin 1  → 2 lines
+ *   T-spin 2  → 4 lines
+ *   T-spin 3  → 6 lines
+ *   Mini 0    → 0 lines
+ *   Mini 1    → 0 lines
+ *   Mini 2    → 1 line
+ *
+ * B2B BONUS: +1 line added to attack when B2B chain > 0
+ *
+ * COMBO MULTIPLIER TABLE (applied to final attack, not base):
+ *   Combo 0:  ×1.0  (no combo)
+ *   Combo 1:  ×1.0
+ *   Combo 2:  ×1.2
+ *   Combo 3:  ×1.4
+ *   Combo 4:  ×1.6
+ *   Combo 5+: ×1.8
+ * ============================================================
+ */
+
+// Base attack lines sent (indexed by [spinType][linesCleared])
+const BASE_ATTACK = {
+  null:   [0, 0, 1, 2, 4],   // Normal clears: single=0, double=1, triple=2, quad=4
+  tspin:  [0, 2, 4, 6],       // T-spin: 0line=0, 1line=2, 2line=4, 3line=6
+  mini:   [0, 0, 1],          // Mini:   0line=0, 1line=0, 2line=1
+};
+
+// Score table for display (not attack — just points)
+const SCORE_TABLE = {
+  null:   [0, 100, 300, 500, 800],
+  tspin:  [400, 800, 1200, 1600],
+  mini:   [100, 200, 400],
+};
+
+const COMBO_MULTIPLIER = [1.0, 1.0, 1.2, 1.4, 1.6, 1.8, 1.8];
+
+/*
+ * B2B-eligible clears: Quads and any T-spin/Mini with lines.
+ * Singles, Doubles, Triples (non-spin) break the B2B chain.
+ */
+function isB2BEligible(spinType, linesCleared) {
+  if (linesCleared === 0) return false;
+  if (spinType === 'tspin' || spinType === 'mini') return true;
+  if (linesCleared >= 4) return true;  // Quad
+  return false;
+}
+
+/**
+ * Calculate attack lines and score for a line clear event.
+ *
+ * @param {string|null} spinType  - 'tspin', 'mini', or null
+ * @param {number} linesCleared  - 1-4
+ * @param {number} b2bLevel      - current B2B chain level (0 = none)
+ * @param {number} comboCount    - current combo counter
+ * @param {boolean} isAllClear   - board is empty after clear
+ * @param {number} level         - game level (for score scaling)
+ * @returns {{ attack, score, b2bBonus, comboBonus }}
+ */
+function calcAttack(spinType, linesCleared, b2bLevel, comboCount, isAllClear, level) {
+  if (isAllClear) {
+    // All Clear overrides everything: 10 lines attack
+    return { attack: 10, score: 3000 * level, b2bBonus: 0, comboBonus: 0 };
+  }
+
+  if (linesCleared === 0) return { attack: 0, score: 0, b2bBonus: 0, comboBonus: 0 };
+
+  // Base attack
+  const table  = BASE_ATTACK[spinType] ?? BASE_ATTACK[null];
+  const idx    = Math.min(linesCleared, table.length - 1);
+  let attack   = table[idx];
+
+  // B2B bonus: +1 for any B2B chain > 0
+  let b2bBonus = 0;
+  if (b2bLevel > 0 && isB2BEligible(spinType, linesCleared)) {
+    b2bBonus = 1;
+    // Higher B2B levels add more (simplified from TETR.IO's exact table)
+    if (b2bLevel >= 4) b2bBonus = 2;
+    if (b2bLevel >= 8) b2bBonus = 3;
+  }
+  attack += b2bBonus;
+
+  // Combo multiplier (TETR.IO's multiplier system)
+  const mult     = COMBO_MULTIPLIER[Math.min(comboCount, COMBO_MULTIPLIER.length - 1)];
+  let comboBonus = 0;
+  if (comboCount >= 1 && attack > 0) {
+    const boosted = Math.floor(attack * mult);
+    comboBonus    = boosted - attack;
+    attack        = boosted;
+  }
+
+  // Score (for display)
+  const scoreTable = SCORE_TABLE[spinType] ?? SCORE_TABLE[null];
+  const scoreIdx   = Math.min(linesCleared, scoreTable.length - 1);
+  const score      = (scoreTable[scoreIdx] ?? 0) * level
+                   + b2bBonus * 200 * level
+                   + comboBonus * 50 * level;
+
+  return { attack, score, b2bBonus, comboBonus };
+}
+
+
+/* ============================================================
+ * SECTION 9 — GARBAGE SYSTEM
+ * ============================================================
+ *
+ * TETR.IO's garbage system has several interacting parts:
+ *
+ * GARBAGE COLUMN PERSISTENCE:
+ *   When garbage arrives, consecutive lines from the same attack
+ *   share the same hole column (to allow clean digging).
+ *   When a NEW attack arrives, the hole column shifts based on
+ *   the PRNG — but NOT randomly. It shifts by a "delta" that
+ *   ensures the new column is NOT the same as the last, to
+ *   avoid the hole staying in the same place forever.
+ *
+ * SICKNESS COUNTER (Scatter System):
+ *   TETR.IO tracks how many times a player has "cancelled"
+ *   (neutralized) incoming garbage without clearing their own
+ *   lines. After a threshold, the system forces the garbage
+ *   columns to scatter — each line gets a DIFFERENT hole.
+ *   This prevents indefinite stalling at the bottom.
+ *
+ * GARBAGE QUEUE:
+ *   Incoming garbage is buffered. It lands on the board when
+ *   the player places a piece. Cancelling happens during the
+ *   tick: if you send garbage while garbage is incoming, they
+ *   cancel each other (1 sent = 1 incoming cancelled).
+ *
+ * For Phase 2 solo play: we simulate garbage by adding it
+ * randomly every N seconds (to allow practising under pressure).
+ * The full send/receive loop is Phase 3 (multiplayer).
+ *
+ * GARBAGE LINE FORMAT:
+ *   A garbage line has a hole at column `garbageCol`.
+ *   All other 9 cells are filled with the garbage color (#444460).
+ */
+const GARBAGE_COLOR = '#444460';
+
+/**
+ * Choose a new garbage hole column.
+ * Ensures the new column differs from the previous one.
+ *
+ * @param {MINSTD} prng
+ * @param {number} lastCol  - previous hole column (-1 if none)
+ * @returns {number}  new hole column [0, 9]
+ */
+function nextGarbageCol(prng, lastCol) {
+  let col = prng.nextInt(COLS);
+  // If it matches the last column, shift by 1 (wrap around)
+  if (col === lastCol) col = (col + 1) % COLS;
+  return col;
+}
+
+/**
+ * Apply a batch of garbage lines to the bottom of the board.
+ * @param {Array}  board
+ * @param {number} count      - number of lines to add
+ * @param {MINSTD} prng
+ * @param {number} lastCol    - last hole column used
+ * @param {number} sickness   - sickness counter (>= SCATTER_THRESHOLD = scatter)
+ * @returns {number} the hole column used (or last used if scatter)
+ */
+const SCATTER_THRESHOLD = 8;
+
+function applyGarbage(board, count, prng, lastCol, sickness) {
+  let col = nextGarbageCol(prng, lastCol);
+
+  for (let i = 0; i < count; i++) {
+    // Scatter mode: different column per line when sick
+    if (sickness >= SCATTER_THRESHOLD) {
+      col = nextGarbageCol(prng, col);
+    }
+
+    // Shift board up by 1
+    board.shift();
+
+    // Insert garbage line at the bottom
+    const line = new Array(COLS).fill(GARBAGE_COLOR);
+    line[col] = 0;  // The hole
+    board.push(line);
+  }
+
+  return col;
+}
+
+/**
+ * Check if the board is completely empty (All Clear).
+ */
+function isAllClear(board) {
+  for (let r = 0; r < TOTAL_ROWS; r++) {
+    if (board[r].some(c => c !== 0)) return false;
+  }
+  return true;
+}
+
+
+/* ============================================================
+ * SECTION 10 — SCORING / GRAVITY (same as Phase 1)
+ * ============================================================ */
+const GRAVITY = [48,43,38,33,28,23,18,13,8,6,5,5,5,4,4,4,3,3,3,2,2,2,2,2,2,2,2,2,2,1];
+function getGravity(level) { return GRAVITY[Math.min(level - 1, GRAVITY.length - 1)]; }
+
+const LOCK_DELAY_TICKS = 30;
+const LOCK_RESET_MAX   = 15;
+const LOCK_FLOOR_MAX   = 60;
+
+
+/* ============================================================
+ * SECTION 11 — GAME STATE
+ * ============================================================ */
+const TICK_MS = 1000 / 60;
+
+let state = 'idle';
+let mode  = 'sprint';
+
+let board, prng, bag;
+let active, held;
+let canHold;
+
+// Lock delay
+let lockTimer, lockResets, lockFloor;
+
+// Gravity
+let gravTimer;
+
+// Scoring & attack
+let score, lines, level, combo, b2bLevel;
+let totalAttack;
+
+// Garbage state (solo sandbox simulation)
+let garbageQueue;   // Array of { count } waiting to land
+let lastGarbageCol;
+let sickness;
+let sandboxGarbageTimer;  // Ticks until next auto-garbage in sandbox
+
+// Spin tracking
+let lastSpinType;   // 'tspin' | 'mini' | null — set on rotation, cleared on move
+let lastKickIndex;  // kick index that was used for last rotation
+
+// Action popup state
+let popupTimers = {};
+
+// Stats
+let piecesPlaced, startTime, blitzTime, sprintDone, paused, rafId, lastTime, accumulator;
+
+
+/* ============================================================
+ * SECTION 12 — INIT
+ * ============================================================ */
+function initGame() {
+  const seed = Date.now();
+  prng = new MINSTD(seed);
+  bag  = new BagRandomizer(prng);
+
+  board          = createBoard();
+  active         = spawnPiece(bag.next());
+  held           = null;
+  canHold        = true;
+
+  lockTimer      = 0;
+  lockResets     = 0;
+  lockFloor      = 0;
+  gravTimer      = 0;
+
+  score          = 0;
+  lines          = 0;
+  level          = 1;
+  combo          = 0;
+  b2bLevel       = 0;
+  totalAttack    = 0;
+
+  garbageQueue   = [];
+  lastGarbageCol = -1;
+  sickness       = 0;
+  sandboxGarbageTimer = 0;
+
+  lastSpinType   = null;
+  lastKickIndex  = -1;
+
+  piecesPlaced   = 0;
+  startTime      = performance.now();
+  blitzTime      = 120000;
+  sprintDone     = false;
+  paused         = false;
+}
+
+
+/* ============================================================
+ * SECTION 13 — HOLD
+ * ============================================================ */
+function doHold() {
+  if (!canHold) return;
+  canHold = false;
+  lastSpinType  = null;
+  lastKickIndex = -1;
+  if (held === null) {
+    held = active.type;
+    spawnNext();
+  } else {
+    const tmp = held;
+    held   = active.type;
+    active = spawnPiece(tmp);
+    resetLockDelay();
+  }
+}
+
+function spawnNext() {
+  active = spawnPiece(bag.next());
+  resetLockDelay();
+  gravTimer     = 0;
+  lastSpinType  = null;
+  lastKickIndex = -1;
+  if (!isValid(board, getCells(active))) endGame();
+}
+
+function resetLockDelay() {
+  lockTimer  = 0;
+  lockResets = 0;
+  lockFloor  = 0;
+  canHold    = true;
+}
+
+
+/* ============================================================
+ * SECTION 14 — HARD DROP & LOCK
+ * ============================================================
+ *
+ * The lock sequence now includes:
+ *  1. T-spin detection using corner rule + kick metadata
+ *  2. Line clear
+ *  3. All Clear check
+ *  4. B2B chain update
+ *  5. Attack/score calculation
+ *  6. Garbage queue deduction (cancelling)
+ *  7. Sickness counter update
+ *  8. Action popup trigger
+ *  9. Garbage receipt (from queue after cancellation)
+ * ============================================================
+ */
+function doHardDrop() {
+  const ghost     = getGhost(board, active);
+  const dropped   = ghost.row - active.row;
+  score          += dropped * 2;
+  active          = ghost;
+  lockPieceNow();
+}
+
+function lockPieceNow() {
+  const cells = getCells(active);
+
+  // ── T-SPIN DETECTION (before locking) ─────────────────────
+  //
+  // We detect the spin type NOW, before the piece is locked,
+  // because we need to check corner occupancy against the board
+  // WITHOUT the active piece's cells in it.
+  // lastSpinType is set by doRotate() and cleared by doMove().
+  // If the player moved after rotating, spin is voided.
+  const spinType = lastSpinType;  // May be null if player moved after rotating
+  const kickIdx  = lastKickIndex;
+
+  // Refine: if it's a T-spin candidate, run the corner check now
+  let finalSpin = null;
+  if (spinType && active.type === 'T') {
+    finalSpin = detectTSpin(board, active, kickIdx);
+  }
+
+  // Lock the piece
+  lockPiece(board, cells, PIECES[active.type].color);
+
+  // Check lock-out
+  if (cells.every(([r]) => r < VIS_START)) { endGame(); return; }
+
+  // ── LINE CLEAR ─────────────────────────────────────────────
+  const cleared = clearLines(board);
+  lines += cleared;
+  level  = Math.floor(lines / 10) + 1;
+
+  // ── ALL CLEAR ──────────────────────────────────────────────
+  const ac = cleared > 0 && isAllClear(board);
+
+  // ── B2B CHAIN UPDATE ───────────────────────────────────────
+  //
+  // B2B-eligible: Quad or any T-spin/Mini with lines cleared.
+  // Ineligible clear (single/double/triple non-spin): resets chain.
+  let b2bBroken = false;
+  if (cleared > 0) {
+    if (isB2BEligible(finalSpin, cleared)) {
+      b2bLevel++;
+    } else {
+      if (b2bLevel > 0) b2bBroken = true;
+      b2bLevel = 0;
+    }
+  }
+
+  // ── COMBO ──────────────────────────────────────────────────
+  if (cleared > 0) {
+    combo++;
+  } else {
+    combo = 0;
+  }
+
+  // ── ATTACK CALCULATION ─────────────────────────────────────
+  const { attack, score: pts, b2bBonus, comboBonus } =
+    calcAttack(finalSpin, cleared, b2bLevel - (isB2BEligible(finalSpin, cleared) ? 1 : 0),
+               combo - (cleared > 0 ? 1 : 0), ac, level);
+
+  score       += pts;
+  totalAttack += attack;
+
+  // ── GARBAGE CANCELLATION ───────────────────────────────────
+  //
+  // If we sent attack lines, cancel that many from the incoming
+  // garbage queue (front first). Any leftover attack is "sent"
+  // (Phase 3 will actually transmit it to opponents).
+  let remainingAttack = attack;
+  while (remainingAttack > 0 && garbageQueue.length > 0) {
+    const front = garbageQueue[0];
+    if (front.count <= remainingAttack) {
+      remainingAttack -= front.count;
+      garbageQueue.shift();
+    } else {
+      front.count     -= remainingAttack;
+      remainingAttack  = 0;
+    }
+  }
+
+  // Sickness: if player cancelled garbage without clearing own lines,
+  // increment sickness. Clearing lines resets it.
+  if (cleared === 0 && attack === 0) {
+    // No clear, no attack — if garbage landed this piece, sickness++
+    // (simplified: just track consecutive no-clear placements)
+    sickness = Math.min(sickness + 1, SCATTER_THRESHOLD + 2);
+  } else {
+    sickness = 0;
+  }
+
+  // ── RECEIVE REMAINING GARBAGE ──────────────────────────────
+  // In solo sandbox: immediately apply queued garbage that wasn't cancelled
+  if (mode === 'sandbox' && garbageQueue.length > 0) {
+    for (const g of garbageQueue) {
+      lastGarbageCol = applyGarbage(board, g.count, prng, lastGarbageCol, sickness);
+    }
+    garbageQueue = [];
+  }
+
+  // ── POPUP / FEEDBACK ───────────────────────────────────────
+  showPopup(finalSpin, cleared, b2bLevel, combo, b2bBroken, ac, comboBonus);
+
+  piecesPlaced++;
+
+  // ── WIN CONDITIONS ─────────────────────────────────────────
+  if (mode === 'sprint' && lines >= 40) { sprintDone = true; endGame(); return; }
+
+  spawnNext();
+  updateStats();
+  updateGarbageMeter();
+}
+
+
+/* ============================================================
+ * SECTION 15 — ACTION POPUP DISPLAY
+ * ============================================================
+ *
+ * Shows floating text above/beside the board indicating what
+ * just happened: T-Spin Double!, B2B x5, Quad, etc.
+ *
+ * Uses CSS classes to animate in, then fades out after a delay.
+ */
+const CLEAR_NAMES = ['', 'Single', 'Double', 'Triple', 'Quad'];
+
+function showPopup(spinType, cleared, b2bLvl, cmb, b2bBroken, ac, comboBonus) {
+  clearTimeout(popupTimers.hide);
+
+  const popPC   = document.getElementById('pop-pc');
+  const popB2B  = document.getElementById('pop-b2b');
+  const popSpin = document.getElementById('pop-spin');
+  const popClr  = document.getElementById('pop-clr');
+  const popCmb  = document.getElementById('pop-cmb');
+
+  // Reset all
+  [popPC, popB2B, popSpin, popClr, popCmb].forEach(el => el.classList.remove('show'));
+
+  if (cleared === 0) return;
+
+  // All Clear
+  if (ac) popPC.classList.add('show');
+
+  // B2B
+  if (b2bLvl > 1) {
+    popB2B.textContent = `B2B ×${b2bLvl - 1}`;
+    popB2B.classList.add('show');
+  }
+
+  // Spin label
+  if (spinType === 'tspin') {
+    const labels = ['T-Spin', 'T-Spin Single', 'T-Spin Double', 'T-Spin Triple'];
+    popSpin.textContent = labels[Math.min(cleared, 3)];
+    popSpin.classList.add('show');
+  } else if (spinType === 'mini') {
+    popSpin.textContent = cleared === 1 ? 'T-Mini Single' : 'T-Mini Double';
+    popSpin.classList.add('show');
+  }
+
+  // Clear name
+  if (!spinType && cleared > 0) {
+    popClr.textContent = CLEAR_NAMES[cleared] || '';
+    if (cleared === 4) popClr.style.color = '#41b0d8';
+    else popClr.style.color = '#e8e8f0';
+    popClr.classList.add('show');
+  }
+
+  // Combo
+  if (cmb >= 2) {
+    popCmb.textContent = `${cmb - 1} combo`;
+    popCmb.classList.add('show');
+  }
+
+  popupTimers.hide = setTimeout(() => {
+    [popPC, popB2B, popSpin, popClr, popCmb].forEach(el => el.classList.remove('show'));
+  }, 1800);
+}
+
+
+/* ============================================================
+ * SECTION 16 — GARBAGE METER UI
+ * ============================================================ */
+function updateGarbageMeter() {
+  const meter = document.getElementById('garbage-meter');
+  meter.innerHTML = '';
+  const total = garbageQueue.reduce((s, g) => s + g.count, 0);
+  const maxRows = VIS_ROWS;
+  const show = Math.min(total, maxRows);
+  for (let i = 0; i < show; i++) {
+    const block = document.createElement('div');
+    block.className = 'garbage-block';
+    const h = Math.max(2, Math.floor(560 / maxRows) - 1);
+    block.style.height = h + 'px';
+    meter.appendChild(block);
+  }
+}
+
+
+/* ============================================================
+ * SECTION 17 — PHYSICS TICK
+ * ============================================================
+ *
+ * Extended from Phase 1 to include:
+ *  - Sandbox garbage timer (drops 1-4 lines every ~5 seconds)
+ *  - DAS processing
+ *  - Blitz timer
+ * ============================================================ */
+function tick() {
+  if (state !== 'playing' || paused) return;
+
+  // Gravity
+  gravTimer++;
+  if (gravTimer >= getGravity(level)) {
+    gravTimer = 0;
+    const dropped = tryMove(board, active, 1, 0);
+    if (dropped) { active = dropped; lastSpinType = null; }
+  }
+
+  // Lock delay
+  const resting = !tryMove(board, active, 1, 0);
+  if (resting) {
+    lockTimer++;
+    lockFloor++;
+    if (lockTimer >= LOCK_DELAY_TICKS || lockFloor >= LOCK_FLOOR_MAX) {
+      lockPieceNow();
+      return;
+    }
+  } else {
+    lockTimer = 0;
+  }
+
+  // Sandbox: auto-generate incoming garbage every ~300 ticks (5 seconds)
+  if (mode === 'sandbox') {
+    sandboxGarbageTimer++;
+    if (sandboxGarbageTimer >= 300) {
+      sandboxGarbageTimer = 0;
+      const amt = 1 + prng.nextInt(4);  // 1-4 lines
+      garbageQueue.push({ count: amt });
+      updateGarbageMeter();
+    }
+  }
+
+  // Blitz
+  if (mode === 'blitz') {
+    blitzTime -= TICK_MS;
+    if (blitzTime <= 0) { blitzTime = 0; endGame(); }
+  }
+
+  updateStats();
+}
+
+
+/* ============================================================
+ * SECTION 18 — INPUT HANDLING
+ * ============================================================
+ *
+ * KEY CHANGE FROM PHASE 1:
+ *   doRotate() now stores the kick metadata so lockPieceNow()
+ *   can use it for T-spin detection. doMove() clears the spin
+ *   type (moving after rotating voids the T-spin).
+ */
+const DAS_DELAY = 10;
+const ARR       = 2;
+const keys      = {};
+const dasCounters = { ArrowLeft: 0, ArrowRight: 0 };
+const dasActive   = { ArrowLeft: false, ArrowRight: false };
+
+document.addEventListener('keydown', e => {
+  if (e.repeat) return;
+  keys[e.code] = true;
+  if (state !== 'playing') return;
+  if (paused && e.code !== 'KeyP') return;
+  switch (e.code) {
+    case 'ArrowLeft':  doMove(0, -1); dasCounters.ArrowLeft = 0; dasActive.ArrowLeft = false; break;
+    case 'ArrowRight': doMove(0,  1); dasCounters.ArrowRight = 0; dasActive.ArrowRight = false; break;
+    case 'ArrowDown':  doSoftDrop(); break;
+    case 'ArrowUp':    doRotate(1); break;
+    case 'KeyZ':       doRotate(-1); break;
+    case 'KeyA':       doRotate(2); break;
+    case 'Space':      e.preventDefault(); doHardDrop(); break;
+    case 'KeyC': case 'ShiftLeft': case 'ShiftRight': doHold(); break;
+    case 'KeyP':       togglePause(); break;
+  }
+});
+
+document.addEventListener('keyup', e => {
+  keys[e.code] = false;
+  if (e.code === 'ArrowLeft')  { dasCounters.ArrowLeft  = 0; dasActive.ArrowLeft  = false; }
+  if (e.code === 'ArrowRight') { dasCounters.ArrowRight = 0; dasActive.ArrowRight = false; }
+});
+
+function doMove(dr, dc) {
+  const moved = tryMove(board, active, dr, dc);
+  if (moved) {
+    active = moved;
+    // Moving VOIDS the T-spin — the spin must be the last action before lock
+    lastSpinType  = null;
+    lastKickIndex = -1;
+    if (lockResets < LOCK_RESET_MAX) { lockTimer = 0; lockResets++; }
+  }
+}
+
+function doRotate(dir) {
+  const result = tryRotate(board, active, dir);
+  if (result) {
+    active        = result.piece;
+    lastSpinType  = active.type === 'T' ? 'candidate' : null;  // Confirmed in detectTSpin
+    lastKickIndex = result.kickIndex;
+    if (lockResets < LOCK_RESET_MAX) { lockTimer = 0; lockResets++; }
+  }
+}
+
+function doSoftDrop() {
+  const dropped = tryMove(board, active, 1, 0);
+  if (dropped) {
+    active = dropped;
+    score += 1;
+    gravTimer = 0;
+    lastSpinType = null;  // Soft drop voids spin
+  }
+}
+
+function processDAS() {
+  for (const dir of ['ArrowLeft', 'ArrowRight']) {
+    if (keys[dir]) {
+      dasCounters[dir]++;
+      if (!dasActive[dir]) {
+        if (dasCounters[dir] >= DAS_DELAY) { dasActive[dir] = true; dasCounters[dir] = 0; }
+      } else {
+        if (dasCounters[dir] >= ARR) { dasCounters[dir] = 0; doMove(0, dir === 'ArrowLeft' ? -1 : 1); }
+      }
+    }
+  }
+  if (keys['ArrowDown']) doSoftDrop();
+}
+
+
+/* ============================================================
+ * SECTION 19 — GAME LOOP (unchanged from Phase 1)
+ * ============================================================ */
+function startLoop() {
+  lastTime    = performance.now();
+  accumulator = 0;
+  rafId       = requestAnimationFrame(loop);
+}
+
+function loop(now) {
+  if (state !== 'playing') return;
+  let delta = now - lastTime;
+  lastTime  = now;
+  if (delta > 250) delta = 250;
+  accumulator += delta;
+  while (accumulator >= TICK_MS) {
+    processDAS();
+    tick();
+    accumulator -= TICK_MS;
+  }
+  render();
+  rafId = requestAnimationFrame(loop);
+}
+
+
+/* ============================================================
+ * SECTION 20 — RENDERING
+ * ============================================================ */
+const boardCanvas = document.getElementById('board-canvas');
+const boardCtx    = boardCanvas.getContext('2d');
+const holdCanvas  = document.getElementById('hold-canvas');
+const holdCtx     = holdCanvas.getContext('2d');
+const nextCanvas  = document.getElementById('next-canvas');
+const nextCtx     = nextCanvas.getContext('2d');
+const CELL = 28;
+
+function lighten(hex, amount) {
+  if (!hex || hex[0] !== '#') return hex;
+  const num = parseInt(hex.replace('#',''), 16);
+  const r = Math.min(255, (num >> 16) + Math.round(255 * amount));
+  const g = Math.min(255, ((num >> 8) & 0xff) + Math.round(255 * amount));
+  const b = Math.min(255, (num & 0xff) + Math.round(255 * amount));
+  return `rgb(${r},${g},${b})`;
+}
+
+function drawCell(ctx, r, c, color, alpha = 1) {
+  const x = c * CELL, y = r * CELL;
+  ctx.globalAlpha = alpha;
+  ctx.fillStyle   = color;
+  ctx.fillRect(x + 1, y + 1, CELL - 2, CELL - 2);
+  ctx.fillStyle = lighten(color, 0.25);
+  ctx.fillRect(x + 2, y + 2, CELL - 6, 3);
+  ctx.fillRect(x + 2, y + 2, 3, CELL - 6);
+  ctx.globalAlpha = 1;
+}
+
+function render() { renderBoard(); renderHold(); renderNext(); }
+
+function renderBoard() {
+  const ctx = boardCtx;
+  ctx.clearRect(0, 0, boardCanvas.width, boardCanvas.height);
+
+  ctx.strokeStyle = '#1e1e2a';
+  ctx.lineWidth   = 0.5;
+  for (let r = 0; r <= VIS_ROWS; r++) {
+    ctx.beginPath(); ctx.moveTo(0, r*CELL); ctx.lineTo(COLS*CELL, r*CELL); ctx.stroke();
+  }
+  for (let c = 0; c <= COLS; c++) {
+    ctx.beginPath(); ctx.moveTo(c*CELL, 0); ctx.lineTo(c*CELL, VIS_ROWS*CELL); ctx.stroke();
+  }
+
+  for (let r = VIS_START; r < TOTAL_ROWS; r++) {
+    for (let c = 0; c < COLS; c++) {
+      if (board[r][c]) drawCell(ctx, r - VIS_START, c, board[r][c]);
+    }
+  }
+
+  if (state !== 'playing') return;
+
+  // Ghost
+  const ghost = getGhost(board, active);
+  ctx.globalAlpha = 0.2;
+  for (const [r, c] of getCells(ghost)) {
+    if (r >= VIS_START) {
+      ctx.fillStyle   = PIECES[active.type].color;
+      ctx.fillRect(c*CELL+1, (r-VIS_START)*CELL+1, CELL-2, CELL-2);
+      ctx.strokeStyle = PIECES[active.type].color;
+      ctx.lineWidth   = 1.5;
+      ctx.strokeRect(c*CELL+1, (r-VIS_START)*CELL+1, CELL-2, CELL-2);
+    }
+  }
+  ctx.globalAlpha = 1;
+
+  // Active piece (highlight if T-spin candidate)
+  const isSpinCandidate = lastSpinType === 'candidate' && active.type === 'T';
+  for (const [r, c] of getCells(active)) {
+    if (r >= VIS_START) {
+      drawCell(ctx, r - VIS_START, c, PIECES[active.type].color);
+      if (isSpinCandidate) {
+        // Draw a subtle purple glow border on T-spin candidate
+        ctx.strokeStyle = '#e0a0ff';
+        ctx.lineWidth   = 1;
+        ctx.strokeRect(c*CELL+1, (r-VIS_START)*CELL+1, CELL-2, CELL-2);
+      }
+    }
+  }
+}
+
+function renderMiniPiece(ctx, type, canvasW, canvasH, alpha = 1) {
+  if (!type) return;
+  ctx.clearRect(0, 0, canvasW, canvasH);
+  const cells  = PIECES[type].states[0];
+  const color  = PIECES[type].color;
+  const minC   = Math.min(...cells.map(([,c])=>c));
+  const maxC   = Math.max(...cells.map(([,c])=>c));
+  const minR   = Math.min(...cells.map(([r])=>r));
+  const maxR   = Math.max(...cells.map(([r])=>r));
+  const pieceW = (maxC - minC + 1) * CELL;
+  const pieceH = (maxR - minR + 1) * CELL;
+  const ox     = Math.floor((canvasW - pieceW) / 2) - minC * CELL;
+  const oy     = Math.floor((canvasH - pieceH) / 2) - minR * CELL;
+  ctx.globalAlpha = alpha;
+  for (const [r, c] of cells) {
+    const x = ox + c * CELL, y = oy + r * CELL;
+    ctx.fillStyle = color;
+    ctx.fillRect(x+1, y+1, CELL-2, CELL-2);
+    ctx.fillStyle = lighten(color, 0.25);
+    ctx.fillRect(x+2, y+2, CELL-6, 3);
+    ctx.fillRect(x+2, y+2, 3, CELL-6);
+  }
+  ctx.globalAlpha = 1;
+}
+
+function renderHold() {
+  holdCtx.clearRect(0, 0, holdCanvas.width, holdCanvas.height);
+  if (held) renderMiniPiece(holdCtx, held, 90, 65, canHold ? 1 : 0.4);
+}
+
+function renderNext() {
+  nextCtx.clearRect(0, 0, nextCanvas.width, nextCanvas.height);
+  if (!bag) return;
+  const preview = bag.peek(5);
+  const slotH   = 72;
+  for (let i = 0; i < preview.length; i++) {
+    const type   = preview[i];
+    const cells  = PIECES[type].states[0];
+    const color  = PIECES[type].color;
+    const minC   = Math.min(...cells.map(([,c])=>c));
+    const maxC   = Math.max(...cells.map(([,c])=>c));
+    const minR   = Math.min(...cells.map(([r])=>r));
+    const maxR   = Math.max(...cells.map(([r])=>r));
+    const pieceW = (maxC - minC + 1) * CELL;
+    const pieceH = (maxR - minR + 1) * CELL;
+    const ox     = Math.floor((90 - pieceW) / 2) - minC * CELL;
+    const oy     = i * slotH + Math.floor((slotH - pieceH) / 2) - minR * CELL;
+
+    nextCtx.globalAlpha = 1 - i * 0.15;
+    for (const [r, c] of cells) {
+      const x = ox + c * CELL, y = oy + r * CELL;
+      nextCtx.fillStyle = color;
+      nextCtx.fillRect(x+1, y+1, CELL-2, CELL-2);
+      nextCtx.fillStyle = lighten(color, 0.25);
+      nextCtx.fillRect(x+2, y+2, CELL-6, 3);
+      nextCtx.fillRect(x+2, y+2, 3, CELL-6);
+    }
+    nextCtx.globalAlpha = 1;
+    if (i < 4) {
+      nextCtx.strokeStyle = '#2a2a3a'; nextCtx.lineWidth = 0.5;
+      nextCtx.beginPath();
+      nextCtx.moveTo(4, (i+1)*slotH); nextCtx.lineTo(86, (i+1)*slotH);
+      nextCtx.stroke();
+    }
+  }
+}
+
+
+/* ============================================================
+ * SECTION 21 — STATS
+ * ============================================================ */
+function formatTime(ms) {
+  const t   = Math.max(0, ms);
+  const min = Math.floor(t / 60000);
+  const sec = Math.floor((t % 60000) / 1000);
+  const cs  = Math.floor((t % 1000) / 10);
+  return `${min}:${String(sec).padStart(2,'0')}.${String(cs).padStart(2,'0')}`;
+}
+
+function updateStats() {
+  document.getElementById('stat-score').textContent  = score.toLocaleString();
+  document.getElementById('stat-attack').textContent = totalAttack;
+  document.getElementById('stat-lines').textContent  = lines;
+  document.getElementById('stat-b2b').textContent    = b2bLevel > 0 ? `×${b2bLevel}` : '—';
+
+  const bar    = document.getElementById('b2b-bar');
+  const pct    = Math.min(b2bLevel / 8, 1) * 100;
+  bar.style.width = pct + '%';
+
+  const elapsed = performance.now() - startTime;
+  if (mode === 'sprint') {
+    document.getElementById('mode-label').textContent = 'Time';
+    document.getElementById('stat-mode').textContent  = formatTime(elapsed);
+  } else {
+    document.getElementById('mode-label').textContent = 'Left';
+    document.getElementById('stat-mode').textContent  = formatTime(blitzTime);
+  }
+
+  const sec = elapsed / 1000;
+  document.getElementById('stat-pps').textContent = sec > 0 ? (piecesPlaced / sec).toFixed(2) : '0.00';
+  const apm = sec > 0 ? Math.round((totalAttack / sec) * 60) : 0;
+  document.getElementById('stat-apm').textContent = apm;
+}
+
+
+/* ============================================================
+ * SECTION 22 — LIFECYCLE
+ * ============================================================ */
+function startGame() {
+  state = 'playing';
+  document.getElementById('overlay').style.display   = 'none';
+  document.getElementById('btn-restart').style.display = 'inline-block';
+  initGame();
+  startLoop();
+  render();
+}
+
+function togglePause() {
+  if (state !== 'playing') return;
+  paused = !paused;
+  if (!paused) { lastTime = performance.now(); rafId = requestAnimationFrame(loop); }
+}
+
+function endGame() {
+  state = 'over';
+  cancelAnimationFrame(rafId);
+  const elapsed = performance.now() - startTime;
+  document.getElementById('overlay').style.display = 'flex';
+
+  let msg = sprintDone
+    ? `Sprint! ${formatTime(elapsed)}`
+    : mode === 'blitz'
+      ? `${score.toLocaleString()} pts · ${totalAttack} atk`
+      : 'Game Over';
+
+  document.getElementById('overlay-msg').textContent = msg;
+  document.getElementById('btn-start').style.display = 'none';
+  render();
+}
+
+document.getElementById('btn-start').addEventListener('click', startGame);
+
+document.getElementById('btn-restart').addEventListener('click', () => {
+  cancelAnimationFrame(rafId);
+  state = 'idle';
+  document.getElementById('btn-start').style.display   = 'inline-block';
+  document.getElementById('overlay-msg').textContent   = 'Ready?';
+  document.getElementById('overlay').style.display     = 'flex';
+  board = createBoard();
+  render();
+});
+
+document.getElementById('btn-sprint').addEventListener('click', () => {
+  mode = 'sprint';
+  document.getElementById('btn-sprint').classList.add('active');
+  document.getElementById('btn-blitz').classList.remove('active');
+  document.getElementById('btn-sandbox').classList.remove('active');
+});
+document.getElementById('btn-blitz').addEventListener('click', () => {
+  mode = 'blitz';
+  document.getElementById('btn-blitz').classList.add('active');
+  document.getElementById('btn-sprint').classList.remove('active');
+  document.getElementById('btn-sandbox').classList.remove('active');
+});
+document.getElementById('btn-sandbox').addEventListener('click', () => {
+  mode = 'sandbox';
+  document.getElementById('btn-sandbox').classList.add('active');
+  document.getElementById('btn-sprint').classList.remove('active');
+  document.getElementById('btn-blitz').classList.remove('active');
+});
+
+board = createBoard();
+render();
+</script>
+</body>
+</html>
