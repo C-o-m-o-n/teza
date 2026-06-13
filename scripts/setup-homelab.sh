@@ -86,7 +86,7 @@ if [ ! -f "$ARCHIVE" ]; then
   tar xzf "$ARCHIVE"
 fi
 
-./config.sh \
+RUNNER_ALLOW_RUNASROOT=1 ./config.sh \
   --url "https://github.com/C-o-m-o-n/teza" \
   --token "$RUNNER_TOKEN" \
   --name "$(hostname)-homelab" \
@@ -95,8 +95,8 @@ fi
   --unattended \
   --replace
 
-./svc.sh install root
-./svc.sh start
+RUNNER_ALLOW_RUNASROOT=1 ./svc.sh install root
+RUNNER_ALLOW_RUNASROOT=1 ./svc.sh start
 
 echo ""
 echo "▶ [5/5] Verifying runner..."
