@@ -25,7 +25,9 @@ const WebSocket = require('ws');
 const http      = require('http');
 const fs        = require('fs');
 const path      = require('path');
-const { createEngine, stepEngine, tickEngine } = require('../shared/engine');
+const Database  = require('better-sqlite3');
+const bcrypt    = require('bcryptjs');
+const { createEngine, stepEngine, tickEngine, hashEngine } = require('../shared/engine');
 
 const PORT         = process.env.PORT || 3000;
 const DATA_DIR     = path.join(__dirname, '../data');
@@ -76,11 +78,7 @@ function handleApi(req, res) {
 
   // GET /api/leaderboard
   if (url === '/api/leaderboard' && req.method === 'GET') {
-    const board = Object.values(playerStore)
-      .filter(p => p.gamesPlayed >= 10 && p.rd <= RD_HIDDEN)
-      .sort((a,b) => b.tr - a.tr)
-      .slice(0, 50)
-      .map(sanitizeProfile);
+    const board = stmtLeaderboard.all(RD_HIDDEN).map(_dbRowToProfile).map(sanitizeProfile);
     res.end(JSON.stringify(board));
     return;
   }
@@ -241,57 +239,119 @@ function calcTR(r, rd) {
 /* ============================================================
  * §4  PLAYER PROFILE STORE
  * ============================================================
- *
- * Flat JSON store — no database needed for Phase 4.
- * Loaded into memory at startup, written to disk after changes.
- *
- * Profile shape:
- * {
- *   username, createdAt,
- *   r, rd, vol, tr,          ← Glicko-2 fields + display TR
- *   gamesPlayed, wins, losses,
- *   totalAttack, totalLines,
- *   bestAPM, bestPPS,
- *   replayIds: string[]       ← last 20 replay IDs
- * }
+ * SQLite database store using better-sqlite3.
  * ============================================================ */
-let playerStore = {};
+const DB_FILE = path.join(DATA_DIR, 'teza.db');
+const db = new Database(DB_FILE);
 
-function loadPlayers() {
-  try {
-    if (fs.existsSync(PLAYERS_FILE))
-      playerStore = JSON.parse(fs.readFileSync(PLAYERS_FILE,'utf8'));
-    console.log(`[Store] ${Object.keys(playerStore).length} players loaded`);
-  } catch(e) {
-    console.error('[Store] Load failed:', e.message);
-    playerStore = {};
-  }
-}
-function savePlayers() {
-  try { fs.writeFileSync(PLAYERS_FILE, JSON.stringify(playerStore,null,2)); }
-  catch(e) { console.error('[Store] Save failed:', e.message); }
-}
-function getPlayer(username) { return playerStore[username.toLowerCase()] || null; }
-function createPlayer(username) {
-  const key = username.toLowerCase();
-  if (playerStore[key]) return playerStore[key];
-  playerStore[key] = {
-    username, createdAt: new Date().toISOString(),
-    r: R_INITIAL, rd: RD_INITIAL, vol: VOL_INITIAL,
-    tr: calcTR(R_INITIAL, RD_INITIAL),
-    gamesPlayed:0, wins:0, losses:0,
-    totalAttack:0, totalLines:0,
-    bestAPM:0, bestPPS:0,
-    replayIds:[],
+db.pragma('journal_mode = WAL');
+
+// Create table if not exists
+db.exec(`
+  CREATE TABLE IF NOT EXISTS players (
+    username TEXT PRIMARY KEY,
+    password_hash TEXT,
+    created_at TEXT,
+    r REAL,
+    rd REAL,
+    vol REAL,
+    tr REAL,
+    games_played INTEGER,
+    wins INTEGER,
+    losses INTEGER,
+    total_attack INTEGER,
+    total_lines INTEGER,
+    best_apm REAL,
+    best_pps REAL,
+    replay_ids TEXT
+  )
+`);
+
+const stmtGetPlayer = db.prepare('SELECT * FROM players WHERE username = ?');
+const stmtInsertPlayer = db.prepare(`
+  INSERT INTO players (
+    username, password_hash, created_at,
+    r, rd, vol, tr,
+    games_played, wins, losses,
+    total_attack, total_lines, best_apm, best_pps,
+    replay_ids
+  ) VALUES (
+    ?, ?, ?,
+    ?, ?, ?, ?,
+    ?, ?, ?,
+    ?, ?, ?, ?,
+    ?
+  )
+`);
+const stmtUpdatePlayer = db.prepare(`
+  UPDATE players SET
+    r = ?, rd = ?, vol = ?, tr = ?,
+    games_played = ?, wins = ?, losses = ?,
+    total_attack = ?, total_lines = ?, best_apm = ?, best_pps = ?,
+    replay_ids = ?
+  WHERE username = ?
+`);
+const stmtLeaderboard = db.prepare(`
+  SELECT * FROM players
+  WHERE games_played >= 10 AND rd <= ?
+  ORDER BY tr DESC
+  LIMIT 50
+`);
+
+function _dbRowToProfile(row) {
+  if (!row) return null;
+  return {
+    username: row.username,
+    password_hash: row.password_hash,
+    createdAt: row.created_at,
+    r: row.r,
+    rd: row.rd,
+    vol: row.vol,
+    tr: row.tr,
+    gamesPlayed: row.games_played,
+    wins: row.wins,
+    losses: row.losses,
+    totalAttack: row.total_attack,
+    totalLines: row.total_lines,
+    bestAPM: row.best_apm,
+    bestPPS: row.best_pps,
+    replayIds: JSON.parse(row.replay_ids || '[]')
   };
-  savePlayers();
-  return playerStore[key];
 }
-function getOrCreate(username) { return getPlayer(username) || createPlayer(username); }
+
+function getPlayer(username) {
+  return _dbRowToProfile(stmtGetPlayer.get(username.toLowerCase()));
+}
+
+function createPlayer(username, password_hash) {
+  const key = username.toLowerCase();
+  const now = new Date().toISOString();
+  const tr = calcTR(R_INITIAL, RD_INITIAL);
+  stmtInsertPlayer.run(
+    key, password_hash, now,
+    R_INITIAL, RD_INITIAL, VOL_INITIAL, tr,
+    0, 0, 0,
+    0, 0, 0, 0,
+    '[]'
+  );
+  return getPlayer(key);
+}
+
+function savePlayer(p) {
+  stmtUpdatePlayer.run(
+    p.r, p.rd, p.vol, p.tr,
+    p.gamesPlayed, p.wins, p.losses,
+    p.totalAttack, p.totalLines, p.bestAPM, p.bestPPS,
+    JSON.stringify(p.replayIds),
+    p.username.toLowerCase()
+  );
+}
 
 function recordResult(winnerName, loserName, wStats, lStats, replayId) {
-  const W = getOrCreate(winnerName);
-  const L = getOrCreate(loserName);
+  const W = getPlayer(winnerName);
+  const L = getPlayer(loserName);
+  if (!W || !L) return null;
+
   const wPre = { r:W.r, rd:W.rd };
   const lPre = { r:L.r, rd:L.rd };
 
@@ -313,7 +373,8 @@ function recordResult(winnerName, loserName, wStats, lStats, replayId) {
   L.bestPPS = Math.max(L.bestPPS, lStats.pps||0);
   if (replayId) { L.replayIds.unshift(replayId); L.replayIds = L.replayIds.slice(0,20); }
 
-  savePlayers();
+  savePlayer(W);
+  savePlayer(L);
   console.log(`[Rating] ${winnerName} TR: ${Math.round(wPre.r)} → ${Math.round(W.tr)}`);
   console.log(`[Rating] ${loserName}  TR: ${Math.round(lPre.r)} → ${Math.round(L.tr)}`);
   return { wOld: wPre, lOld: lPre, wNew: W, lNew: L };
@@ -335,7 +396,7 @@ function sanitizeProfile(p) {
   };
 }
 
-loadPlayers();
+
 
 /* ============================================================
  * §5  MATCHMAKING QUEUE
@@ -476,7 +537,7 @@ class Room {
         playerIndex: i,
         opponent:    opp.username||opp.id,
         ranked:      this.ranked,
-        opponentProfile: opp.username ? sanitizeProfile(getOrCreate(opp.username)) : null,
+        opponentProfile: opp.username ? sanitizeProfile(getPlayer(opp.username)) : null,
       });
     }
     this._broadcastSpecs('spectatorMatchStart',{ players:this.replay.meta.players });
@@ -507,6 +568,17 @@ class Room {
       if (evs.length) {
         evs.forEach(e=>this.replay.events.push({tick:this.replay.tick,pi:i,e}));
         this._handleEvents(i,evs);
+      }
+    }
+
+    if (this.replay.tick % 60 === 0) {
+      for (let i=0;i<2;i++) {
+        if (!this.deadFlags[i]) {
+          this.players[i].send('syncHash', {
+            tick: this.replay.tick,
+            hash: hashEngine(this.engines[i])
+          });
+        }
       }
     }
   }
@@ -686,10 +758,24 @@ wss.on('connection',(ws,req)=>{
       /* ── AUTH ─────────────────────────────────────────────── */
       case 'login':{
         const u=(data.username||'').trim().slice(0,20);
+        const pw=(data.password||'').trim();
         if(!u||!/^[a-zA-Z0-9_\-]+$/.test(u)){
           conn.send('loginError',{msg:'Invalid username. Letters, numbers, _ or - only.'}); break;
         }
-        const profile=getOrCreate(u);
+        if(pw.length < 4){
+          conn.send('loginError',{msg:'Password must be at least 4 characters.'}); break;
+        }
+        
+        let profile = getPlayer(u);
+        if (profile) {
+          if (!bcrypt.compareSync(pw, profile.password_hash)) {
+            conn.send('loginError',{msg:'Incorrect password.'}); break;
+          }
+        } else {
+          const hash = bcrypt.hashSync(pw, 10);
+          profile = createPlayer(u, hash);
+        }
+
         conn.username=u;
         conn.send('loginOk',{username:u,profile:sanitizeProfile(profile)});
         break;
@@ -743,6 +829,33 @@ wss.on('connection',(ws,req)=>{
         if(room) room.handleInput(conn,data.input);
         break;
       }
+      case 'requestSync':{
+        const room=rooms.get(connRoom.get(conn.id));
+        if (room && room.state==='playing') {
+          const idx = room.players.indexOf(conn);
+          if (idx !== -1) {
+            const eng = room.engines[idx];
+            conn.send('fullSync', {
+              tick: room.replay.tick,
+              state: {
+                board: eng.board,
+                active: eng.active,
+                held: eng.held,
+                canHold: eng.canHold,
+                score: eng.score,
+                lines: eng.lines,
+                level: eng.level,
+                combo: eng.combo,
+                b2b: eng.b2b,
+                attack: eng.attack,
+                garbageQueue: eng.garbageQueue,
+                sickness: eng.sickness
+              }
+            });
+          }
+        }
+        break;
+      }
 
       /* ── PROFILES / LEADERBOARD ───────────────────────────── */
       case 'getProfile':{
@@ -753,9 +866,7 @@ wss.on('connection',(ws,req)=>{
         break;
       }
       case 'getLeaderboard':{
-        const board=Object.values(playerStore)
-          .filter(p=>p.gamesPlayed>=10&&p.rd<=RD_HIDDEN)
-          .sort((a,b)=>b.tr-a.tr).slice(0,50).map(sanitizeProfile);
+        const board = stmtLeaderboard.all(RD_HIDDEN).map(_dbRowToProfile).map(sanitizeProfile);
         conn.send('leaderboard',{entries:board});
         break;
       }

@@ -651,6 +651,15 @@
                     autocomplete="off"
                 />
             </div>
+            <div class="field">
+                <label>Password</label>
+                <input
+                    type="password"
+                    id="password-input"
+                    placeholder="ENTER PASSWORD"
+                    maxlength="50"
+                />
+            </div>
             <button class="primary" id="btn-login">Play</button>
             <button id="btn-solo-login" class="btn-solo" style="font-size: 9px; margin-top: 4px;">Solo Practice (no server)</button>
             <div id="login-status">Connect to server first...</div>
@@ -1029,7 +1038,8 @@
                         getCells,
                         getGhost,
                         tryMove,
-                        createBoard,
+                        tryRotate,
+                        hashEngine,
                     } = window.TezaEngine;
 
                     /* ============================================================
@@ -1303,10 +1313,13 @@
                      * §4  STATE
                      * ============================================================ */
                     let ribbon = null,
-                        myUsername = null,
+                        myUsername = sessionStorage.getItem("teza-username") || null,
+                        myPassword = sessionStorage.getItem("teza-password") || null,
                         myProfile = null;
                     let localEng = null,
                         remoteEng = null;
+                    let engineHistory = new Map();
+                    let clientTick = 0;
                     let gameActive = false,
                         isSpectator = false,
                         isRanked = false;
@@ -1317,7 +1330,9 @@
                     let pendingAction = null,
                         lastReplayId = null;
                     let soloMode = false,
-                        soloInterval = null;
+                        soloInterval = null,
+                        ticker = null,
+                        gameState = "lobby";
                     const TICK_MS = 1000 / 60;
 
                     // canvas refs
@@ -1411,17 +1426,6 @@
                      * §7  RESULT SCREEN
                      * ============================================================ */
                     function showResult(data) {
-                        /*
-                         * POST-MATCH RESULT SCREEN
-                         * Shows: win/loss, TR delta (if ranked), stats comparison,
-                         * replay download button, play-again button.
-                         *
-                         * TR DELTA DISPLAY:
-                         *   Shows "+142 TR" in green for wins, "-87 TR" in red for losses.
-                         *   Hidden if match was casual or player isn't logged in.
-                         *   After a calibration match (RD still high), shows
-                         *   "Calibrating..." instead of a delta.
-                         */
                         const {
                             won,
                             myStats,
@@ -1432,8 +1436,6 @@
                             replayId,
                         } = data;
                         lastReplayId = replayId;
-
-
 
                         const deltaEl = document.getElementById("tr-delta");
                         if (trDelta != null) {
@@ -1496,7 +1498,7 @@
                     document.addEventListener("keydown", (e) => {
                         if (e.repeat) return;
                         keys[e.code] = true;
-                        if (!gameActive || !localEng || localEng.dead || isSpectator)
+                        if (gameState !== "playing" || !localEng || localEng.dead || isSpectator)
                             return;
                         handleKey(e.code);
                         e.preventDefault();
@@ -1568,42 +1570,15 @@
                         if (keys["ArrowDown"]) sendInput({ type: "softDrop" });
                     }
 
-                    function sendInput(input) {
-                        const evs = stepEngine(localEng, input);
-                        handleLocalEvents(evs);
-                        if (ribbon && !soloMode) ribbon.send("input", { input });
-                    }
-
-                    function handleLocalEvents(evs) {
-                        for (const ev of evs) {
-                            if (ev.type === "attack")
-                                showPopup(
-                                    ["lp-pc", "lp-b2b", "lp-sp", "lp-cl", "lp-cm"],
-                                    ev.spin,
-                                    ev.lines,
-                                    ev.b2b,
-                                    ev.combo,
-                                    ev.allClear,
-                                );
-                             if (ev.type === "gameOver") {
-                                 gameActive = false;
-                                 showOv("local", "You Lost");
-                                 if (soloInterval) {
-                                     clearInterval(soloInterval);
-                                     soloInterval = null;
-                                 }
-                             }
-                        }
-                        updateLocalStats();
-                        updateGMeter(lGm, localEng.garbageQueue);
-                    }
-
                     /* ============================================================
                      * §9  GAME LOOP
                      * ============================================================ */
+                    let lastTime = 0, accumulator = 0, rafId = null;
                     function startLoop() {
                         lastTime = performance.now();
                         accumulator = 0;
+                        clientTick = 0;
+                        engineHistory.clear();
                         if (!rafId) rafId = requestAnimationFrame(loop);
                     }
                     function stopLoop() {
@@ -1618,19 +1593,51 @@
                         accumulator += delta;
                         while (accumulator >= TICK_MS) {
                             if (
-                                gameActive &&
+                                gameState === "playing" &&
                                 localEng &&
                                 !localEng.dead &&
                                 !isSpectator
                             ) {
                                 processDAS();
+                                clientTick++;
                                 const evs = tickEngine(localEng);
-                                handleLocalEvents(evs);
+                                if (evs.length) handleEngineEvents(localEng, evs);
+                                
+                                engineHistory.set(clientTick, hashEngine(localEng));
+                                if (engineHistory.size > 120) {
+                                    engineHistory.delete(clientTick - 120);
+                                }
                             }
                             accumulator -= TICK_MS;
                         }
                         renderAll();
                         rafId = requestAnimationFrame(loop);
+                    }
+
+                    function sendInput(input) {
+                        const evs = stepEngine(localEng, input);
+                        handleEngineEvents(localEng, evs);
+                        if (ribbon && !soloMode) ribbon.send("input", { input, tick: clientTick });
+                    }
+
+                    function handleEngineEvents(eng, evs) {
+                        for (const ev of evs) {
+                            if (ev.type === "attack")
+                                showPopup(
+                                    ["lp-pc", "lp-b2b", "lp-sp", "lp-cl", "lp-cm"],
+                                    ev.spin,
+                                    ev.lines,
+                                    ev.b2b,
+                                    ev.combo,
+                                    ev.allClear,
+                                );
+                             if (ev.type === "gameOver") {
+                                 gameState = "over";
+                                 showOv("local", "You Lost");
+                             }
+                        }
+                        updateLocalStats();
+                        updateGMeter(lGm, eng.garbageQueue);
                     }
 
                     function renderAll() {
@@ -1718,13 +1725,14 @@
 
                         ribbon.on("hello", ({ id }) => {
                             document.getElementById("local-id").textContent = id;
-                            // Auto-login if we have a username from this session
-                            if (myUsername)
-                                ribbon.send("login", { username: myUsername });
+                            if (myUsername && myPassword)
+                                ribbon.send("login", { username: myUsername, password: myPassword });
                         });
 
                         ribbon.on("loginOk", ({ username, profile }) => {
-                            myUsername = username;
+                            sessionStorage.setItem("teza-username", username);
+                            sessionStorage.setItem("teza-password", myPassword);
+                            myProfile = profile;
                             updateProfileCard(profile);
                             ribbon.send("getLeaderboard");
                             showScreen("lobby-screen");
@@ -1788,7 +1796,6 @@
                                 document
                                     .getElementById("queue-panel")
                                     .classList.remove("show");
-                                // Show opponent profile info if available
                                 if (opponentProfile) {
                                     const trStr =
                                         opponentProfile.tr != null
@@ -1799,7 +1806,7 @@
                                 }
                                 localEng = createEngine(seed);
                                 remoteEng = null;
-                                gameActive = false;
+                                gameState = "pregame";
                                 startTime = performance.now();
                                 showOv("local", "Get Ready...");
                                 showScreen("game-screen");
@@ -1809,18 +1816,37 @@
                         );
 
                         ribbon.on("matchLive", () => {
-                            gameActive = true;
+                            gameState = "playing";
                             hideOv("local");
+                            startLoop();
                         });
 
-                        // Spectator board snapshot — drives opponent rendering for spectators
-                        // AND provides opponent data for player 2's remote board
+                        ribbon.on("syncHash", ({ tick, hash }) => {
+                            if (gameState !== "playing" || !localEng) return;
+                            let found = false;
+                            for (const localHash of engineHistory.values()) {
+                                if (localHash === hash) {
+                                    found = true;
+                                    break;
+                                }
+                            }
+                            if (!found) {
+                                console.warn("Desync detected! Requesting full sync...");
+                                ribbon.send("requestSync");
+                            }
+                        });
+
+                        ribbon.on("fullSync", ({ state }) => {
+                            if (gameState !== "playing" || !localEng) return;
+                            console.log("Applying full sync from server...");
+                            Object.assign(localEng, state);
+                            engineHistory.clear();
+                        });
+
                         ribbon.on(
                             "boardSnapshot",
                             ({ boards, held, active, stats, players }) => {
                                 if (isSpectator) {
-                                    // For spectators: use board[0] as left, board[1] as right
-                                    // Inject boards into fake engine objects for renderBoard()
                                     if (!localEng)
                                         localEng = {
                                             board: createBoard(),
@@ -1854,7 +1880,6 @@
                                     if (stats[0]) updateLocalStats();
                                     if (stats[1]) updateRemoteStats(stats[1]);
                                 } else {
-                                    // For players: opponent snapshot drives remote display only
                                     if (!remoteEng)
                                         remoteEng = {
                                             board: createBoard(),
@@ -1888,7 +1913,7 @@
                         });
 
                         ribbon.on("matchOver", (data) => {
-                            gameActive = false;
+                            gameState = "over";
                             if (localEng) localEng.dead = true;
                             showOv("local", data.won ? "🏆 You Win!" : "You Lost");
                             showOv(
@@ -1981,24 +2006,34 @@
                         }
                     }
 
-                    // LOGIN
                     document
                         .getElementById("btn-login")
                         .addEventListener("click", () => {
                             const u = document
                                 .getElementById("username-input")
                                 .value.trim();
-                            if (!u) {
+                            const p = document
+                                .getElementById("password-input")
+                                .value.trim();
+                            if (!u || !p) {
                                 document.getElementById("login-status").textContent =
-                                    "Enter a username";
+                                    "Enter a username and password";
                                 return;
                             }
                             document.getElementById("login-status").textContent =
                                 "Connecting...";
-                            connectAndDo(() => ribbon.send("login", { username: u }));
+                            myUsername = u;
+                            myPassword = p;
+                            connectAndDo(() => ribbon.send("login", { username: u, password: p }));
                         });
                     document
                         .getElementById("username-input")
+                        .addEventListener("keydown", (e) => {
+                            if (e.key === "Enter")
+                                document.getElementById("password-input").focus();
+                        });
+                    document
+                        .getElementById("password-input")
                         .addEventListener("keydown", (e) => {
                             if (e.key === "Enter")
                                 document.getElementById("btn-login").click();

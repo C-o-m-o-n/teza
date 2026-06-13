@@ -501,13 +501,30 @@ function tickEngine(eng) {
   return events;
 }
 
+function hashEngine(eng) {
+  let h = 0;
+  for (let r=0; r<TOTAL_ROWS; r++) {
+    for (let c=0; c<COLS; c++) {
+      if (eng.board[r][c]) h = (h * 31 + eng.board[r][c].charCodeAt(1)) | 0;
+    }
+  }
+  h = (h * 31 + eng.score) | 0;
+  h = (h * 31 + eng.lines) | 0;
+  if (eng.active) {
+    h = (h * 31 + eng.active.row) | 0;
+    h = (h * 31 + eng.active.col) | 0;
+    h = (h * 31 + eng.active.rot) | 0;
+  }
+  return h;
+}
+
 /* ============================================================
  * EXPORTS — returned from the IIFE factory function
  * ============================================================ */
 return {
   MINSTD, BagRandomizer, PIECES, PIECE_NAMES,
   COLS, VIS_ROWS, VIS_START, TOTAL_ROWS, GARBAGE_COL,
-  createEngine, stepEngine, tickEngine,
+  createEngine, stepEngine, tickEngine, hashEngine,
   getCells, getGhost, tryMove, tryRotate, createBoard,
 };
 
