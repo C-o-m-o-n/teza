@@ -1,0 +1,22 @@
+# Dependencies
+node_modules/
+
+# Production runtime data (live server state — never overwrite on deploy)
+data/players.json
+data/replays/
+
+# PM2 logs
+logs/
+*.log
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Editor
+.vscode/
+.idea/
+
+# Environment
+.env
+.env.*
