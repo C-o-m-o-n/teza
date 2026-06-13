@@ -9,33 +9,69 @@ on:
 
 jobs:
   deploy:
-    name: Deploy TEZA
-    runs-on: self-hosted   # ← your homelab runner label
-
+    runs-on: ubuntu-latest
     steps:
-      - name: Pull latest code
+      - name: Install Cloudflare Client & Configure SSH
         run: |
-          cd ~/teza
-          git fetch origin
-          git reset --hard origin/main
+          sudo mkdir -p /usr/local/bin
+          sudo curl -L https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 \
+            -o /usr/local/bin/cloudflared
+          sudo chmod +x /usr/local/bin/cloudflared
 
-      - name: Install production dependencies
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
+          echo -e "Host teza.comonhq.com\n  ProxyCommand /usr/local/bin/cloudflared access ssh --hostname %h\n  StrictHostKeyChecking no" \
+            >> ~/.ssh/config
+
+          echo "${{ secrets.SSH_KEY }}" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+
+      - name: Deploy to Homelab via SSH
         run: |
-          cd ~/teza
-          pnpm install --prod --frozen-lockfile
+          ssh -i ~/.ssh/id_ed25519 root@teza.comonhq.com << 'EOF'
+            APP_DIR="/root/teza"
+            REPO_URL="https://github.com/C-o-m-o-n/teza.git"
+            REMOTE="origin"
+            BRANCH="main"
 
-      - name: Ensure logs directory exists
-        run: mkdir -p ~/teza/logs
+            if [ ! -d "$APP_DIR" ]; then
+              echo "Directory $APP_DIR does not exist. Cloning..."
+              mkdir -p "$APP_DIR"
+              cd "$APP_DIR"
+              git clone --depth 1 "$REPO_URL" .
+              git checkout "$BRANCH"
+            else
+              cd "$APP_DIR"
+              if [ ! -d ".git" ]; then
+                echo "No git repo found. Re-cloning..."
+                rm -rf *
+                git clone --depth 1 "$REPO_URL" .
+                git checkout "$BRANCH"
+              else
+                echo "Fetching and resetting..."
+                git fetch "$REMOTE" "$BRANCH"
+                git reset --hard "$REMOTE"/"$BRANCH"
+              fi
+            fi
 
-      - name: Restart server with PM2
-        run: |
-          cd ~/teza
-          pm2 restart ecosystem.config.js --update-env || pm2 start ecosystem.config.js
-          pm2 save
+            echo "Installing production dependencies..."
+            pnpm install --prod --frozen-lockfile
 
-      - name: Health check
-        run: |
-          echo "Waiting for server to be ready..."
-          sleep 3
-          curl --silent --fail --retry 5 --retry-delay 2 http://localhost:3000 > /dev/null
-          echo "✅ TEZA is up and responding on localhost:3000"
+            mkdir -p logs data/replays
+
+            # Seed players.json on first deploy
+            if [ ! -f data/players.json ]; then
+              echo "{}" > data/players.json
+              echo "Created empty data/players.json"
+            fi
+
+            echo "Restarting TEZA with PM2..."
+            pm2 restart ecosystem.config.js --update-env || pm2 start ecosystem.config.js
+            pm2 save
+
+            sleep 3
+            systemctl status teza.service --no-pager 2>/dev/null || true
+            curl --silent --fail http://localhost:3000 > /dev/null \
+              && echo "✅ TEZA is live on localhost:3000" \
+              || echo "⚠️  Server not yet responding — check: pm2 logs teza"
+          EOF
