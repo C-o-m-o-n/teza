@@ -2,38 +2,25 @@
 
 > **teza.ke &nbsp;·&nbsp; Built in Kenya 🇰🇪**
 
-A competitive multiplayer block-stacking game — a faithful reimplementation of [TETR.IO](https://tetr.io) mechanics built from publicly available reverse-engineering documentation.
+A competitive multiplayer block-stacking game — a faithful re-implementation of [TETR.IO](https://tetr.io) mechanics built from publicly available reverse-engineering documentation, community format specs, and official replay schemas.
 
 *Teza* is Swahili for **"to play"**.
 
-> **AI Disclosure:** This project was designed and implemented in collaboration with [Claude](https://claude.ai) (Anthropic, Claude Sonnet 4.6). All architecture, documentation, and source code were produced through a directed conversation between the project author and the AI assistant. Claude contributed system design, algorithm implementation, protocol engineering, inline documentation, and this README. Every non-trivial decision is explained in the phase docs and inline code comments.
+> **AI Disclosure:** This project was designed and implemented in collaboration with [Claude](https://claude.ai) (Anthropic, Claude Sonnet 4.6). All architecture, documentation, and source code were produced through a directed conversation between the project author and the AI. Claude contributed system design, algorithm implementation, protocol engineering, rating math, and documentation. Every decision is explained in the phase docs and inline comments.
 
 ---
 
-## Quick Start (Phase 3 — Multiplayer)
+## Quick Start
 
 ```bash
 npm install
 npm start
-# Open http://localhost:3000 in two tabs
-# Tab 1: Create Room → share the 6-char code
-# Tab 2: Enter code → Join → match starts
+# Open http://localhost:3000 in two browser tabs
+# Each tab: enter a username → Create Room / Join Room
+# Or: both click "Find Ranked Match" to be paired by TR
 ```
 
-No build step. Node.js ≥ 18 required.
-
----
-
-## Project Goal
-
-Build a complete TETR.IO clone in documented phases — each fully playable — using only public information:
-
-- Official TETR.IO `.ttr` / `.ttrm` replay format spec
-- Community reverse-engineering (Poyo's Ribbon protocol docs, awesome-tetrio)
-- TetrisWiki documentation on guideline mechanics
-- osk's (the developer's) public Discord messages
-
-No decompilation. No proprietary access. No ToS violations.
+Node.js ≥ 18 required. No build step. No database.
 
 ---
 
@@ -41,46 +28,51 @@ No decompilation. No proprietary access. No ToS violations.
 
 | Phase | Status | Scope |
 |---|---|---|
-| **Phase 1** | ✅ Complete | Solo engine: MINSTD PRNG, SRS, lock delay, Sprint/Blitz |
-| **Phase 2** | ✅ Complete | T-spins, B2B chains, garbage system, attack table, Sandbox |
+| **Phase 1** | ✅ Complete | Solo engine: MINSTD PRNG, SRS+180° kicks, lock delay, Sprint/Blitz |
+| **Phase 2** | ✅ Complete | T-spins, B2B chains, attack table, garbage system, Sandbox |
 | **Phase 3** | ✅ Complete | Ribbon WebSocket, 1v1 multiplayer, room system, client-side prediction |
-| **Phase 4** | 🔧 Planned | Glicko-2 / TR rating, matchmaking, spectator mode, replays |
+| **Phase 4** | ✅ Complete | Glicko-2 ratings, profiles, matchmaking, spectator mode, replays |
+| **Phase 5** | 🔧 Planned | Auth hardening, database, mobile input, tournament brackets |
 
 ---
 
 ## Architecture
 
 ```
-teza-phase3/
+teza/
 ├── shared/engine.js   ← Deterministic game core (Node.js + browser)
-├── server/server.js   ← Authoritative server + Ribbon protocol
-├── client/index.html  ← Browser client + rendering + input
-└── package.json
+├── server/server.js   ← Authoritative server + Ribbon + ratings
+├── client/index.html  ← Browser client: lobby, game, spectator, results
+└── data/
+    ├── players.json   ← All player profiles + Glicko-2 ratings
+    └── replays/       ← .teza match replays (one file per game)
 ```
 
-### The Determinism Principle
+### Core Principles
 
-The entire game — piece order, garbage holes, board state — flows from a single **MINSTD PRNG** seeded per match:
+**Determinism:** A single MINSTD PRNG seeded per match drives all randomness (piece order, garbage holes). `{ seed, inputs[] }` reconstructs any game exactly.
 
-```
-X(n+1) = (16807 × X(n)) mod 2147483647
-```
+**Shared Engine:** `engine.js` runs identically on server (Node.js) and browser. Server validates inputs authoritatively; client predicts locally for zero-latency feel.
 
-This means `{ seed, inputs[] }` is enough to reconstruct any game. Replays, anti-cheat, and spectating all follow from this.
+**Ribbon Protocol:** Every WebSocket message carries `{ t, s, a, d }`. Both sides buffer 100 sent packets. Reconnects replay missed packets from the buffer — matches survive brief disconnects.
 
-### Ribbon Protocol (Simplified)
+**Glicko-2 + TR:** Full Glicko-2 rating with TETR.IO's community-documented Tetra Rating display formula. TR hidden until RD ≤ 100.
 
-Every WebSocket message carries a sequence/ack envelope:
+---
 
-```json
-{ "t": "input", "s": 42, "a": 38, "d": { "input": { "type": "hardDrop" } } }
-```
+## File Index
 
-Both sides buffer the last 100 sent packets. On reconnect, the client sends its last `a` (ack ID) and the server replays any missed packets — games survive brief disconnects without desyncing.
-
-### Client-Side Prediction
-
-Inputs are applied to the **local engine immediately** for zero-latency feel, then forwarded to the server. The server is authoritative on conflicts (garbage, game-over, opponent state).
+| File | Description |
+|---|---|
+| `engine.js` | Shared game engine (PRNG, pieces, SRS, physics, attack) |
+| `teza-phase4-server.js` | Phase 4 server (rename to `server/server.js`) |
+| `teza-phase4-client.html` | Phase 4 browser client |
+| `package.json` | npm config — `npm start` runs the server |
+| `README.md` | This file |
+| `PHASE1.md` | MINSTD PRNG, SRS, fixed timestep, board system |
+| `PHASE2.md` | T-spin detection, B2B chains, attack table, garbage |
+| `PHASE3.md` | Ribbon protocol, shared engine, client prediction, rooms |
+| `PHASE4.md` | Glicko-2, TR formula, matchmaking, spectator, replays |
 
 ---
 
@@ -91,21 +83,11 @@ Inputs are applied to the **local engine immediately** for zero-latency feel, th
 | `← →` | Move |
 | `↑` | Rotate CW |
 | `Z` | Rotate CCW |
-| `A` | Rotate 180° |
+| `A` | Rotate 180° (TEZA / TETR.IO custom) |
 | `↓` | Soft drop |
 | `Space` | Hard drop |
 | `C` / `Shift` | Hold |
 | `P` | Pause |
-
----
-
-## Documentation
-
-| File | Contents |
-|---|---|
-| [`PHASE1.md`](./PHASE1.md) | MINSTD PRNG, SRS, fixed timestep, board coordinate system |
-| [`PHASE2.md`](./PHASE2.md) | T-spin detection, B2B chains, attack table, garbage sickness |
-| [`PHASE3.md`](./PHASE3.md) | Ribbon protocol, shared engine, client prediction, room system |
 
 ---
 
@@ -120,13 +102,15 @@ Inputs are applied to the **local engine immediately** for zero-latency feel, th
 | [awesome-tetrio](https://github.com/Sup3rFire/awesome-tetrio) | Community resource index |
 | Poyo's TETR.IO Bot Docs | Ribbon protocol, garbage PRNG ordering |
 | TETR.IO Discord (archived) | Attack table, 180° kicks, sickness system |
+| Mark Glickman (2012) | Glicko-2 algorithm |
+| TETR.IO Discord (archived) | TR display formula |
 
 ---
 
 ## License
 
-Fan reimplementation for educational purposes.  
-TETR.IO is created by osk and is not affiliated with this project.  
+Fan re-implementation for educational purposes.
+TETR.IO is created by osk and is not affiliated with this project.
 Tetris® is a trademark of The Tetris Company.
 
 ---
