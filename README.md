@@ -32,6 +32,7 @@ Node.js ≥ 18 required. No build step. No database.
 | **Phase 2** | ✅ Complete | T-spins, B2B chains, attack table, garbage system, Sandbox |
 | **Phase 3** | ✅ Complete | Ribbon WebSocket, 1v1 multiplayer, room system, client-side prediction |
 | **Phase 4** | ✅ Complete | Glicko-2 ratings, profiles, matchmaking, spectator mode, replays |
+| **v1.0.0** | ✅ Released | Solo Practice mode, input isolation, stability & cleanup |
 | **Phase 5** | 🔧 Planned | Auth hardening, database, mobile input, tournament brackets |
 
 ---
@@ -64,15 +65,27 @@ teza/
 
 | File | Description |
 |---|---|
-| `engine.js` | Shared game engine (PRNG, pieces, SRS, physics, attack) |
-| `teza-phase4-server.js` | Phase 4 server (rename to `server/server.js`) |
-| `teza-phase4-client.html` | Phase 4 browser client |
-| `package.json` | npm config — `npm start` runs the server |
+| `shared/engine.js` | Shared game engine (PRNG, pieces, SRS, physics, attack) |
+| `server/server.js` | Authoritative game server + Ribbon protocol + ratings |
+| `client/index.html` | Browser client — lobby, solo, multiplayer, spectator, results |
+| `data/players.json` | Persistent player profiles + Glicko-2 ratings |
+| `data/replays/` | `.teza` match replay files (one per game) |
+| `package.json` | npm/pnpm config — `npm start` runs the server |
 | `README.md` | This file |
-| `PHASE1.md` | MINSTD PRNG, SRS, fixed timestep, board system |
-| `PHASE2.md` | T-spin detection, B2B chains, attack table, garbage |
-| `PHASE3.md` | Ribbon protocol, shared engine, client prediction, rooms |
+| `CHANGELOG.md` | Release history |
+| `DOCUMENTATION.md` | Deep-dive: engine, protocol, rating math |
 | `PHASE4.md` | Glicko-2, TR formula, matchmaking, spectator, replays |
+
+---
+
+## Solo Practice
+
+Play immediately without creating an account. Click **Solo Practice** on the login screen, or **Solo** in the lobby.
+
+- Full game engine running locally — no server required
+- No garbage injection — pure sandbox for practice
+- All controls, SRS rotation, and mechanics identical to multiplayer
+- Press **Leave** to return to lobby at any time
 
 ---
 

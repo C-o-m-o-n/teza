@@ -117,7 +117,7 @@ Server → Spectator (every 250ms):
 
 ```json
 {
-  "version": "0.4.0",
+  "version": "1.0.0",
   "seed": 1234567890,
   "inputs": [
     { "tick": 42,  "pi": 0, "input": { "type": "hardDrop" } },
