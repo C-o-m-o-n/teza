@@ -1702,7 +1702,7 @@
                      * ============================================================ */
                     function connectRibbon() {
                         if (ribbon) return;
-                        ribbon = new RibbonClient(`ws://${location.host}`);
+                        ribbon = new RibbonClient(`${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}`);
 
                         ribbon.on("_connected", () => {
                             document.getElementById("conn-dot").classList.add("on");
