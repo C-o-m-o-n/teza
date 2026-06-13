@@ -1,918 +1,2132 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="en">
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>TEZA — Play</title>
-<style>
-/*
+    <head>
+        <meta charset="UTF-8" />
+        <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+        <title>TEZA — teza.ke</title>
+        <style>
+            /*
  * ============================================================
- * TEZA — Phase 3 Client
+ * TEZA — Phase 4 Client
  * ============================================================
- * Multiplayer 1v1 with Ribbon WebSocket protocol.
- * Client-side prediction: inputs apply locally immediately,
- * server state is authoritative on conflict.
- * ============================================================
- */
-:root {
-  --bg:       #08080e;
-  --surface:  #0f0f18;
-  --surface2: #181824;
-  --border:   #252535;
-  --text:     #e8e8f0;
-  --dim:      #5a5a7a;
-  --accent:   #7c6fff;
-  --danger:   #ff4c4c;
-  --success:  #3ddc84;
-  --warn:     #f7a130;
-  --teza:     #7c6fff;
-
-  font-family: 'Courier New', monospace;
-  color: var(--text);
-}
-*{box-sizing:border-box;margin:0;padding:0;}
-body{background:var(--bg);min-height:100vh;display:flex;flex-direction:column;align-items:center;padding:16px;user-select:none;}
-
-/* ── BRAND HEADER ─────────────────────────────────────────── */
-#brand{
-  font-size:28px;font-weight:900;letter-spacing:8px;
-  color:var(--teza);margin-bottom:4px;
-}
-#tagline{font-size:9px;letter-spacing:3px;color:var(--dim);margin-bottom:20px;}
-
-/* ── LOBBY ────────────────────────────────────────────────── */
-#lobby{
-  display:flex;flex-direction:column;align-items:center;
-  gap:14px;width:320px;
-}
-#lobby h2{font-size:10px;letter-spacing:3px;color:var(--dim);}
-.input-row{display:flex;gap:8px;width:100%;}
-input[type=text]{
-  flex:1;background:var(--surface2);border:1px solid var(--border);
-  color:var(--text);font-family:inherit;font-size:13px;
-  letter-spacing:2px;padding:10px 12px;outline:none;text-transform:uppercase;
-}
-input[type=text]:focus{border-color:var(--accent);}
-button{
-  background:var(--surface2);border:1px solid var(--border);
-  color:var(--text);font-family:inherit;font-size:10px;
-  letter-spacing:2px;text-transform:uppercase;padding:10px 16px;
-  cursor:pointer;transition:background .15s,border-color .15s;white-space:nowrap;
-}
-button:hover{background:var(--border);border-color:var(--accent);}
-button.primary{border-color:var(--accent);color:var(--accent);}
-#status-line{
-  font-size:10px;letter-spacing:2px;color:var(--dim);
-  min-height:18px;text-align:center;
-}
-#room-code-display{
-  font-size:32px;letter-spacing:8px;color:var(--accent);
-  display:none;
-}
-.divider{width:100%;border:none;border-top:1px solid var(--border);margin:4px 0;}
-
-/* ── GAME LAYOUT ──────────────────────────────────────────── */
-#game{display:none;flex-direction:column;align-items:center;gap:8px;}
-#boards{display:flex;gap:24px;align-items:flex-start;}
-
-/* ── PLAYER UNIT (board + panels) ────────────────────────── */
-.player-unit{display:flex;gap:10px;align-items:flex-start;position:relative;}
-.player-unit.local .board-wrap{order:1;}  /* local: left panel, board, right panel */
-.player-unit.local .panel-left{order:0;}
-.player-unit.local .panel-right{order:2;}
-
-/* ── OPPONENT UNIT ────────────────────────────────────────── */
-.player-unit.remote{transform:scale(0.75);transform-origin:top left;}
-
-/* ── PANELS ───────────────────────────────────────────────── */
-.panel-left{width:88px;display:flex;flex-direction:column;gap:12px;}
-.panel-right{width:88px;display:flex;flex-direction:column;gap:8px;}
-.p-label{font-size:8px;letter-spacing:2px;text-transform:uppercase;color:var(--dim);margin-bottom:3px;}
-.mini-canvas{background:var(--surface);border:1px solid var(--border);display:block;}
-.stat{display:flex;flex-direction:column;gap:1px;}
-.stat-label{font-size:8px;letter-spacing:2px;text-transform:uppercase;color:var(--dim);}
-.stat-val{font-size:18px;font-weight:bold;letter-spacing:1px;}
-.stat-val.big{font-size:22px;}
-#b2b-bar,#r-b2b-bar{height:2px;background:var(--accent);width:0%;border-radius:2px;transition:width .2s;margin-top:2px;}
-
-/* ── BOARD WRAP ───────────────────────────────────────────── */
-.board-wrap{position:relative;}
-canvas.board{display:block;border:1px solid var(--border);background:var(--surface);}
-
-/* ── GARBAGE METER ────────────────────────────────────────── */
-.garbage-meter{
-  position:absolute;right:-8px;top:0;width:5px;height:100%;
-  display:flex;flex-direction:column-reverse;gap:1px;
-}
-.g-block{width:100%;background:var(--danger);border-radius:1px;flex-shrink:0;}
-
-/* ── ACTION POPUP ─────────────────────────────────────────── */
-.action-popup{
-  position:absolute;left:-120px;top:40%;
-  display:flex;flex-direction:column;align-items:flex-end;
-  gap:3px;pointer-events:none;width:115px;
-}
-.pop-line{
-  font-size:9px;letter-spacing:1.5px;text-transform:uppercase;
-  padding:2px 5px;opacity:0;transform:translateX(-8px);
-  transition:opacity .08s,transform .08s;white-space:nowrap;
-}
-.pop-line.show{opacity:1;transform:translateX(0);}
-
-/* ── OVERLAY ──────────────────────────────────────────────── */
-.board-overlay{
-  position:absolute;top:0;left:0;width:100%;height:100%;
-  background:rgba(8,8,14,0.88);display:none;
-  flex-direction:column;align-items:center;justify-content:center;gap:10px;z-index:10;
-}
-.board-overlay.show{display:flex;}
-.ov-title{font-size:10px;letter-spacing:3px;color:var(--dim);}
-.ov-msg{font-size:22px;letter-spacing:2px;text-align:center;max-width:240px;}
-
-/* ── CENTRE DIVIDER / VS ──────────────────────────────────── */
-#vs-col{
-  display:flex;flex-direction:column;align-items:center;
-  justify-content:center;gap:16px;padding-top:60px;
-}
-#vs-label{font-size:11px;letter-spacing:4px;color:var(--dim);}
-#conn-indicator{
-  width:8px;height:8px;border-radius:50%;background:var(--danger);
-  transition:background .3s;
-}
-#conn-indicator.connected{background:var(--success);}
-
-/* ── PLAYER NAME TAGS ─────────────────────────────────────── */
-.player-name{
-  font-size:9px;letter-spacing:2px;text-transform:uppercase;
-  color:var(--dim);margin-bottom:4px;text-align:center;
-}
-.player-name span{color:var(--accent);}
-
-/* ── FOOTER ───────────────────────────────────────────────── */
-#footer{
-  margin-top:12px;display:flex;flex-direction:column;
-  align-items:center;gap:6px;
-}
-.hint{font-size:8px;letter-spacing:2px;color:var(--dim);text-align:center;line-height:1.8;}
-#ping-display{font-size:8px;letter-spacing:2px;color:var(--dim);}
-</style>
-</head>
-<body>
-
-<!-- ── BRAND ─────────────────────────────────────────── -->
-<div id="brand">TEZA</div>
-<div id="tagline">teza.ke &nbsp;·&nbsp; built in kenya 🇰🇪</div>
-
-<!-- ── LOBBY ──────────────────────────────────────────── -->
-<div id="lobby">
-  <h2>Multiplayer · Phase 3</h2>
-
-  <button class="primary" id="btn-create" style="width:100%">Create Room</button>
-
-  <div id="room-code-display"></div>
-
-  <hr class="divider">
-
-  <div class="input-row">
-    <input type="text" id="room-input" placeholder="ROOM CODE" maxlength="6">
-    <button id="btn-join">Join</button>
-  </div>
-
-  <div id="status-line">Not connected</div>
-
-  <hr class="divider">
-  <button id="btn-solo" style="width:100%;font-size:9px;">Solo Practice (no server)</button>
-</div>
-
-<!-- ── GAME ───────────────────────────────────────────── -->
-<div id="game">
-
-  <div id="boards">
-
-    <!-- LOCAL PLAYER ────────────────────────────── -->
-    <div class="player-unit local" id="local-unit">
-      <div class="panel-left" id="local-left">
-        <div>
-          <div class="p-label">Hold</div>
-          <canvas class="mini-canvas" id="local-hold" width="80" height="60"></canvas>
-        </div>
-        <div class="stat"><span class="stat-label">Score</span><span class="stat-val big" id="l-score">0</span></div>
-        <div class="stat"><span class="stat-label">Attack</span><span class="stat-val" id="l-atk">0</span></div>
-        <div class="stat"><span class="stat-label">Lines</span><span class="stat-val" id="l-lines">0</span></div>
-        <div class="stat">
-          <span class="stat-label">B2B</span>
-          <span class="stat-val" id="l-b2b">—</span>
-          <div id="b2b-bar"></div>
-        </div>
-        <div class="stat"><span class="stat-label">APM</span><span class="stat-val" id="l-apm">0</span></div>
-        <div class="stat"><span class="stat-label">PPS</span><span class="stat-val" id="l-pps">0.00</span></div>
-      </div>
-
-      <div class="board-wrap">
-        <div class="player-name">You — <span id="local-id">—</span></div>
-        <canvas class="board" id="local-board" width="280" height="560"></canvas>
-
-        <div class="action-popup" id="local-popup">
-          <div class="pop-line" id="lp-pc"  style="color:#f7d000">ALL CLEAR</div>
-          <div class="pop-line" id="lp-b2b" style="color:#7c6fff"></div>
-          <div class="pop-line" id="lp-sp"  style="color:#b642d4"></div>
-          <div class="pop-line" id="lp-cl"  style="color:#e8e8f0"></div>
-          <div class="pop-line" id="lp-cm"  style="color:#f7a130"></div>
-        </div>
-
-        <div class="garbage-meter" id="local-gmeter"></div>
-        <div class="board-overlay" id="local-overlay">
-          <span class="ov-title">TEZA</span>
-          <span class="ov-msg" id="local-ov-msg">Waiting...</span>
-        </div>
-      </div>
-
-      <div class="panel-right">
-        <div class="p-label">Next</div>
-        <canvas class="mini-canvas" id="local-next" width="80" height="360"></canvas>
-      </div>
-    </div>
-
-    <!-- VS COLUMN ───────────────────────────────── -->
-    <div id="vs-col">
-      <div id="vs-label">VS</div>
-      <div id="conn-indicator"></div>
-      <div id="ping-display">— ms</div>
-    </div>
-
-    <!-- REMOTE PLAYER ───────────────────────────── -->
-    <div class="player-unit remote" id="remote-unit">
-      <div class="panel-left">
-        <div>
-          <div class="p-label">Hold</div>
-          <canvas class="mini-canvas" id="remote-hold" width="80" height="60"></canvas>
-        </div>
-        <div class="stat"><span class="stat-label">Attack</span><span class="stat-val" id="r-atk">0</span></div>
-        <div class="stat"><span class="stat-label">Lines</span><span class="stat-val" id="r-lines">0</span></div>
-        <div class="stat">
-          <span class="stat-label">B2B</span>
-          <span class="stat-val" id="r-b2b">—</span>
-          <div id="r-b2b-bar"></div>
-        </div>
-      </div>
-      <div class="board-wrap">
-        <div class="player-name">Opponent — <span id="remote-id">—</span></div>
-        <canvas class="board" id="remote-board" width="280" height="560"></canvas>
-        <div class="garbage-meter" id="remote-gmeter"></div>
-        <div class="board-overlay show" id="remote-overlay">
-          <span class="ov-title">Opponent</span>
-          <span class="ov-msg" id="remote-ov-msg">Waiting...</span>
-        </div>
-      </div>
-      <div class="panel-right">
-        <div class="p-label">Next</div>
-        <canvas class="mini-canvas" id="remote-next" width="80" height="360"></canvas>
-      </div>
-    </div>
-
-  </div><!-- #boards -->
-
-  <div id="footer">
-    <div class="hint">
-      ← → Move &nbsp;·&nbsp; ↑ CW &nbsp;·&nbsp; Z CCW &nbsp;·&nbsp; A 180° &nbsp;·&nbsp; ↓ Soft &nbsp;·&nbsp; Space Hard &nbsp;·&nbsp; C Hold &nbsp;·&nbsp; P Pause
-    </div>
-    <button id="btn-leave" style="font-size:9px;margin-top:4px;">Leave Room</button>
-  </div>
-</div><!-- #game -->
-
-<!-- Shared engine (works as browser global) -->
-<script src="/shared/engine.js"></script>
-
-<script>
-/*
- * ============================================================
- * TEZA — client/index.html  (inline script)
- * ============================================================
- * Responsibilities:
- *   1. Ribbon WebSocket connection to server
- *   2. Local engine (client-side prediction)
- *   3. Opponent board display (server-driven snapshots)
- *   4. Input capture → send to server + apply locally
- *   5. Rendering (local + opponent boards)
- *   6. Lobby UI (create/join room)
+ * New in Phase 4:
+ *   - Login screen (username-based, no password)
+ *   - Profile card (TR, wins, losses, win rate, best APM/PPS)
+ *   - Matchmaking queue (Ranked button, queue position display)
+ *   - Post-match result screen (TR delta, stats, replay download)
+ *   - Spectator mode (watch live match via boardSnapshot)
+ *   - Leaderboard panel
  * ============================================================
  */
-'use strict';
+            :root {
+                --bg: #08080e;
+                --surf: #0f0f18;
+                --surf2: #181824;
+                --border: #252535;
+                --text: #e8e8f0;
+                --dim: #5a5a7a;
+                --accent: #7c6fff;
+                --danger: #ff4c4c;
+                --ok: #3ddc84;
+                --warn: #f7a130;
+                --gold: #f7d000;
+                font-family: "Courier New", monospace;
+                color: var(--text);
+            }
+            * {
+                box-sizing: border-box;
+                margin: 0;
+                padding: 0;
+            }
+            body {
+                background: var(--bg);
+                min-height: 100vh;
+                display: flex;
+                flex-direction: column;
+                align-items: center;
+                padding: 16px;
+                user-select: none;
+            }
 
-const {
-  createEngine, stepEngine, tickEngine,
-  PIECES, PIECE_NAMES, COLS, VIS_ROWS, VIS_START, TOTAL_ROWS, GARBAGE_COL,
-  getCells, getGhost, tryMove, createBoard,
-} = window.TezaEngine;
+            #brand {
+                font-size: 28px;
+                font-weight: 900;
+                letter-spacing: 8px;
+                color: var(--accent);
+                margin-bottom: 4px;
+            }
+            #tagline {
+                font-size: 9px;
+                letter-spacing: 3px;
+                color: var(--dim);
+                margin-bottom: 20px;
+            }
 
-/* ============================================================
- * §1  RIBBON CLIENT
- * ============================================================
- *
- * Mirrors the server's RibbonConn but for the browser.
- * Wraps a WebSocket with:
- *  - Sequence numbering
- *  - Ack tracking
- *  - Send buffer (100 packets)
- *  - Auto-reconnect with resume token
- * ============================================================ */
-class RibbonClient {
-  constructor(url) {
-    this.url      = url;
-    this.sendSeq  = 0;
-    this.recvAck  = 0;
-    this.sendBuf  = [];
-    this.handlers = {};
-    this.roomId   = null;
-    this.pingStart = 0;
-    this.latency   = 0;
-    this._connect();
-  }
+            /* ── SCREENS ──────────────────────────────────────────────── */
+            .screen {
+                display: none;
+                flex-direction: column;
+                align-items: center;
+                gap: 14px;
+                width: 100%;
+            }
+            .screen.active {
+                display: flex;
+            }
 
-  _connect() {
-    this.ws = new WebSocket(this.url);
+            /* ── LOGIN SCREEN ─────────────────────────────────────────── */
+            #login-screen {
+                max-width: 340px;
+            }
+            #login-screen h2 {
+                font-size: 10px;
+                letter-spacing: 3px;
+                color: var(--dim);
+            }
+            .field {
+                display: flex;
+                flex-direction: column;
+                gap: 6px;
+                width: 100%;
+            }
+            .field label {
+                font-size: 9px;
+                letter-spacing: 2px;
+                color: var(--dim);
+                text-transform: uppercase;
+            }
+            input[type="text"] {
+                width: 100%;
+                background: var(--surf2);
+                border: 1px solid var(--border);
+                color: var(--text);
+                font-family: inherit;
+                font-size: 14px;
+                letter-spacing: 2px;
+                padding: 10px 12px;
+                outline: none;
+                text-transform: uppercase;
+            }
+            input[type="text"]:focus {
+                border-color: var(--accent);
+            }
+            #login-status {
+                font-size: 9px;
+                letter-spacing: 2px;
+                color: var(--dim);
+                min-height: 16px;
+                text-align: center;
+            }
 
-    this.ws.onopen = () => {
-      console.log('[Ribbon] Connected');
-      this._emit('_connected');
-      // If we have a room, attempt resume
-      if (this.roomId) {
-        this.send('resume', { roomId: this.roomId, peerAck: this.recvAck });
-      }
-    };
+            /* ── LOBBY SCREEN ─────────────────────────────────────────── */
+            #lobby-screen {
+                max-width: 720px;
+                width: 100%;
+            }
+            .lobby-grid {
+                display: grid;
+                grid-template-columns: 1fr 1fr;
+                gap: 16px;
+                width: 100%;
+            }
+            .lobby-col {
+                display: flex;
+                flex-direction: column;
+                gap: 10px;
+            }
 
-    this.ws.onmessage = ({ data }) => {
-      let msg;
-      try { msg = JSON.parse(data); } catch { return; }
-      if (typeof msg.s === 'number') this.recvAck = msg.s;
-      this._emit(msg.t, msg.d || {});
-    };
+            /* profile card */
+            .profile-card {
+                background: var(--surf);
+                border: 1px solid var(--border);
+                padding: 14px;
+                display: flex;
+                flex-direction: column;
+                gap: 8px;
+            }
+            .pc-name {
+                font-size: 16px;
+                letter-spacing: 3px;
+                color: var(--accent);
+            }
+            .pc-tr {
+                font-size: 28px;
+                font-weight: 900;
+                letter-spacing: 2px;
+                color: var(--gold);
+            }
+            .pc-tr span {
+                font-size: 11px;
+                color: var(--dim);
+                font-weight: normal;
+            }
+            .pc-grid {
+                display: grid;
+                grid-template-columns: 1fr 1fr 1fr;
+                gap: 6px;
+            }
+            .pc-stat {
+                display: flex;
+                flex-direction: column;
+                gap: 1px;
+            }
+            .pc-stat-label {
+                font-size: 8px;
+                letter-spacing: 2px;
+                color: var(--dim);
+                text-transform: uppercase;
+            }
+            .pc-stat-val {
+                font-size: 14px;
+                font-weight: bold;
+            }
+            .rd-bar-wrap {
+                display: flex;
+                flex-direction: column;
+                gap: 3px;
+            }
+            .rd-bar-bg {
+                height: 3px;
+                background: var(--border);
+                border-radius: 2px;
+            }
+            .rd-bar-fill {
+                height: 100%;
+                background: var(--accent);
+                border-radius: 2px;
+                transition: width 0.3s;
+            }
+            .rd-hint {
+                font-size: 8px;
+                letter-spacing: 1px;
+                color: var(--dim);
+            }
 
-    this.ws.onclose = () => {
-      console.log('[Ribbon] Disconnected — reconnecting in 2s');
-      this._emit('_disconnected');
-      setTimeout(() => this._connect(), 2000);
-    };
+            /* buttons */
+            button {
+                background: var(--surf2);
+                border: 1px solid var(--border);
+                color: var(--text);
+                font-family: inherit;
+                font-size: 10px;
+                letter-spacing: 2px;
+                text-transform: uppercase;
+                padding: 10px 16px;
+                cursor: pointer;
+                transition:
+                    background 0.15s,
+                    border-color 0.15s;
+                white-space: nowrap;
+                width: 100%;
+            }
+            button:hover {
+                background: var(--border);
+                border-color: var(--accent);
+            }
+            button.primary {
+                border-color: var(--accent);
+                color: var(--accent);
+            }
+            button.ranked {
+                border-color: var(--gold);
+                color: var(--gold);
+            }
+            button.ranked:hover {
+                background: rgba(247, 208, 0, 0.08);
+            }
+            button.danger {
+                border-color: var(--danger);
+                color: var(--danger);
+            }
 
-    this.ws.onerror = (e) => console.error('[Ribbon] WS error', e);
-  }
+            .btn-row {
+                display: flex;
+                gap: 8px;
+                width: 100%;
+            }
+            .btn-row button {
+                flex: 1;
+            }
 
-  send(type, data = {}) {
-    if (this.ws.readyState !== WebSocket.OPEN) return;
-    const packet = { t: type, s: this.sendSeq++, a: this.recvAck, d: data };
-    const raw    = JSON.stringify(packet);
-    this.sendBuf.push({ s: packet.s, raw });
-    if (this.sendBuf.length > 100) this.sendBuf.shift();
-    this.ws.send(raw);
-  }
+            .input-row {
+                display: flex;
+                gap: 8px;
+                width: 100%;
+            }
+            .input-row input {
+                flex: 1;
+            }
+            .input-row button {
+                width: auto;
+                padding: 10px 14px;
+            }
 
-  on(type, fn) {
-    (this.handlers[type] = this.handlers[type] || []).push(fn);
-    return this;
-  }
+            .section-label {
+                font-size: 8px;
+                letter-spacing: 3px;
+                color: var(--dim);
+                text-transform: uppercase;
+            }
+            .divider {
+                width: 100%;
+                border: none;
+                border-top: 1px solid var(--border);
+            }
+            #lobby-status {
+                font-size: 9px;
+                letter-spacing: 2px;
+                color: var(--dim);
+                text-align: center;
+                min-height: 16px;
+            }
+            #room-code-big {
+                font-size: 30px;
+                letter-spacing: 8px;
+                color: var(--accent);
+                display: none;
+            }
 
-  _emit(type, data) {
-    (this.handlers[type] || []).forEach(fn => fn(data));
-  }
+            /* queue panel */
+            #queue-panel {
+                background: var(--surf);
+                border: 1px solid var(--border);
+                padding: 12px;
+                display: none;
+                flex-direction: column;
+                gap: 6px;
+            }
+            #queue-panel.show {
+                display: flex;
+            }
+            #queue-pos {
+                font-size: 20px;
+                font-weight: bold;
+                color: var(--accent);
+            }
+            #queue-tr {
+                font-size: 9px;
+                letter-spacing: 2px;
+                color: var(--dim);
+            }
 
-  ping() {
-    this.pingStart = performance.now();
-    this.send('ping');
-  }
-}
+            /* leaderboard */
+            #leaderboard {
+                display: flex;
+                flex-direction: column;
+                gap: 4px;
+                width: 100%;
+            }
+            .lb-entry {
+                display: flex;
+                justify-content: space-between;
+                align-items: center;
+                background: var(--surf);
+                border: 1px solid var(--border);
+                padding: 6px 10px;
+                font-size: 9px;
+                letter-spacing: 1px;
+            }
+            .lb-rank {
+                color: var(--dim);
+                width: 24px;
+            }
+            .lb-name {
+                color: var(--text);
+                flex: 1;
+            }
+            .lb-tr {
+                color: var(--gold);
+                font-weight: bold;
+            }
+            .lb-wr {
+                color: var(--dim);
+            }
 
-/* ============================================================
- * §2  RENDERING HELPERS
- * ============================================================ */
-const CELL = 28;
+            /* ── GAME SCREEN ──────────────────────────────────────────── */
+            #game-screen {
+                flex-direction: row;
+                gap: 24px;
+                align-items: flex-start;
+                width: 100%;
+            }
+            #game-screen.active {
+                display: flex;
+                justify-content: center;
+            }
 
-function lighten(hex, amt) {
-  if (!hex || hex[0] !== '#') return hex || '#888';
-  const n = parseInt(hex.slice(1), 16);
-  const r = Math.min(255, (n>>16) + Math.round(255*amt));
-  const g = Math.min(255, ((n>>8)&0xff) + Math.round(255*amt));
-  const b = Math.min(255, (n&0xff) + Math.round(255*amt));
-  return `rgb(${r},${g},${b})`;
-}
+            .player-unit {
+                display: flex;
+                gap: 10px;
+                align-items: flex-start;
+                position: relative;
+            }
+            .panel-left {
+                width: 88px;
+                display: flex;
+                flex-direction: column;
+                gap: 12px;
+            }
+            .panel-right {
+                width: 88px;
+                display: flex;
+                flex-direction: column;
+                gap: 8px;
+            }
+            .p-label {
+                font-size: 8px;
+                letter-spacing: 2px;
+                text-transform: uppercase;
+                color: var(--dim);
+                margin-bottom: 3px;
+            }
+            .mini-canvas {
+                background: var(--surf);
+                border: 1px solid var(--border);
+                display: block;
+            }
+            .stat {
+                display: flex;
+                flex-direction: column;
+                gap: 1px;
+            }
+            .stat-label {
+                font-size: 8px;
+                letter-spacing: 2px;
+                text-transform: uppercase;
+                color: var(--dim);
+            }
+            .stat-val {
+                font-size: 18px;
+                font-weight: bold;
+                letter-spacing: 1px;
+            }
+            .stat-val.big {
+                font-size: 22px;
+            }
+            #b2b-bar,
+            #r-b2b-bar {
+                height: 2px;
+                background: var(--accent);
+                width: 0%;
+                border-radius: 2px;
+                transition: width 0.2s;
+                margin-top: 2px;
+            }
 
-function drawCell(ctx, r, c, color, alpha=1) {
-  ctx.globalAlpha = alpha;
-  ctx.fillStyle   = color;
-  ctx.fillRect(c*CELL+1, r*CELL+1, CELL-2, CELL-2);
-  ctx.fillStyle = lighten(color, 0.25);
-  ctx.fillRect(c*CELL+2, r*CELL+2, CELL-6, 3);
-  ctx.fillRect(c*CELL+2, r*CELL+2, 3, CELL-6);
-  ctx.globalAlpha = 1;
-}
+            .board-wrap {
+                position: relative;
+            }
+            canvas.board {
+                display: block;
+                border: 1px solid var(--border);
+                background: var(--surf);
+            }
+            .garbage-meter {
+                position: absolute;
+                right: -8px;
+                top: 0;
+                width: 5px;
+                height: 100%;
+                display: flex;
+                flex-direction: column-reverse;
+                gap: 1px;
+            }
+            .g-block {
+                width: 100%;
+                background: var(--danger);
+                border-radius: 1px;
+                flex-shrink: 0;
+            }
 
-function renderBoard(ctx, eng, isActive) {
-  ctx.clearRect(0, 0, COLS*CELL, VIS_ROWS*CELL);
-  // Grid
-  ctx.strokeStyle = '#1a1a28'; ctx.lineWidth = 0.5;
-  for (let r=0;r<=VIS_ROWS;r++){ctx.beginPath();ctx.moveTo(0,r*CELL);ctx.lineTo(COLS*CELL,r*CELL);ctx.stroke();}
-  for (let c=0;c<=COLS;c++){ctx.beginPath();ctx.moveTo(c*CELL,0);ctx.lineTo(c*CELL,VIS_ROWS*CELL);ctx.stroke();}
-  // Locked cells
-  for (let r=VIS_START;r<TOTAL_ROWS;r++) {
-    for (let c=0;c<COLS;c++) {
-      if (eng.board[r][c]) drawCell(ctx, r-VIS_START, c, eng.board[r][c]);
-    }
-  }
-  if (!isActive || eng.dead) return;
-  // Ghost
-  const ghost = getGhost(eng.board, eng.active);
-  ctx.globalAlpha = 0.18;
-  for (const [r,c] of getCells(ghost)) {
-    if (r >= VIS_START) {
-      ctx.fillStyle = PIECES[eng.active.type].color;
-      ctx.fillRect(c*CELL+1,(r-VIS_START)*CELL+1,CELL-2,CELL-2);
-      ctx.strokeStyle = PIECES[eng.active.type].color; ctx.lineWidth=1.5;
-      ctx.strokeRect(c*CELL+1,(r-VIS_START)*CELL+1,CELL-2,CELL-2);
-    }
-  }
-  ctx.globalAlpha = 1;
-  // Active
-  const isSpinArmed = eng.lastSpin === 'candidate' && eng.active.type === 'T';
-  for (const [r,c] of getCells(eng.active)) {
-    if (r >= VIS_START) {
-      drawCell(ctx, r-VIS_START, c, PIECES[eng.active.type].color);
-      if (isSpinArmed) {
-        ctx.strokeStyle='#e0a0ff'; ctx.lineWidth=1;
-        ctx.strokeRect(c*CELL+1,(r-VIS_START)*CELL+1,CELL-2,CELL-2);
-      }
-    }
-  }
-}
+            .action-popup {
+                position: absolute;
+                left: -120px;
+                top: 40%;
+                display: flex;
+                flex-direction: column;
+                align-items: flex-end;
+                gap: 3px;
+                pointer-events: none;
+                width: 115px;
+            }
+            .pop-line {
+                font-size: 9px;
+                letter-spacing: 1.5px;
+                text-transform: uppercase;
+                padding: 2px 5px;
+                opacity: 0;
+                transform: translateX(-8px);
+                transition:
+                    opacity 0.08s,
+                    transform 0.08s;
+                white-space: nowrap;
+            }
+            .pop-line.show {
+                opacity: 1;
+                transform: translateX(0);
+            }
 
-function renderMini(ctx, type, w, h, alpha=1) {
-  ctx.clearRect(0,0,w,h);
-  if (!type) return;
-  const cells = PIECES[type].states[0];
-  const color = PIECES[type].color;
-  const minC=Math.min(...cells.map(([,c])=>c)), maxC=Math.max(...cells.map(([,c])=>c));
-  const minR=Math.min(...cells.map(([r])=>r)), maxR=Math.max(...cells.map(([r])=>r));
-  const ox = Math.floor((w-(maxC-minC+1)*CELL)/2)-minC*CELL;
-  const oy = Math.floor((h-(maxR-minR+1)*CELL)/2)-minR*CELL;
-  ctx.globalAlpha = alpha;
-  for (const [r,c] of cells) {
-    const x=ox+c*CELL, y=oy+r*CELL;
-    ctx.fillStyle=color; ctx.fillRect(x+1,y+1,CELL-2,CELL-2);
-    ctx.fillStyle=lighten(color,0.25);
-    ctx.fillRect(x+2,y+2,CELL-6,3); ctx.fillRect(x+2,y+2,3,CELL-6);
-  }
-  ctx.globalAlpha=1;
-}
+            .board-overlay {
+                position: absolute;
+                top: 0;
+                left: 0;
+                width: 100%;
+                height: 100%;
+                background: rgba(8, 8, 14, 0.88);
+                display: none;
+                flex-direction: column;
+                align-items: center;
+                justify-content: center;
+                gap: 10px;
+                z-index: 10;
+            }
+            .board-overlay.show {
+                display: flex;
+            }
+            .ov-title {
+                font-size: 10px;
+                letter-spacing: 3px;
+                color: var(--dim);
+            }
+            .ov-msg {
+                font-size: 22px;
+                letter-spacing: 2px;
+                text-align: center;
+                max-width: 240px;
+            }
 
-function renderNext(ctx, bag, w) {
-  ctx.clearRect(0,0,w,360);
-  if (!bag) return;
-  const preview = bag.peek(5);
-  const slotH = 72;
-  for (let i=0;i<preview.length;i++) {
-    const type=preview[i], cells=PIECES[type].states[0], color=PIECES[type].color;
-    const minC=Math.min(...cells.map(([,c])=>c)), maxC=Math.max(...cells.map(([,c])=>c));
-    const minR=Math.min(...cells.map(([r])=>r)), maxR=Math.max(...cells.map(([r])=>r));
-    const ox=Math.floor((w-(maxC-minC+1)*CELL)/2)-minC*CELL;
-    const oy=i*slotH+Math.floor((slotH-(maxR-minR+1)*CELL)/2)-minR*CELL;
-    ctx.globalAlpha=1-i*0.15;
-    for (const [r,c] of cells) {
-      const x=ox+c*CELL, y=oy+r*CELL;
-      ctx.fillStyle=color; ctx.fillRect(x+1,y+1,CELL-2,CELL-2);
-      ctx.fillStyle=lighten(color,0.25);
-      ctx.fillRect(x+2,y+2,CELL-6,3); ctx.fillRect(x+2,y+2,3,CELL-6);
-    }
-    ctx.globalAlpha=1;
-    if (i<4){ ctx.strokeStyle='#222232'; ctx.lineWidth=0.5;
-      ctx.beginPath(); ctx.moveTo(4,(i+1)*slotH); ctx.lineTo(w-4,(i+1)*slotH); ctx.stroke(); }
-  }
-}
+            .player-name {
+                font-size: 9px;
+                letter-spacing: 2px;
+                text-transform: uppercase;
+                color: var(--dim);
+                margin-bottom: 4px;
+                text-align: center;
+            }
+            .player-name span {
+                color: var(--accent);
+            }
+            .remote-unit {
+                transform: scale(0.75);
+                transform-origin: top left;
+            }
 
-function updateGarbageMeter(el, queue) {
-  el.innerHTML='';
-  const total=queue.reduce((s,g)=>s+g.count,0);
-  const show=Math.min(total,VIS_ROWS);
-  const bh=Math.max(2,Math.floor(560/VIS_ROWS)-1);
-  for (let i=0;i<show;i++) {
-    const b=document.createElement('div');
-    b.className='g-block'; b.style.height=bh+'px';
-    el.appendChild(b);
-  }
-}
+            #vs-col {
+                display: flex;
+                flex-direction: column;
+                align-items: center;
+                justify-content: center;
+                gap: 16px;
+                padding-top: 60px;
+            }
+            #vs-label {
+                font-size: 11px;
+                letter-spacing: 4px;
+                color: var(--dim);
+            }
+            #conn-dot {
+                width: 8px;
+                height: 8px;
+                border-radius: 50%;
+                background: var(--danger);
+                transition: background 0.3s;
+            }
+            #conn-dot.on {
+                background: var(--ok);
+            }
+            #ping-display {
+                font-size: 8px;
+                letter-spacing: 2px;
+                color: var(--dim);
+            }
+            #match-type-badge {
+                font-size: 8px;
+                letter-spacing: 2px;
+                color: var(--gold);
+            }
 
-/* ============================================================
- * §3  POPUP SYSTEM
- * ============================================================ */
-const CLEAR_NAMES = ['','Single','Double','Triple','Quad'];
-function showPopup(ids, spin, cleared, b2b, combo, ac) {
-  const [pc,pb2b,psp,pcl,pcm] = ids.map(id => document.getElementById(id));
-  [pc,pb2b,psp,pcl,pcm].forEach(el => el && el.classList.remove('show'));
-  if (!cleared) return;
-  if (ac) pc.classList.add('show');
-  if (b2b > 1) { pb2b.textContent=`B2B ×${b2b-1}`; pb2b.classList.add('show'); }
-  if (spin==='tspin') {
-    psp.textContent=['T-Spin','T-Spin Single','T-Spin Double','T-Spin Triple'][Math.min(cleared,3)];
-    psp.classList.add('show');
-  } else if (spin==='mini') {
-    psp.textContent=cleared===1?'T-Mini Single':'T-Mini Double';
-    psp.classList.add('show');
-  } else if (cleared>0) {
-    pcl.textContent=CLEAR_NAMES[cleared]||'';
-    pcl.style.color=cleared===4?'#41b0d8':'#e8e8f0';
-    pcl.classList.add('show');
-  }
-  if (combo>=2) { pcm.textContent=`${combo-1} combo`; pcm.classList.add('show'); }
-  setTimeout(()=>[pc,pb2b,psp,pcl,pcm].forEach(el=>el&&el.classList.remove('show')),1800);
-}
+            /* spectator banner */
+            #spec-banner {
+                font-size: 9px;
+                letter-spacing: 3px;
+                color: var(--warn);
+                text-transform: uppercase;
+                display: none;
+            }
 
-/* ============================================================
- * §4  GAME STATE
- * ============================================================ */
-let ribbon     = null;
-let localEng   = null;
-let remoteEng  = null;  // Mirror of opponent (populated from server snapshots)
-let gameActive = false;
-let myId       = null;
-let soloMode   = false;
-let startTime  = 0;
-let rafId      = null;
-let lastTime   = 0;
-let accumulator = 0;
-const TICK_MS  = 1000/60;
+            /* ── RESULT SCREEN ────────────────────────────────────────── */
+            #result-screen {
+                max-width: 500px;
+                gap: 20px;
+            }
+            #result-outcome {
+                font-size: 36px;
+                letter-spacing: 4px;
+                font-weight: 900;
+            }
+            #result-outcome.win {
+                color: var(--gold);
+            }
+            #result-outcome.loss {
+                color: var(--danger);
+            }
+            #tr-delta {
+                font-size: 22px;
+                letter-spacing: 2px;
+                text-align: center;
+            }
+            #tr-delta.up {
+                color: var(--ok);
+            }
+            #tr-delta.dn {
+                color: var(--danger);
+            }
+            .result-stats {
+                display: grid;
+                grid-template-columns: 1fr 1fr;
+                gap: 12px;
+                width: 100%;
+                background: var(--surf);
+                border: 1px solid var(--border);
+                padding: 14px;
+            }
+            .rs-col {
+                display: flex;
+                flex-direction: column;
+                gap: 6px;
+            }
+            .rs-header {
+                font-size: 9px;
+                letter-spacing: 2px;
+                color: var(--accent);
+                text-transform: uppercase;
+            }
+            .rs-row {
+                display: flex;
+                justify-content: space-between;
+                font-size: 10px;
+                letter-spacing: 1px;
+            }
+            .rs-label {
+                color: var(--dim);
+            }
+            .rs-val {
+                color: var(--text);
+                font-weight: bold;
+            }
 
-// Canvas refs
-const lBoardCtx  = document.getElementById('local-board').getContext('2d');
-const rBoardCtx  = document.getElementById('remote-board').getContext('2d');
-const lHoldCtx   = document.getElementById('local-hold').getContext('2d');
-const rHoldCtx   = document.getElementById('remote-hold').getContext('2d');
-const lNextCtx   = document.getElementById('local-next').getContext('2d');
-const rNextCtx   = document.getElementById('remote-next').getContext('2d');
-const lGmeter    = document.getElementById('local-gmeter');
-const rGmeter    = document.getElementById('remote-gmeter');
+            /* ── FOOTER ───────────────────────────────────────────────── */
+            #footer {
+                margin-top: 12px;
+                display: flex;
+                flex-direction: column;
+                align-items: center;
+                gap: 6px;
+            }
+            .hint {
+                font-size: 8px;
+                letter-spacing: 2px;
+                color: var(--dim);
+                text-align: center;
+                line-height: 1.8;
+            }
+        </style>
+    </head>
+    <body>
+        <div id="brand">TEZA</div>
+        <div id="tagline">teza.ke &nbsp;·&nbsp; built in kenya 🇰🇪</div>
 
-/* ============================================================
- * §5  INPUT HANDLING
- * ============================================================
- *
- * CLIENT-SIDE PREDICTION:
- *   Inputs are applied to the local engine IMMEDIATELY for
- *   zero-latency feel. The same input is also sent to the
- *   server, which applies it to the authoritative engine.
- *
- *   If server state diverges (cheat/bug), the server can
- *   send a 'stateCorrection' message to snap the client back.
- *   Phase 3 implements the prediction; correction is Phase 4.
- * ============================================================ */
-const keys         = {};
-const dasCounters  = { ArrowLeft:0, ArrowRight:0 };
-const dasActive    = { ArrowLeft:false, ArrowRight:false };
-const DAS_DELAY    = 10;
-const ARR          = 2;
+        <!-- ══════════════════════════════════════════════════════════
+     SCREEN 1: LOGIN
+══════════════════════════════════════════════════════════ -->
+        <div id="login-screen" class="screen active">
+            <h2>Welcome to Teza</h2>
+            <div class="field">
+                <label>Username</label>
+                <input
+                    type="text"
+                    id="username-input"
+                    placeholder="ENTER USERNAME"
+                    maxlength="20"
+                    autocomplete="off"
+                />
+            </div>
+            <button class="primary" id="btn-login">Play</button>
+            <button id="btn-solo-login" class="btn-solo" style="font-size: 9px; margin-top: 4px;">Solo Practice (no server)</button>
+            <div id="login-status">Connect to server first...</div>
+        </div>
 
-document.addEventListener('keydown', e => {
-  if (e.repeat) return;
-  keys[e.code] = true;
-  if (!gameActive || !localEng || localEng.dead) return;
-  handleKey(e.code);
-  e.preventDefault();
-});
-document.addEventListener('keyup', e => {
-  keys[e.code] = false;
-  if (e.code==='ArrowLeft')  { dasCounters.ArrowLeft=0;  dasActive.ArrowLeft=false; }
-  if (e.code==='ArrowRight') { dasCounters.ArrowRight=0; dasActive.ArrowRight=false; }
-});
+        <!-- ══════════════════════════════════════════════════════════
+     SCREEN 2: LOBBY
+══════════════════════════════════════════════════════════ -->
+        <div id="lobby-screen" class="screen">
+            <div class="lobby-grid">
+                <!-- LEFT: profile + actions -->
+                <div class="lobby-col">
+                    <!-- Profile Card -->
+                    <div class="profile-card" id="profile-card">
+                        <div class="pc-name" id="pc-name">—</div>
+                        <div class="pc-tr" id="pc-tr">— <span>TR</span></div>
+                        <div class="rd-bar-wrap">
+                            <div class="rd-bar-bg">
+                                <div
+                                    class="rd-bar-fill"
+                                    id="rd-bar"
+                                    style="width: 0%"
+                                ></div>
+                            </div>
+                            <div class="rd-hint" id="rd-hint">
+                                RD: 350 — play more games to calibrate
+                            </div>
+                        </div>
+                        <div class="pc-grid">
+                            <div class="pc-stat">
+                                <div class="pc-stat-label">Games</div>
+                                <div class="pc-stat-val" id="pc-games">0</div>
+                            </div>
+                            <div class="pc-stat">
+                                <div class="pc-stat-label">W/L</div>
+                                <div class="pc-stat-val" id="pc-wl">0/0</div>
+                            </div>
+                            <div class="pc-stat">
+                                <div class="pc-stat-label">Win%</div>
+                                <div class="pc-stat-val" id="pc-wr">—</div>
+                            </div>
+                            <div class="pc-stat">
+                                <div class="pc-stat-label">Best APM</div>
+                                <div class="pc-stat-val" id="pc-apm">0</div>
+                            </div>
+                            <div class="pc-stat">
+                                <div class="pc-stat-label">Best PPS</div>
+                                <div class="pc-stat-val" id="pc-pps">0.00</div>
+                            </div>
+                        </div>
+                    </div>
 
-function handleKey(code) {
-  switch (code) {
-    case 'ArrowLeft':  sendInput({type:'move',value:-1}); dasCounters.ArrowLeft=0; dasActive.ArrowLeft=false; break;
-    case 'ArrowRight': sendInput({type:'move',value:1});  dasCounters.ArrowRight=0; dasActive.ArrowRight=false; break;
-    case 'ArrowDown':  sendInput({type:'softDrop'}); break;
-    case 'ArrowUp':    sendInput({type:'rotate',value:1}); break;
-    case 'KeyZ':       sendInput({type:'rotate',value:-1}); break;
-    case 'KeyA':       sendInput({type:'rotate',value:2}); break;
-    case 'Space':      sendInput({type:'hardDrop'}); break;
-    case 'KeyC': case 'ShiftLeft': case 'ShiftRight': sendInput({type:'hold'}); break;
-  }
-}
+                    <!-- Actions -->
+                    <div class="section-label">Quick Play</div>
+                    <button class="primary" id="btn-create">Create Room</button>
+                    <div class="input-row">
+                        <input
+                            type="text"
+                            id="room-input"
+                            placeholder="ROOM CODE"
+                            maxlength="6"
+                        />
+                        <button id="btn-join">Join</button>
+                    </div>
+                    <div id="room-code-big"></div>
 
-function processDAS() {
-  for (const dir of ['ArrowLeft','ArrowRight']) {
-    if (!keys[dir]) continue;
-    dasCounters[dir]++;
-    if (!dasActive[dir]) {
-      if (dasCounters[dir] >= DAS_DELAY) { dasActive[dir]=true; dasCounters[dir]=0; }
-    } else {
-      if (dasCounters[dir] >= ARR) {
-        dasCounters[dir]=0;
-        sendInput({ type:'move', value: dir==='ArrowLeft'?-1:1 });
-      }
-    }
-  }
-  if (keys['ArrowDown']) sendInput({type:'softDrop'});
-}
+                    <hr class="divider" />
+                    <div class="section-label">Ranked</div>
+                    <button class="ranked" id="btn-queue">
+                        Find Ranked Match
+                    </button>
 
-function sendInput(input) {
-  // 1. Apply locally for instant feedback (client-side prediction)
-  const events = stepEngine(localEng, input);
-  handleLocalEvents(events);
-  // 2. Send to server (authoritative application)
-  if (ribbon && !soloMode) ribbon.send('input', { input });
-}
+                    <!-- Queue panel (shown while searching) -->
+                    <div id="queue-panel">
+                        <div class="section-label">Searching...</div>
+                        <div id="queue-pos">—</div>
+                        <div id="queue-tr">—</div>
+                        <button
+                            class="danger"
+                            id="btn-leave-queue"
+                            style="
+                                width: auto;
+                                padding: 6px 12px;
+                                font-size: 9px;
+                            "
+                        >
+                            Cancel
+                        </button>
+                    </div>
 
-/* ============================================================
- * §6  LOCAL EVENT HANDLER
- * ============================================================ */
-function handleLocalEvents(events) {
-  for (const ev of events) {
-    switch (ev.type) {
-      case 'attack':
-        showPopup(
-          ['lp-pc','lp-b2b','lp-sp','lp-cl','lp-cm'],
-          ev.spin, ev.lines /* rough */, ev.b2b, ev.combo, ev.allClear
-        );
-        break;
-      case 'gameOver':
-        showLocalOverlay('You lost');
-        gameActive = false;
-        break;
-    }
-  }
-  updateLocalStats();
-  updateGarbageMeter(lGmeter, localEng.garbageQueue);
-}
+                    <hr class="divider" />
+                    <button id="btn-solo-lobby" class="btn-solo" style="font-size: 9px; margin-bottom: 4px;">
+                        Solo Practice (no server)
+                    </button>
+                    <button id="btn-leaderboard" style="font-size: 9px">
+                        View Leaderboard
+                    </button>
+                    <button
+                        id="btn-logout"
+                        style="font-size: 9px; color: var(--dim)"
+                    >
+                        Log Out
+                    </button>
+                    <div id="lobby-status">Ready</div>
+                </div>
 
-/* ============================================================
- * §7  GAME LOOP
- * ============================================================ */
-function startLoop() {
-  lastTime    = performance.now();
-  accumulator = 0;
-  rafId       = requestAnimationFrame(loop);
-}
+                <!-- RIGHT: leaderboard -->
+                <div class="lobby-col">
+                    <div class="section-label">Leaderboard</div>
+                    <div id="leaderboard">
+                        <div
+                            style="
+                                font-size: 9px;
+                                letter-spacing: 2px;
+                                color: var(--dim);
+                            "
+                        >
+                            Loading...
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
 
-function loop(now) {
-  let delta = now - lastTime; lastTime = now;
-  if (delta > 250) delta = 250;
-  accumulator += delta;
-  while (accumulator >= TICK_MS) {
-    if (gameActive && localEng && !localEng.dead) {
-      processDAS();
-      const evs = tickEngine(localEng);
-      handleLocalEvents(evs);
-    }
-    accumulator -= TICK_MS;
-  }
-  renderAll();
-  rafId = requestAnimationFrame(loop);
-}
+        <!-- ══════════════════════════════════════════════════════════
+     SCREEN 3: GAME
+══════════════════════════════════════════════════════════ -->
+        <div id="game-screen" class="screen">
+            <div id="spec-banner">👁 Spectating</div>
 
-function renderAll() {
-  if (localEng) {
-    renderBoard(lBoardCtx, localEng, true);
-    renderMini(lHoldCtx, localEng.held, 80, 60, localEng.canHold?1:0.4);
-    renderNext(lNextCtx, localEng.bag, 80);
-  }
-  if (remoteEng) {
-    renderBoard(rBoardCtx, remoteEng, false);
-    renderMini(rHoldCtx, remoteEng.held, 80, 60);
-    renderNext(rNextCtx, remoteEng.bag, 80);
-    updateGarbageMeter(rGmeter, remoteEng.garbageQueue);
-  }
-}
+            <!-- LOCAL board -->
+            <div class="player-unit" id="local-unit">
+                <div class="panel-left">
+                    <div>
+                        <div class="p-label">Hold</div>
+                        <canvas
+                            class="mini-canvas"
+                            id="local-hold"
+                            width="80"
+                            height="60"
+                        ></canvas>
+                    </div>
+                    <div class="stat">
+                        <span class="stat-label">Score</span
+                        ><span class="stat-val big" id="l-score">0</span>
+                    </div>
+                    <div class="stat">
+                        <span class="stat-label">Attack</span
+                        ><span class="stat-val" id="l-atk">0</span>
+                    </div>
+                    <div class="stat">
+                        <span class="stat-label">Lines</span
+                        ><span class="stat-val" id="l-lines">0</span>
+                    </div>
+                    <div class="stat">
+                        <span class="stat-label">B2B</span>
+                        <span class="stat-val" id="l-b2b">—</span>
+                        <div id="b2b-bar"></div>
+                    </div>
+                    <div class="stat">
+                        <span class="stat-label">APM</span
+                        ><span class="stat-val" id="l-apm">0</span>
+                    </div>
+                    <div class="stat">
+                        <span class="stat-label">PPS</span
+                        ><span class="stat-val" id="l-pps">0.00</span>
+                    </div>
+                </div>
+                <div class="board-wrap">
+                    <div class="player-name">
+                        You — <span id="local-id">—</span>
+                    </div>
+                    <canvas
+                        class="board"
+                        id="local-board"
+                        width="280"
+                        height="560"
+                    ></canvas>
+                    <div class="action-popup" id="local-popup">
+                        <div class="pop-line" id="lp-pc" style="color: #f7d000">
+                            ALL CLEAR
+                        </div>
+                        <div
+                            class="pop-line"
+                            id="lp-b2b"
+                            style="color: #7c6fff"
+                        ></div>
+                        <div
+                            class="pop-line"
+                            id="lp-sp"
+                            style="color: #b642d4"
+                        ></div>
+                        <div
+                            class="pop-line"
+                            id="lp-cl"
+                            style="color: #e8e8f0"
+                        ></div>
+                        <div
+                            class="pop-line"
+                            id="lp-cm"
+                            style="color: #f7a130"
+                        ></div>
+                    </div>
+                    <div class="garbage-meter" id="local-gmeter"></div>
+                    <div class="board-overlay" id="local-overlay">
+                        <span class="ov-title">TEZA</span>
+                        <span class="ov-msg" id="local-ov-msg">Waiting...</span>
+                    </div>
+                </div>
+                <div class="panel-right">
+                    <div class="p-label">Next</div>
+                    <canvas
+                        class="mini-canvas"
+                        id="local-next"
+                        width="80"
+                        height="360"
+                    ></canvas>
+                </div>
+            </div>
 
-/* ============================================================
- * §8  STATS
- * ============================================================ */
-function updateLocalStats() {
-  if (!localEng) return;
-  const el = id => document.getElementById(id);
-  el('l-score').textContent = localEng.score.toLocaleString();
-  el('l-atk').textContent   = localEng.attack;
-  el('l-lines').textContent = localEng.lines;
-  el('l-b2b').textContent   = localEng.b2b > 0 ? `×${localEng.b2b}` : '—';
-  document.getElementById('b2b-bar').style.width = Math.min(localEng.b2b/8,1)*100+'%';
-  const sec = (performance.now()-startTime)/1000;
-  el('l-pps').textContent   = sec>0 ? (localEng.attack/sec*0+/* pieces */ (localEng.lines>0?localEng.attack/sec:0)).toFixed(2) : '0.00';
-  el('l-apm').textContent   = sec>0 ? Math.round(localEng.attack/sec*60) : 0;
-}
-function updateRemoteStats(data) {
-  const el = id => document.getElementById(id);
-  el('r-atk').textContent   = data.attack  ?? '—';
-  el('r-lines').textContent = data.lines   ?? '—';
-  el('r-b2b').textContent   = data.b2b > 0 ? `×${data.b2b}` : '—';
-  document.getElementById('r-b2b-bar').style.width = Math.min((data.b2b||0)/8,1)*100+'%';
-}
+            <!-- VS column -->
+            <div id="vs-col">
+                <div id="vs-label">VS</div>
+                <div id="conn-dot"></div>
+                <div id="ping-display">— ms</div>
+                <div id="match-type-badge"></div>
+            </div>
 
-/* ============================================================
- * §9  OVERLAY HELPERS
- * ============================================================ */
-function showLocalOverlay(msg) {
-  const ov = document.getElementById('local-overlay');
-  document.getElementById('local-ov-msg').textContent = msg;
-  ov.classList.add('show');
-}
-function hideLocalOverlay() {
-  document.getElementById('local-overlay').classList.remove('show');
-}
-function showRemoteOverlay(msg) {
-  const ov = document.getElementById('remote-overlay');
-  document.getElementById('remote-ov-msg').textContent = msg;
-  ov.classList.add('show');
-}
-function hideRemoteOverlay() {
-  document.getElementById('remote-overlay').classList.remove('show');
-}
+            <!-- REMOTE board -->
+            <div class="player-unit remote-unit" id="remote-unit">
+                <div class="panel-left">
+                    <div>
+                        <div class="p-label">Hold</div>
+                        <canvas
+                            class="mini-canvas"
+                            id="remote-hold"
+                            width="80"
+                            height="60"
+                        ></canvas>
+                    </div>
+                    <div class="stat">
+                        <span class="stat-label">Attack</span
+                        ><span class="stat-val" id="r-atk">0</span>
+                    </div>
+                    <div class="stat">
+                        <span class="stat-label">Lines</span
+                        ><span class="stat-val" id="r-lines">0</span>
+                    </div>
+                    <div class="stat">
+                        <span class="stat-label">B2B</span>
+                        <span class="stat-val" id="r-b2b">—</span>
+                        <div id="r-b2b-bar"></div>
+                    </div>
+                </div>
+                <div class="board-wrap">
+                    <div class="player-name">
+                        Opponent — <span id="remote-id">—</span>
+                    </div>
+                    <canvas
+                        class="board"
+                        id="remote-board"
+                        width="280"
+                        height="560"
+                    ></canvas>
+                    <div class="garbage-meter" id="remote-gmeter"></div>
+                    <div class="board-overlay show" id="remote-overlay">
+                        <span class="ov-title">Opponent</span>
+                        <span class="ov-msg" id="remote-ov-msg"
+                            >Waiting...</span
+                        >
+                    </div>
+                </div>
+                <div class="panel-right">
+                    <div class="p-label">Next</div>
+                    <canvas
+                        class="mini-canvas"
+                        id="remote-next"
+                        width="80"
+                        height="360"
+                    ></canvas>
+                </div>
+            </div>
 
-/* ============================================================
- * §10  RIBBON MESSAGE HANDLERS
- * ============================================================ */
-function connectRibbon() {
-  const wsUrl = `ws://${location.host}`;
-  ribbon = new RibbonClient(wsUrl);
+            <div id="footer">
+                <div class="hint">
+                    ← → Move · ↑ CW · Z CCW · A 180° · ↓ Soft · Space Hard · C
+                    Hold · P Pause
+                </div>
+                <button
+                    id="btn-leave"
+                    style="
+                        width: auto;
+                        padding: 8px 20px;
+                        font-size: 9px;
+                        margin-top: 4px;
+                    "
+                >
+                    Leave Room
+                </button>
+            </div>
+        </div>
 
-  ribbon.on('_connected', () => {
-    document.getElementById('conn-indicator').classList.add('connected');
-    setStatus('Connected to server');
-  });
+        <!-- ══════════════════════════════════════════════════════════
+     SCREEN 4: RESULT
+══════════════════════════════════════════════════════════ -->
+        <div id="result-screen" class="screen">
+            <div id="result-outcome">—</div>
+            <div id="tr-delta"></div>
+            <div class="result-stats">
+                <div class="rs-col">
+                    <div class="rs-header" id="rs-my-name">You</div>
+                    <div class="rs-row">
+                        <span class="rs-label">Attack</span
+                        ><span class="rs-val" id="rs-my-atk">—</span>
+                    </div>
+                    <div class="rs-row">
+                        <span class="rs-label">Lines</span
+                        ><span class="rs-val" id="rs-my-lines">—</span>
+                    </div>
+                    <div class="rs-row">
+                        <span class="rs-label">APM</span
+                        ><span class="rs-val" id="rs-my-apm">—</span>
+                    </div>
+                    <div class="rs-row">
+                        <span class="rs-label">PPS</span
+                        ><span class="rs-val" id="rs-my-pps">—</span>
+                    </div>
+                </div>
+                <div class="rs-col">
+                    <div class="rs-header" id="rs-opp-name">Opponent</div>
+                    <div class="rs-row">
+                        <span class="rs-label">Attack</span
+                        ><span class="rs-val" id="rs-opp-atk">—</span>
+                    </div>
+                    <div class="rs-row">
+                        <span class="rs-label">Lines</span
+                        ><span class="rs-val" id="rs-opp-lines">—</span>
+                    </div>
+                    <div class="rs-row">
+                        <span class="rs-label">APM</span
+                        ><span class="rs-val" id="rs-opp-apm">—</span>
+                    </div>
+                    <div class="rs-row">
+                        <span class="rs-label">PPS</span
+                        ><span class="rs-val" id="rs-opp-pps">—</span>
+                    </div>
+                </div>
+            </div>
+            <div class="btn-row" style="width: 100%; max-width: 400px">
+                <button id="btn-replay-dl" style="display: none">
+                    ⬇ Download Replay
+                </button>
+                <button class="primary" id="btn-play-again">Play Again</button>
+            </div>
+        </div>
 
-  ribbon.on('_disconnected', () => {
-    document.getElementById('conn-indicator').classList.remove('connected');
-    setStatus('Reconnecting...');
-  });
+        <script src="/shared/engine.js"></script>
+        <script>
+                    "use strict";
 
-  ribbon.on('hello', ({ id, brand }) => {
-    myId = id;
-    document.getElementById('local-id').textContent = id;
-    setStatus(`Connected as ${id}`);
-  });
+                    if (!window.TezaEngine) {
+                        document.body.innerHTML =
+                            '<p style="color:red;padding:20px">engine.js failed to load. Is the server running?</p>';
+                        throw new Error("TezaEngine missing");
+                    }
 
-  ribbon.on('roomJoined', ({ roomId, playerIndex, playerCount }) => {
-    ribbon.roomId = roomId;
-    if (playerCount === 1) {
-      // We created the room — show code to share
-      document.getElementById('room-code-display').textContent = roomId;
-      document.getElementById('room-code-display').style.display = 'block';
-      setStatus(`Room ${roomId} created. Share this code!`);
-    } else {
-      setStatus(`Joined room ${roomId}. Match starting...`);
-    }
-  });
+                    let {
+                        createEngine,
+                        stepEngine,
+                        tickEngine,
+                        PIECES,
+                        COLS,
+                        VIS_ROWS,
+                        VIS_START,
+                        TOTAL_ROWS,
+                        getCells,
+                        getGhost,
+                        tryMove,
+                        createBoard,
+                    } = window.TezaEngine;
 
-  ribbon.on('matchStart', ({ seed, playerIndex, opponent }) => {
-    document.getElementById('remote-id').textContent = opponent;
-    document.getElementById('room-code-display').style.display = 'none';
-    startMatch(seed);
-  });
+                    /* ============================================================
+                     * §1  RIBBON CLIENT (unchanged from Phase 3)
+                     * ============================================================ */
+                    class RibbonClient {
+                        constructor(url) {
+                            this.url = url;
+                            this.sendSeq = 0;
+                            this.recvAck = 0;
+                            this.sendBuf = [];
+                            this.handlers = {};
+                            this.roomId = null;
+                            this.pingStart = 0;
+                            this._connect();
+                        }
+                        _connect() {
+                            this.ws = new WebSocket(this.url);
+                            this.ws.onopen = () => {
+                                this._emit("_connected");
+                                if (this.roomId)
+                                    this.send("resume", {
+                                        roomId: this.roomId,
+                                        peerAck: this.recvAck,
+                                    });
+                            };
+                            this.ws.onmessage = ({ data }) => {
+                                let m;
+                                try {
+                                    m = JSON.parse(data);
+                                } catch {
+                                    return;
+                                }
+                                if (typeof m.s === "number") this.recvAck = m.s;
+                                this._emit(m.t, m.d || {});
+                            };
+                            this.ws.onclose = () => {
+                                this._emit("_disconnected");
+                                setTimeout(() => this._connect(), 2000);
+                            };
+                            this.ws.onerror = (e) => console.error("[Ribbon]", e);
+                        }
+                        send(type, data = {}) {
+                            if (this.ws.readyState !== WebSocket.OPEN) return;
+                            const p = {
+                                t: type,
+                                s: this.sendSeq++,
+                                a: this.recvAck,
+                                d: data,
+                            };
+                            const raw = JSON.stringify(p);
+                            this.sendBuf.push({ s: p.s, raw });
+                            if (this.sendBuf.length > 100) this.sendBuf.shift();
+                            this.ws.send(raw);
+                        }
+                        on(type, fn) {
+                            (this.handlers[type] = this.handlers[type] || []).push(fn);
+                            return this;
+                        }
+                        _emit(type, data) {
+                            (this.handlers[type] || []).forEach((fn) => fn(data));
+                        }
+                    }
 
-  /*
-   * Server broadcasts opponent's board state periodically.
-   * We reconstruct a partial engine for rendering.
-   * The opponent's engine runs on the server; we just display.
-   */
-  ribbon.on('opponentState', ({ board, held, bagPeek, attack, lines, b2b, garbageQueue }) => {
-    if (!remoteEng) remoteEng = { board: createBoard(), held:null, bag:null, attack:0, lines:0, b2b:0, garbageQueue:[], dead:false, active:null, lastSpin:null };
-    remoteEng.board         = board;
-    remoteEng.held          = held;
-    remoteEng.garbageQueue  = garbageQueue || [];
-    // Fake bag peek for display
-    remoteEng.bag = { peek: () => bagPeek || [] };
-    updateRemoteStats({ attack, lines, b2b });
-  });
+                    /* ============================================================
+                     * §2  RENDERING (unchanged from Phase 3)
+                     * ============================================================ */
+                    const CELL = 28;
+                    function lighten(hex, a) {
+                        if (!hex || hex[0] !== "#") return hex || "#888";
+                        const n = parseInt(hex.slice(1), 16);
+                        return `rgb(${Math.min(255, (n >> 16) + Math.round(255 * a))},${Math.min(255, ((n >> 8) & 0xff) + Math.round(255 * a))},${Math.min(255, (n & 0xff) + Math.round(255 * a))})`;
+                    }
+                    function drawCell(ctx, r, c, color, alpha = 1) {
+                        ctx.globalAlpha = alpha;
+                        ctx.fillStyle = color;
+                        ctx.fillRect(c * CELL + 1, r * CELL + 1, CELL - 2, CELL - 2);
+                        ctx.fillStyle = lighten(color, 0.25);
+                        ctx.fillRect(c * CELL + 2, r * CELL + 2, CELL - 6, 3);
+                        ctx.fillRect(c * CELL + 2, r * CELL + 2, 3, CELL - 6);
+                        ctx.globalAlpha = 1;
+                    }
+                    function renderBoard(ctx, eng, isLocal) {
+                        ctx.clearRect(0, 0, COLS * CELL, VIS_ROWS * CELL);
+                        ctx.strokeStyle = "#1a1a28";
+                        ctx.lineWidth = 0.5;
+                        for (let r = 0; r <= VIS_ROWS; r++) {
+                            ctx.beginPath();
+                            ctx.moveTo(0, r * CELL);
+                            ctx.lineTo(COLS * CELL, r * CELL);
+                            ctx.stroke();
+                        }
+                        for (let c = 0; c <= COLS; c++) {
+                            ctx.beginPath();
+                            ctx.moveTo(c * CELL, 0);
+                            ctx.lineTo(c * CELL, VIS_ROWS * CELL);
+                            ctx.stroke();
+                        }
+                        for (let r = VIS_START; r < TOTAL_ROWS; r++)
+                            for (let c = 0; c < COLS; c++)
+                                if (eng.board[r][c])
+                                    drawCell(ctx, r - VIS_START, c, eng.board[r][c]);
+                        if (!isLocal || eng.dead) return;
+                        const ghost = getGhost(eng.board, eng.active);
+                        ctx.globalAlpha = 0.18;
+                        for (const [r, c] of getCells(ghost))
+                            if (r >= VIS_START) {
+                                ctx.fillStyle = PIECES[eng.active.type].color;
+                                ctx.fillRect(
+                                    c * CELL + 1,
+                                    (r - VIS_START) * CELL + 1,
+                                    CELL - 2,
+                                    CELL - 2,
+                                );
+                                ctx.strokeStyle = PIECES[eng.active.type].color;
+                                ctx.lineWidth = 1.5;
+                                ctx.strokeRect(
+                                    c * CELL + 1,
+                                    (r - VIS_START) * CELL + 1,
+                                    CELL - 2,
+                                    CELL - 2,
+                                );
+                            }
+                        ctx.globalAlpha = 1;
+                        const armed =
+                            eng.lastSpin === "candidate" && eng.active.type === "T";
+                        for (const [r, c] of getCells(eng.active))
+                            if (r >= VIS_START) {
+                                drawCell(
+                                    ctx,
+                                    r - VIS_START,
+                                    c,
+                                    PIECES[eng.active.type].color,
+                                );
+                                if (armed) {
+                                    ctx.strokeStyle = "#e0a0ff";
+                                    ctx.lineWidth = 1;
+                                    ctx.strokeRect(
+                                        c * CELL + 1,
+                                        (r - VIS_START) * CELL + 1,
+                                        CELL - 2,
+                                        CELL - 2,
+                                    );
+                                }
+                            }
+                    }
+                    function renderMini(ctx, type, w, h, alpha = 1) {
+                        ctx.clearRect(0, 0, w, h);
+                        if (!type) return;
+                        const cells = PIECES[type].states[0],
+                            color = PIECES[type].color;
+                        const minC = Math.min(...cells.map(([, c]) => c)),
+                            maxC = Math.max(...cells.map(([, c]) => c));
+                        const minR = Math.min(...cells.map(([r]) => r)),
+                            maxR = Math.max(...cells.map(([r]) => r));
+                        const ox =
+                                Math.floor((w - (maxC - minC + 1) * CELL) / 2) -
+                                minC * CELL,
+                            oy =
+                                Math.floor((h - (maxR - minR + 1) * CELL) / 2) -
+                                minR * CELL;
+                        ctx.globalAlpha = alpha;
+                        for (const [r, c] of cells) {
+                            const x = ox + c * CELL,
+                                y = oy + r * CELL;
+                            ctx.fillStyle = color;
+                            ctx.fillRect(x + 1, y + 1, CELL - 2, CELL - 2);
+                            ctx.fillStyle = lighten(color, 0.25);
+                            ctx.fillRect(x + 2, y + 2, CELL - 6, 3);
+                            ctx.fillRect(x + 2, y + 2, 3, CELL - 6);
+                        }
+                        ctx.globalAlpha = 1;
+                    }
+                    function renderNext(ctx, bag, w) {
+                        ctx.clearRect(0, 0, w, 360);
+                        if (!bag) return;
+                        const preview = bag.peek(5),
+                            slotH = 72;
+                        for (let i = 0; i < preview.length; i++) {
+                            const type = preview[i],
+                                cells = PIECES[type].states[0],
+                                color = PIECES[type].color;
+                            const minC = Math.min(...cells.map(([, c]) => c)),
+                                maxC = Math.max(...cells.map(([, c]) => c));
+                            const minR = Math.min(...cells.map(([r]) => r)),
+                                maxR = Math.max(...cells.map(([r]) => r));
+                            const ox =
+                                    Math.floor((w - (maxC - minC + 1) * CELL) / 2) -
+                                    minC * CELL,
+                                oy =
+                                    i * slotH +
+                                    Math.floor((slotH - (maxR - minR + 1) * CELL) / 2) -
+                                    minR * CELL;
+                            ctx.globalAlpha = 1 - i * 0.15;
+                            for (const [r, c] of cells) {
+                                const x = ox + c * CELL,
+                                    y = oy + r * CELL;
+                                ctx.fillStyle = color;
+                                ctx.fillRect(x + 1, y + 1, CELL - 2, CELL - 2);
+                                ctx.fillStyle = lighten(color, 0.25);
+                                ctx.fillRect(x + 2, y + 2, CELL - 6, 3);
+                                ctx.fillRect(x + 2, y + 2, 3, CELL - 6);
+                            }
+                            ctx.globalAlpha = 1;
+                            if (i < 4) {
+                                ctx.strokeStyle = "#222232";
+                                ctx.lineWidth = 0.5;
+                                ctx.beginPath();
+                                ctx.moveTo(4, (i + 1) * slotH);
+                                ctx.lineTo(w - 4, (i + 1) * slotH);
+                                ctx.stroke();
+                            }
+                        }
+                    }
+                    function updateGMeter(el, queue) {
+                        el.innerHTML = "";
+                        const total = queue.reduce((s, g) => s + g.count, 0),
+                            show = Math.min(total, VIS_ROWS);
+                        const bh = Math.max(2, Math.floor(560 / VIS_ROWS) - 1);
+                        for (let i = 0; i < show; i++) {
+                            const b = document.createElement("div");
+                            b.className = "g-block";
+                            b.style.height = bh + "px";
+                            el.appendChild(b);
+                        }
+                    }
 
-  ribbon.on('incomingGarbage', ({ lines, from, spin, b2b: opB2b }) => {
-    // Server already applied garbage to our engine; update our local engine's queue
-    stepEngine(localEng, { type:'receiveGarbage', value: lines });
-    updateGarbageMeter(lGmeter, localEng.garbageQueue);
-    // Flash warning
-    const board = document.getElementById('local-board');
-    board.style.borderColor = 'var(--danger)';
-    setTimeout(()=>board.style.borderColor='var(--border)',400);
-  });
+                    /* ============================================================
+                     * §3  POPUP SYSTEM
+                     * ============================================================ */
+                    const CLEAR_NAMES = ["", "Single", "Double", "Triple", "Quad"];
+                    let popTimer = null;
+                    function showPopup(ids, spin, cleared, b2b, combo, ac) {
+                        clearTimeout(popTimer);
+                        const els = ids.map((id) => document.getElementById(id));
+                        els.forEach((e) => e && e.classList.remove("show"));
+                        if (!cleared) return;
+                        if (ac) els[0].classList.add("show");
+                        if (b2b > 1) {
+                            els[1].textContent = `B2B ×${b2b - 1}`;
+                            els[1].classList.add("show");
+                        }
+                        if (spin === "tspin") {
+                            els[2].textContent = [
+                                "T-Spin",
+                                "T-Spin Single",
+                                "T-Spin Double",
+                                "T-Spin Triple",
+                            ][Math.min(cleared, 3)];
+                            els[2].classList.add("show");
+                        } else if (spin === "mini") {
+                            els[2].textContent =
+                                cleared === 1 ? "T-Mini Single" : "T-Mini Double";
+                            els[2].classList.add("show");
+                        } else if (cleared > 0) {
+                            els[3].textContent = CLEAR_NAMES[cleared] || "";
+                            els[3].style.color = cleared === 4 ? "#41b0d8" : "#e8e8f0";
+                            els[3].classList.add("show");
+                        }
+                        if (combo >= 2) {
+                            els[4].textContent = `${combo - 1} combo`;
+                            els[4].classList.add("show");
+                        }
+                        popTimer = setTimeout(
+                            () => els.forEach((e) => e && e.classList.remove("show")),
+                            1800,
+                        );
+                    }
 
-  ribbon.on('attackSent', ({ lines, spin, b2b, allClear }) => {
-    // Server confirmed our attack was processed
-    // Popups already shown locally from local engine events
-  });
+                    /* ============================================================
+                     * §4  STATE
+                     * ============================================================ */
+                    let ribbon = null,
+                        myUsername = null,
+                        myProfile = null;
+                    let localEng = null,
+                        remoteEng = null;
+                    let gameActive = false,
+                        isSpectator = false,
+                        isRanked = false;
+                    let startTime = 0,
+                        rafId = null,
+                        lastTime = 0,
+                        accumulator = 0;
+                    let pendingAction = null,
+                        lastReplayId = null;
+                    let soloMode = false,
+                        soloInterval = null;
+                    const TICK_MS = 1000 / 60;
 
-  ribbon.on('opponentDisconnected', ({ grace }) => {
-    showRemoteOverlay(`Disconnected\n${Math.round(grace/1000)}s to reconnect`);
-  });
-  ribbon.on('opponentReconnected', () => {
-    hideRemoteOverlay();
-  });
+                    // canvas refs
+                    const lBCtx = document
+                        .getElementById("local-board")
+                        .getContext("2d");
+                    const rBCtx = document
+                        .getElementById("remote-board")
+                        .getContext("2d");
+                    const lHCtx = document
+                        .getElementById("local-hold")
+                        .getContext("2d");
+                    const rHCtx = document
+                        .getElementById("remote-hold")
+                        .getContext("2d");
+                    const lNCtx = document
+                        .getElementById("local-next")
+                        .getContext("2d");
+                    const rNCtx = document
+                        .getElementById("remote-next")
+                        .getContext("2d");
+                    const lGm = document.getElementById("local-gmeter");
+                    const rGm = document.getElementById("remote-gmeter");
 
-  ribbon.on('matchOver', ({ won, winnerIndex }) => {
-    gameActive = false;
-    showLocalOverlay(won ? '🏆 You Win!' : 'You Lost');
-    showRemoteOverlay(won ? 'Opponent Lost' : '🏆 Opponent Wins');
-  });
+                    /* ============================================================
+                     * §5  SCREEN MANAGER
+                     * ============================================================ */
+                    function showScreen(id) {
+                        document
+                            .querySelectorAll(".screen")
+                            .forEach((s) => s.classList.remove("active"));
+                        document.getElementById(id).classList.add("active");
+                    }
 
-  ribbon.on('allClear', ({ player }) => {
-    if (player === 0) setStatus('ALL CLEAR!');
-  });
+                    /* ============================================================
+                     * §6  PROFILE UI
+                     * ============================================================
+                     * RD bar: full left = RD 350 (unranked), full right = RD 30 (very certain).
+                     * Bar fills as RD drops — represents calibration progress.
+                     * TR is hidden (shown as "?") until RD ≤ 100.
+                     */
+                    function updateProfileCard(profile) {
+                        myProfile = profile;
+                        document.getElementById("pc-name").textContent =
+                            profile.username;
+                        document.getElementById("pc-tr").innerHTML =
+                            profile.tr != null
+                                ? `${profile.tr.toLocaleString()} <span>TR</span>`
+                                : `? <span>TR (calibrating)</span>`;
+                        document.getElementById("pc-games").textContent =
+                            profile.gamesPlayed;
+                        document.getElementById("pc-wl").textContent =
+                            `${profile.wins}/${profile.losses}`;
+                        document.getElementById("pc-wr").textContent =
+                            profile.gamesPlayed > 0 ? profile.winRate + "%" : "—";
+                        document.getElementById("pc-apm").textContent = profile.bestAPM;
+                        document.getElementById("pc-pps").textContent = profile.bestPPS;
+                        // RD bar: 0% = RD350 (uncertain), 100% = RD30 (certain)
+                        const rdPct = Math.round(
+                            Math.max(0, Math.min(1, (350 - profile.rd) / (350 - 30))) *
+                                100,
+                        );
+                        document.getElementById("rd-bar").style.width = rdPct + "%";
+                        document.getElementById("rd-hint").textContent =
+                            profile.rd <= 100
+                                ? `RD: ${profile.rd} — ranked`
+                                : `RD: ${profile.rd} — ${Math.ceil((profile.rd - 100) / 15)} games to rank`;
+                    }
 
-  ribbon.on('error', ({ msg, code }) => {
-    setStatus(`Error: ${msg}`);
-  });
+                    function updateLeaderboard(entries) {
+                        const el = document.getElementById("leaderboard");
+                        if (!entries.length) {
+                            el.innerHTML =
+                                '<div style="font-size:9px;letter-spacing:2px;color:var(--dim)">No ranked players yet</div>';
+                            return;
+                        }
+                        el.innerHTML = entries
+                            .map(
+                                (e, i) => `
+            <div class="lb-entry">
+              <span class="lb-rank">#${i + 1}</span>
+              <span class="lb-name">${e.username}</span>
+              <span class="lb-tr">${e.tr?.toLocaleString() || "?"}</span>
+              <span class="lb-wr">${e.winRate}%</span>
+            </div>`,
+                            )
+                            .join("");
+                    }
 
-  // Ping/pong for latency display
-  ribbon.on('ping', () => ribbon.send('pong'));
-  setInterval(() => {
-    if (ribbon) {
-      ribbon.pingStart = performance.now();
-      ribbon.send('ping');
-    }
-  }, 3000);
-  ribbon.on('pong', () => {
-    const lat = Math.round(performance.now() - ribbon.pingStart);
-    document.getElementById('ping-display').textContent = `${lat} ms`;
-  });
-}
+                    /* ============================================================
+                     * §7  RESULT SCREEN
+                     * ============================================================ */
+                    function showResult(data) {
+                        /*
+                         * POST-MATCH RESULT SCREEN
+                         * Shows: win/loss, TR delta (if ranked), stats comparison,
+                         * replay download button, play-again button.
+                         *
+                         * TR DELTA DISPLAY:
+                         *   Shows "+142 TR" in green for wins, "-87 TR" in red for losses.
+                         *   Hidden if match was casual or player isn't logged in.
+                         *   After a calibration match (RD still high), shows
+                         *   "Calibrating..." instead of a delta.
+                         */
+                        const {
+                            won,
+                            myStats,
+                            oppStats,
+                            trOld,
+                            trNew,
+                            trDelta,
+                            replayId,
+                        } = data;
+                        lastReplayId = replayId;
 
-/* ============================================================
- * §11  MATCH START
- * ============================================================ */
-function startMatch(seed) {
-  localEng  = createEngine(seed);
-  remoteEng = null;
-  gameActive = true;
-  startTime  = performance.now();
 
-  document.getElementById('lobby').style.display = 'none';
-  document.getElementById('game').style.display  = 'flex';
-  hideLocalOverlay();
-  showRemoteOverlay('Waiting for board data...');
 
-  if (!rafId) startLoop();
-}
+                        const deltaEl = document.getElementById("tr-delta");
+                        if (trDelta != null) {
+                            const sign = trDelta >= 0 ? "+" : "";
+                            deltaEl.textContent = `${sign}${trDelta} TR  (${trNew?.toLocaleString()} TR)`;
+                            deltaEl.className = trDelta >= 0 ? "up" : "dn";
+                        } else if (isRanked) {
+                            deltaEl.textContent = "Calibrating rating...";
+                            deltaEl.className = "";
+                        } else {
+                            deltaEl.textContent = "Casual match";
+                            deltaEl.className = "";
+                        }
 
-/* ============================================================
- * §12  SOLO MODE (no server — practice against sandbox)
- * ============================================================ */
-function startSolo() {
-  soloMode = true;
-  const seed = Date.now();
-  localEng   = createEngine(seed);
-  remoteEng  = null;
-  gameActive  = true;
-  startTime   = performance.now();
+                        const fmt = (v) => (v != null ? Math.round(v) : "—");
+                        document.getElementById("rs-my-name").textContent =
+                            myUsername || "You";
+                        document.getElementById("rs-my-atk").textContent = fmt(
+                            myStats?.attack,
+                        );
+                        document.getElementById("rs-my-lines").textContent = fmt(
+                            myStats?.lines,
+                        );
+                        document.getElementById("rs-my-apm").textContent = fmt(
+                            myStats?.apm,
+                        );
+                        document.getElementById("rs-my-pps").textContent =
+                            myStats?.pps != null ? myStats.pps.toFixed(2) : "—";
 
-  // Stub out remote panel
-  showRemoteOverlay('Solo Mode');
+                        document.getElementById("rs-opp-name").textContent =
+                            document.getElementById("remote-id").textContent ||
+                            "Opponent";
+                        document.getElementById("rs-opp-atk").textContent = fmt(
+                            oppStats?.attack,
+                        );
+                        document.getElementById("rs-opp-lines").textContent = fmt(
+                            oppStats?.lines,
+                        );
+                        document.getElementById("rs-opp-apm").textContent = fmt(
+                            oppStats?.apm,
+                        );
+                        document.getElementById("rs-opp-pps").textContent =
+                            oppStats?.pps != null ? oppStats.pps.toFixed(2) : "—";
 
-  document.getElementById('lobby').style.display = 'none';
-  document.getElementById('game').style.display  = 'flex';
-  document.getElementById('conn-indicator').style.background = 'var(--warn)';
-  hideLocalOverlay();
+                        document.getElementById("btn-replay-dl").style.display =
+                            replayId ? "block" : "none";
 
-  // Auto-garbage every 5 seconds
-  setInterval(() => {
-    if (!gameActive || !localEng || localEng.dead) return;
-    const lines = 1 + Math.floor(Math.random()*3);
-    stepEngine(localEng, { type:'receiveGarbage', value: lines });
-    updateGarbageMeter(lGmeter, localEng.garbageQueue);
-  }, 5000);
+                        showScreen("result-screen");
+                    }
 
-  if (!rafId) startLoop();
-}
+                    /* ============================================================
+                     * §8  INPUT HANDLING
+                     * ============================================================ */
+                    const keys = {},
+                        dasC = { ArrowLeft: 0, ArrowRight: 0 },
+                        dasA = { ArrowLeft: false, ArrowRight: false };
+                    const DAS_DELAY = 10,
+                        ARR = 2;
 
-/* ============================================================
- * §13  UI WIRING
- * ============================================================ */
-function setStatus(msg) {
-  document.getElementById('status-line').textContent = msg;
-}
+                    document.addEventListener("keydown", (e) => {
+                        if (e.repeat) return;
+                        keys[e.code] = true;
+                        if (!gameActive || !localEng || localEng.dead || isSpectator)
+                            return;
+                        handleKey(e.code);
+                        e.preventDefault();
+                    });
+                    document.addEventListener("keyup", (e) => {
+                        keys[e.code] = false;
+                        if (e.code === "ArrowLeft") {
+                            dasC.ArrowLeft = 0;
+                            dasA.ArrowLeft = false;
+                        }
+                        if (e.code === "ArrowRight") {
+                            dasC.ArrowRight = 0;
+                            dasA.ArrowRight = false;
+                        }
+                    });
 
-document.getElementById('btn-create').addEventListener('click', () => {
-  if (!ribbon) connectRibbon();
-  setTimeout(() => ribbon && ribbon.send('createRoom'), 300);
-});
+                    function handleKey(code) {
+                        switch (code) {
+                            case "ArrowLeft":
+                                sendInput({ type: "move", value: -1 });
+                                dasC.ArrowLeft = 0;
+                                dasA.ArrowLeft = false;
+                                break;
+                            case "ArrowRight":
+                                sendInput({ type: "move", value: 1 });
+                                dasC.ArrowRight = 0;
+                                dasA.ArrowRight = false;
+                                break;
+                            case "ArrowDown":
+                                sendInput({ type: "softDrop" });
+                                break;
+                            case "ArrowUp":
+                                sendInput({ type: "rotate", value: 1 });
+                                break;
+                            case "KeyZ":
+                                sendInput({ type: "rotate", value: -1 });
+                                break;
+                            case "KeyA":
+                                sendInput({ type: "rotate", value: 2 });
+                                break;
+                            case "Space":
+                                sendInput({ type: "hardDrop" });
+                                break;
+                            case "KeyC":
+                            case "ShiftLeft":
+                            case "ShiftRight":
+                                sendInput({ type: "hold" });
+                                break;
+                        }
+                    }
 
-document.getElementById('btn-join').addEventListener('click', () => {
-  const code = document.getElementById('room-input').value.trim().toUpperCase();
-  if (!code) { setStatus('Enter a room code'); return; }
-  if (!ribbon) connectRibbon();
-  setTimeout(() => ribbon && ribbon.send('joinRoom', { roomId: code }), 300);
-});
+                    function processDAS() {
+                        for (const dir of ["ArrowLeft", "ArrowRight"]) {
+                            if (!keys[dir]) continue;
+                            dasC[dir]++;
+                            if (!dasA[dir]) {
+                                if (dasC[dir] >= DAS_DELAY) {
+                                    dasA[dir] = true;
+                                    dasC[dir] = 0;
+                                }
+                            } else if (dasC[dir] >= ARR) {
+                                dasC[dir] = 0;
+                                sendInput({
+                                    type: "move",
+                                    value: dir === "ArrowLeft" ? -1 : 1,
+                                });
+                            }
+                        }
+                        if (keys["ArrowDown"]) sendInput({ type: "softDrop" });
+                    }
 
-document.getElementById('room-input').addEventListener('keydown', e => {
-  if (e.key === 'Enter') document.getElementById('btn-join').click();
-});
+                    function sendInput(input) {
+                        const evs = stepEngine(localEng, input);
+                        handleLocalEvents(evs);
+                        if (ribbon && !soloMode) ribbon.send("input", { input });
+                    }
 
-document.getElementById('btn-solo').addEventListener('click', startSolo);
+                    function handleLocalEvents(evs) {
+                        for (const ev of evs) {
+                            if (ev.type === "attack")
+                                showPopup(
+                                    ["lp-pc", "lp-b2b", "lp-sp", "lp-cl", "lp-cm"],
+                                    ev.spin,
+                                    ev.lines,
+                                    ev.b2b,
+                                    ev.combo,
+                                    ev.allClear,
+                                );
+                             if (ev.type === "gameOver") {
+                                 gameActive = false;
+                                 showOv("local", "You Lost");
+                                 if (soloInterval) {
+                                     clearInterval(soloInterval);
+                                     soloInterval = null;
+                                 }
+                             }
+                        }
+                        updateLocalStats();
+                        updateGMeter(lGm, localEng.garbageQueue);
+                    }
 
-document.getElementById('btn-leave').addEventListener('click', () => {
-  cancelAnimationFrame(rafId); rafId = null;
-  gameActive = false;
-  document.getElementById('game').style.display  = 'none';
-  document.getElementById('lobby').style.display = 'flex';
-  if (ribbon) ribbon.roomId = null;
-  soloMode = false;
-});
+                    /* ============================================================
+                     * §9  GAME LOOP
+                     * ============================================================ */
+                    function startLoop() {
+                        lastTime = performance.now();
+                        accumulator = 0;
+                        if (!rafId) rafId = requestAnimationFrame(loop);
+                    }
+                    function stopLoop() {
+                        cancelAnimationFrame(rafId);
+                        rafId = null;
+                    }
 
-// Auto-connect on load (server presence assumed)
-window.addEventListener('load', () => {
-  // Try to connect; if server is down, solo mode still works
-  try { connectRibbon(); } catch(e) { setStatus('Server unavailable — use Solo mode'); }
-});
-</script>
-</body>
+                    function loop(now) {
+                        let delta = now - lastTime;
+                        lastTime = now;
+                        if (delta > 250) delta = 250;
+                        accumulator += delta;
+                        while (accumulator >= TICK_MS) {
+                            if (
+                                gameActive &&
+                                localEng &&
+                                !localEng.dead &&
+                                !isSpectator
+                            ) {
+                                processDAS();
+                                const evs = tickEngine(localEng);
+                                handleLocalEvents(evs);
+                            }
+                            accumulator -= TICK_MS;
+                        }
+                        renderAll();
+                        rafId = requestAnimationFrame(loop);
+                    }
+
+                    function renderAll() {
+                        if (localEng) {
+                            renderBoard(lBCtx, localEng, !isSpectator);
+                            renderMini(
+                                lHCtx,
+                                localEng.held,
+                                80,
+                                60,
+                                localEng.canHold ? 1 : 0.4,
+                            );
+                            renderNext(lNCtx, localEng.bag, 80);
+                        }
+                        if (remoteEng) {
+                            renderBoard(rBCtx, remoteEng, false);
+                            renderMini(rHCtx, remoteEng.held, 80, 60);
+                            renderNext(rNCtx, remoteEng.bag, 80);
+                            updateGMeter(rGm, remoteEng.garbageQueue || []);
+                        }
+                    }
+
+                    /* ============================================================
+                     * §10  STATS
+                     * ============================================================ */
+                    function updateLocalStats() {
+                        if (!localEng) return;
+                        document.getElementById("l-score").textContent =
+                            localEng.score.toLocaleString();
+                        document.getElementById("l-atk").textContent = localEng.attack;
+                        document.getElementById("l-lines").textContent = localEng.lines;
+                        document.getElementById("l-b2b").textContent =
+                            localEng.b2b > 0 ? `×${localEng.b2b}` : "—";
+                        document.getElementById("b2b-bar").style.width =
+                            Math.min(localEng.b2b / 8, 1) * 100 + "%";
+                        const sec = (performance.now() - startTime) / 1000;
+                        document.getElementById("l-apm").textContent =
+                            sec > 0 ? Math.round((localEng.attack / sec) * 60) : 0;
+                        document.getElementById("l-pps").textContent =
+                            sec > 0
+                                ? ((localEng.lines / sec) * 0.5).toFixed(2)
+                                : "0.00";
+                    }
+                    function updateRemoteStats(s) {
+                        document.getElementById("r-atk").textContent = s.attack ?? "—";
+                        document.getElementById("r-lines").textContent = s.lines ?? "—";
+                        document.getElementById("r-b2b").textContent =
+                            s.b2b > 0 ? `×${s.b2b}` : "—";
+                        document.getElementById("r-b2b-bar").style.width =
+                            Math.min((s.b2b || 0) / 8, 1) * 100 + "%";
+                    }
+
+                    /* ============================================================
+                     * §11  OVERLAY HELPERS
+                     * ============================================================ */
+                    function showOv(side, msg) {
+                        const id = side + "-overlay";
+                        document.getElementById(id).classList.add("show");
+                        document.getElementById(side + "-ov-msg").textContent = msg;
+                    }
+                    function hideOv(side) {
+                        document
+                            .getElementById(side + "-overlay")
+                            .classList.remove("show");
+                    }
+
+                    /* ============================================================
+                     * §12  RIBBON HANDLERS
+                     * ============================================================ */
+                    function connectRibbon() {
+                        if (ribbon) return;
+                        ribbon = new RibbonClient(`ws://${location.host}`);
+
+                        ribbon.on("_connected", () => {
+                            document.getElementById("conn-dot").classList.add("on");
+                            if (pendingAction) {
+                                const a = pendingAction;
+                                pendingAction = null;
+                                a();
+                            }
+                        });
+                        ribbon.on("_disconnected", () => {
+                            document.getElementById("conn-dot").classList.remove("on");
+                        });
+
+                        ribbon.on("hello", ({ id }) => {
+                            document.getElementById("local-id").textContent = id;
+                            // Auto-login if we have a username from this session
+                            if (myUsername)
+                                ribbon.send("login", { username: myUsername });
+                        });
+
+                        ribbon.on("loginOk", ({ username, profile }) => {
+                            myUsername = username;
+                            updateProfileCard(profile);
+                            ribbon.send("getLeaderboard");
+                            showScreen("lobby-screen");
+                        });
+                        ribbon.on("loginError", ({ msg }) => {
+                            document.getElementById("login-status").textContent = msg;
+                        });
+
+                        ribbon.on("profileData", ({ profile }) => {
+                            updateProfileCard(profile);
+                        });
+                        ribbon.on("leaderboard", ({ entries }) => {
+                            updateLeaderboard(entries);
+                        });
+
+                        ribbon.on("roomJoined", ({ roomId, playerCount, ranked }) => {
+                            ribbon.roomId = roomId;
+                            isRanked = ranked;
+                            isSpectator = false;
+                            document.getElementById("match-type-badge").textContent =
+                                ranked ? "RANKED" : "CASUAL";
+                            document.getElementById("match-type-badge").style.color =
+                                ranked ? "var(--gold)" : "var(--dim)";
+                            if (playerCount === 1) {
+                                document.getElementById("room-code-big").textContent =
+                                    roomId;
+                                document.getElementById("room-code-big").style.display =
+                                    "block";
+                                setLobbyStatus(`Room ${roomId} — share this code`);
+                            } else {
+                                setLobbyStatus(`Joined room ${roomId}`);
+                            }
+                        });
+
+                        ribbon.on("spectatorJoined", ({ roomId, players }) => {
+                            ribbon.roomId = roomId;
+                            isSpectator = true;
+                            document.getElementById("spec-banner").style.display =
+                                "block";
+                            document.getElementById("match-type-badge").textContent =
+                                "SPECTATING";
+                            showScreen("game-screen");
+                            startLoop();
+                            showOv("local", "Spectating");
+                        });
+
+                        ribbon.on(
+                            "matchStart",
+                            ({
+                                seed,
+                                playerIndex,
+                                opponent,
+                                ranked,
+                                opponentProfile,
+                            }) => {
+                                isRanked = ranked || false;
+                                document.getElementById("remote-id").textContent =
+                                    opponent;
+                                document.getElementById("room-code-big").style.display =
+                                    "none";
+                                document
+                                    .getElementById("queue-panel")
+                                    .classList.remove("show");
+                                // Show opponent profile info if available
+                                if (opponentProfile) {
+                                    const trStr =
+                                        opponentProfile.tr != null
+                                            ? `${opponentProfile.tr.toLocaleString()} TR`
+                                            : "Unranked";
+                                    showOv("remote", `${opponent} · ${trStr}`);
+                                    setTimeout(() => hideOv("remote"), 2500);
+                                }
+                                localEng = createEngine(seed);
+                                remoteEng = null;
+                                gameActive = false;
+                                startTime = performance.now();
+                                showOv("local", "Get Ready...");
+                                showScreen("game-screen");
+                                requestAnimationFrame(() => ribbon.send("clientReady"));
+                                startLoop();
+                            },
+                        );
+
+                        ribbon.on("matchLive", () => {
+                            gameActive = true;
+                            hideOv("local");
+                        });
+
+                        // Spectator board snapshot — drives opponent rendering for spectators
+                        // AND provides opponent data for player 2's remote board
+                        ribbon.on(
+                            "boardSnapshot",
+                            ({ boards, held, active, stats, players }) => {
+                                if (isSpectator) {
+                                    // For spectators: use board[0] as left, board[1] as right
+                                    // Inject boards into fake engine objects for renderBoard()
+                                    if (!localEng)
+                                        localEng = {
+                                            board: createBoard(),
+                                            held: null,
+                                            bag: null,
+                                            dead: false,
+                                            active: null,
+                                            lastSpin: null,
+                                            garbageQueue: [],
+                                        };
+                                    if (!remoteEng)
+                                        remoteEng = {
+                                            board: createBoard(),
+                                            held: null,
+                                            bag: null,
+                                            dead: false,
+                                            active: null,
+                                            lastSpin: null,
+                                            garbageQueue: [],
+                                        };
+                                    localEng.board = boards[0];
+                                    localEng.held = held[0];
+                                    localEng.active = active[0];
+                                    remoteEng.board = boards[1];
+                                    remoteEng.held = held[1];
+                                    remoteEng.active = active[1];
+                                    document.getElementById("local-id").textContent =
+                                        players[0] || "P1";
+                                    document.getElementById("remote-id").textContent =
+                                        players[1] || "P2";
+                                    if (stats[0]) updateLocalStats();
+                                    if (stats[1]) updateRemoteStats(stats[1]);
+                                } else {
+                                    // For players: opponent snapshot drives remote display only
+                                    if (!remoteEng)
+                                        remoteEng = {
+                                            board: createBoard(),
+                                            held: null,
+                                            bag: null,
+                                            dead: false,
+                                            active: null,
+                                            lastSpin: null,
+                                            garbageQueue: [],
+                                        };
+                                    remoteEng.board = boards[1];
+                                    remoteEng.held = held[1];
+                                    remoteEng.active = active[1];
+                                    if (stats[1]) updateRemoteStats(stats[1]);
+                                }
+                            },
+                        );
+
+                        ribbon.on("incomingGarbage", ({ lines }) => {
+                            if (localEng && !localEng.dead) {
+                                localEng.garbageQueue.push({ count: lines });
+                                updateGMeter(lGm, localEng.garbageQueue);
+                            }
+                            const b = document.getElementById("local-board");
+                            b.style.borderColor = "#ff4c4c";
+                            b.style.boxShadow = "0 0 12px #ff4c4c55";
+                            setTimeout(() => {
+                                b.style.borderColor = "var(--border)";
+                                b.style.boxShadow = "";
+                            }, 600);
+                        });
+
+                        ribbon.on("matchOver", (data) => {
+                            gameActive = false;
+                            if (localEng) localEng.dead = true;
+                            showOv("local", data.won ? "🏆 You Win!" : "You Lost");
+                            showOv(
+                                "remote",
+                                data.won ? "Opponent Lost" : "🏆 Opponent Wins",
+                            );
+                            // Refresh profile after rated match
+                            if (isRanked && myUsername)
+                                ribbon.send("getProfile", { username: myUsername });
+                            // Transition to result screen after a short delay
+                            setTimeout(() => showResult(data), 2200);
+                        });
+
+                        ribbon.on("opponentDisconnected", () =>
+                            showOv("remote", "Disconnected..."),
+                        );
+                        ribbon.on("opponentReconnected", () => hideOv("remote"));
+                        ribbon.on("allClear", ({ player }) => {
+                            if (player === 0)
+                                document.getElementById("lp-pc").classList.add("show");
+                        });
+
+                        ribbon.on("queueJoined", ({ position, tr }) => {
+                            document
+                                .getElementById("queue-panel")
+                                .classList.add("show");
+                            document.getElementById("queue-pos").textContent =
+                                `Position: ${position}`;
+                            document.getElementById("queue-tr").textContent =
+                                `Your TR: ~${tr.toLocaleString()}`;
+                        });
+                        ribbon.on("queueLeft", () =>
+                            document
+                                .getElementById("queue-panel")
+                                .classList.remove("show"),
+                        );
+
+                        ribbon.on("error", ({ msg }) =>
+                            setLobbyStatus(`Error: ${msg}`),
+                        );
+
+                        // Ping for latency display
+                        setInterval(() => {
+                            if (ribbon) {
+                                ribbon.pingStart = performance.now();
+                                ribbon.send("ping");
+                            }
+                        }, 3000);
+                        ribbon.on("ping", () => ribbon.send("pong"));
+                        ribbon.on("pong", () => {
+                            document.getElementById("ping-display").textContent =
+                                `${Math.round(performance.now() - ribbon.pingStart)} ms`;
+                        });
+                    }
+
+                    /* ============================================================
+                     * §12.5  SOLO MODE
+                     * ============================================================ */
+                    function startSolo() {
+                        soloMode = true;
+                        if (soloInterval) clearInterval(soloInterval);
+
+                        const seed = Date.now();
+                        localEng = createEngine(seed);
+                        remoteEng = null;
+                        gameActive = true;
+                        isSpectator = false;
+                        startTime = performance.now();
+
+                        // Stub out remote panel
+                        showOv("remote", "Solo Practice");
+
+                        showScreen("game-screen");
+                        hideOv("local");
+
+                        // Auto-garbage every 5 seconds
+                        soloInterval = setInterval(() => {
+                            if (!gameActive || !localEng || localEng.dead) return;
+                            const lines = 1 + Math.floor(Math.random() * 3);
+                            localEng.garbageQueue.push({ count: lines });
+                            updateGMeter(lGm, localEng.garbageQueue);
+
+                            const b = document.getElementById("local-board");
+                            b.style.borderColor = "#ff4c4c";
+                            b.style.boxShadow = "0 0 12px #ff4c4c55";
+                            setTimeout(() => {
+                                b.style.borderColor = "var(--border)";
+                                b.style.boxShadow = "";
+                            }, 600);
+                        }, 5000);
+
+                        startLoop();
+                    }
+
+                    /* ============================================================
+                     * §13  UI WIRING
+                     * ============================================================ */
+                    function setLobbyStatus(msg) {
+                        document.getElementById("lobby-status").textContent = msg;
+                    }
+                    function connectAndDo(action) {
+                        if (ribbon && ribbon.ws.readyState === WebSocket.OPEN) action();
+                        else {
+                            pendingAction = action;
+                            connectRibbon();
+                        }
+                    }
+
+                    // LOGIN
+                    document
+                        .getElementById("btn-login")
+                        .addEventListener("click", () => {
+                            const u = document
+                                .getElementById("username-input")
+                                .value.trim();
+                            if (!u) {
+                                document.getElementById("login-status").textContent =
+                                    "Enter a username";
+                                return;
+                            }
+                            document.getElementById("login-status").textContent =
+                                "Connecting...";
+                            connectAndDo(() => ribbon.send("login", { username: u }));
+                        });
+                    document
+                        .getElementById("username-input")
+                        .addEventListener("keydown", (e) => {
+                            if (e.key === "Enter")
+                                document.getElementById("btn-login").click();
+                        });
+
+                    // LOBBY
+                    document
+                        .getElementById("btn-create")
+                        .addEventListener("click", () =>
+                            connectAndDo(() => ribbon.send("createRoom")),
+                        );
+                    document
+                        .getElementById("btn-join")
+                        .addEventListener("click", () => {
+                            const code = document
+                                .getElementById("room-input")
+                                .value.trim()
+                                .toUpperCase();
+                            if (!code) {
+                                setLobbyStatus("Enter a room code");
+                                return;
+                            }
+                            connectAndDo(() =>
+                                ribbon.send("joinRoom", { roomId: code }),
+                            );
+                        });
+                    document
+                        .getElementById("room-input")
+                        .addEventListener("keydown", (e) => {
+                            if (e.key === "Enter")
+                                document.getElementById("btn-join").click();
+                        });
+
+                    document
+                        .getElementById("btn-queue")
+                        .addEventListener("click", () =>
+                            connectAndDo(() => ribbon.send("joinQueue")),
+                        );
+                    document
+                        .getElementById("btn-leave-queue")
+                        .addEventListener("click", () => ribbon?.send("leaveQueue"));
+                    document
+                        .getElementById("btn-leaderboard")
+                        .addEventListener("click", () =>
+                            ribbon?.send("getLeaderboard"),
+                        );
+                    document
+                        .getElementById("btn-logout")
+                        .addEventListener("click", () => {
+                            myUsername = null;
+                            myProfile = null;
+                            ribbon = null;
+                            showScreen("login-screen");
+                        });
+
+                    // GAME
+                    document
+                        .getElementById("btn-leave")
+                        .addEventListener("click", () => {
+                            stopLoop();
+                            gameActive = false;
+                            isSpectator = false;
+                            if (soloInterval) {
+                                clearInterval(soloInterval);
+                                soloInterval = null;
+                            }
+                            soloMode = false;
+                            document.getElementById("spec-banner").style.display =
+                                "none";
+                            ribbon && (ribbon.roomId = null);
+                            if (myUsername) {
+                                showScreen("lobby-screen");
+                                ribbon?.send("getProfile", { username: myUsername });
+                            } else {
+                                showScreen("login-screen");
+                            }
+                        });
+
+                    // RESULT
+                    document
+                        .getElementById("btn-play-again")
+                        .addEventListener("click", () => {
+                            showScreen("lobby-screen");
+                            if (myUsername)
+                                ribbon?.send("getProfile", { username: myUsername });
+                            ribbon?.send("getLeaderboard");
+                        });
+                    document
+                        .getElementById("btn-replay-dl")
+                        .addEventListener("click", () => {
+                            if (!lastReplayId) return;
+                            window.open(`/api/replay/${lastReplayId}`, "_blank");
+                        });
+
+                    document
+                        .querySelectorAll(".btn-solo")
+                        .forEach((btn) => btn.addEventListener("click", startSolo));
+
+                    /*
+                     * Don't auto-connect on load — let the user click Create/Join.
+                     * Auto-connecting immediately on every page load causes spurious
+                     * "Not connected" flashes and makes debugging harder.
+                     * The status line already shows "Not connected" as the default.
+                     *
+                     * Solo mode works without any server connection at all.
+                     */
+                    // Auto-connect on load
+                    window.addEventListener("load", () => {
+                        try {
+                            connectRibbon();
+                        } catch (e) {}
+                    });
+        </script>
+    </body>
 </html>

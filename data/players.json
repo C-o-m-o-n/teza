@@ -1,0 +1,34 @@
+{
+  "comon": {
+    "username": "comon",
+    "createdAt": "2026-06-13T06:43:29.978Z",
+    "r": 1500,
+    "rd": 350,
+    "vol": 0.06,
+    "tr": 12500,
+    "gamesPlayed": 0,
+    "wins": 0,
+    "losses": 0,
+    "totalAttack": 0,
+    "totalLines": 0,
+    "bestAPM": 0,
+    "bestPPS": 0,
+    "replayIds": []
+  },
+  "coom": {
+    "username": "coom",
+    "createdAt": "2026-06-13T08:55:07.835Z",
+    "r": 1500,
+    "rd": 350,
+    "vol": 0.06,
+    "tr": 12500,
+    "gamesPlayed": 0,
+    "wins": 0,
+    "losses": 0,
+    "totalAttack": 0,
+    "totalLines": 0,
+    "bestAPM": 0,
+    "bestPPS": 0,
+    "replayIds": []
+  }
+}
