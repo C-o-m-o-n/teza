@@ -1,0 +1,41 @@
+name: Deploy to Homelab
+
+on:
+  push:
+    branches:
+      - main
+    tags:
+      - 'v*'
+
+jobs:
+  deploy:
+    name: Deploy TEZA
+    runs-on: self-hosted   # ← your homelab runner label
+
+    steps:
+      - name: Pull latest code
+        run: |
+          cd ~/teza
+          git fetch origin
+          git reset --hard origin/main
+
+      - name: Install production dependencies
+        run: |
+          cd ~/teza
+          pnpm install --prod --frozen-lockfile
+
+      - name: Ensure logs directory exists
+        run: mkdir -p ~/teza/logs
+
+      - name: Restart server with PM2
+        run: |
+          cd ~/teza
+          pm2 restart ecosystem.config.js --update-env || pm2 start ecosystem.config.js
+          pm2 save
+
+      - name: Health check
+        run: |
+          echo "Waiting for server to be ready..."
+          sleep 3
+          curl --silent --fail --retry 5 --retry-delay 2 http://localhost:3000 > /dev/null
+          echo "✅ TEZA is up and responding on localhost:3000"
