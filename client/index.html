@@ -299,7 +299,25 @@ canvas.board{display:block;border:1px solid var(--border);background:var(--surfa
  */
 'use strict';
 
-const {
+/*
+ * FIX: Do NOT use `const { ... } = window.TezaEngine` here.
+ * engine.js is loaded via <script src> in the same page, and
+ * both scripts share the browser's global scope. If engine.js
+ * used bare `const PIECE_NAMES = ...` (not wrapped in an IIFE),
+ * this destructuring would trigger "redeclaration of const".
+ *
+ * engine.js is now wrapped in a UMD/IIFE, so window.TezaEngine
+ * is the only global it exposes. We assign from it here with
+ * `let` bindings (which CAN be re-declared, and also allow us
+ * to check that the engine loaded before using it).
+ */
+if (!window.TezaEngine) {
+  document.getElementById('status-line').textContent =
+    'ERROR: engine.js failed to load. Check server is running.';
+  throw new Error('TezaEngine not found — engine.js did not load');
+}
+
+let {
   createEngine, stepEngine, tickEngine,
   PIECES, PIECE_NAMES, COLS, VIS_ROWS, VIS_START, TOTAL_ROWS, GARBAGE_COL,
   getCells, getGhost, tryMove, createBoard,
@@ -731,6 +749,12 @@ function connectRibbon() {
   ribbon.on('_connected', () => {
     document.getElementById('conn-indicator').classList.add('connected');
     setStatus('Connected to server');
+    // Fire any queued action (create/join room button pressed before socket opened)
+    if (pendingAction) {
+      const action = pendingAction;
+      pendingAction = null;
+      action();
+    }
   });
 
   ribbon.on('_disconnected', () => {
@@ -881,16 +905,36 @@ function setStatus(msg) {
   document.getElementById('status-line').textContent = msg;
 }
 
+/*
+ * FIX: The original code used setTimeout(300ms) after connectRibbon()
+ * to wait for the WebSocket to open before sending. This is fragile —
+ * on a slow connection the WS handshake takes longer than 300ms and
+ * the send silently drops.
+ *
+ * Instead: connectRibbon() stores a pendingAction callback, which
+ * the '_connected' handler fires once the socket is actually open.
+ */
+let pendingAction = null;
+
+function connectAndDo(action) {
+  if (ribbon && ribbon.ws.readyState === WebSocket.OPEN) {
+    action();
+  } else {
+    pendingAction = action;
+    if (!ribbon) connectRibbon();
+  }
+}
+
 document.getElementById('btn-create').addEventListener('click', () => {
-  if (!ribbon) connectRibbon();
-  setTimeout(() => ribbon && ribbon.send('createRoom'), 300);
+  setStatus('Connecting...');
+  connectAndDo(() => ribbon.send('createRoom'));
 });
 
 document.getElementById('btn-join').addEventListener('click', () => {
   const code = document.getElementById('room-input').value.trim().toUpperCase();
   if (!code) { setStatus('Enter a room code'); return; }
-  if (!ribbon) connectRibbon();
-  setTimeout(() => ribbon && ribbon.send('joinRoom', { roomId: code }), 300);
+  setStatus('Connecting...');
+  connectAndDo(() => ribbon.send('joinRoom', { roomId: code }));
 });
 
 document.getElementById('room-input').addEventListener('keydown', e => {
@@ -908,11 +952,14 @@ document.getElementById('btn-leave').addEventListener('click', () => {
   soloMode = false;
 });
 
-// Auto-connect on load (server presence assumed)
-window.addEventListener('load', () => {
-  // Try to connect; if server is down, solo mode still works
-  try { connectRibbon(); } catch(e) { setStatus('Server unavailable — use Solo mode'); }
-});
+/*
+ * Don't auto-connect on load — let the user click Create/Join.
+ * Auto-connecting immediately on every page load causes spurious
+ * "Not connected" flashes and makes debugging harder.
+ * The status line already shows "Not connected" as the default.
+ *
+ * Solo mode works without any server connection at all.
+ */
 </script>
 </body>
 </html>
