@@ -1,68 +1,57 @@
 /**
  * ============================================================
- * TEZA — server/server.js
+ * TEZA — server/server.js  (Phase 4)
  * ============================================================
- * Authoritative game server implementing the Ribbon protocol.
+ * Extends Phase 3 with:
+ *   §1  HTTP server (static files + REST API)
+ *   §2  RibbonConn (unchanged from Phase 3)
+ *   §3  Glicko-2 Rating System + Tetra Rating (TR)
+ *   §4  Player Profile Store (flat JSON, no DB required)
+ *   §5  Matchmaking Queue (TR-range based, expanding)
+ *   §6  Room System (spectators, replay recording, ranked)
+ *   §7  Replay Store (.teza format)
+ *   §8  WebSocket message router (extended)
+ *   §9  Startup
  *
- * RIBBON PROTOCOL (reverse-engineered from TETR.IO community docs):
- *   Every message has an outer envelope:
- *     { t, s, a, d }
- *     t = message type  (string)
- *     s = sequence ID   (integer, increments per sent message)
- *     a = ack ID        (last sequence received from peer)
- *     d = payload       (game data)
- *
- *   RESILIENCE:
- *     Both sides keep a rolling buffer of the last 100 sent packets.
- *     On reconnect, client sends its last known ack ID.
- *     Server replays any missed packets from buffer.
- *     This means a match survives brief disconnects without desyncing.
- *
- * SERVER RESPONSIBILITIES:
- *   1. Maintain authoritative engine state per player
- *   2. Receive input events from clients
- *   3. Validate inputs against server engine (anti-cheat)
- *   4. Forward attack events to the opponent
- *   5. Broadcast board state snapshots periodically
- *   6. Handle disconnect/reconnect via Ribbon resumption
- *   7. Detect game-over and declare winner
- *
- * ROOM SYSTEM:
- *   Players join via /join. Two players in a room = match starts.
- *   Room code is 6 uppercase chars (e.g. "TEZA42").
- *   Creator gets the room code and shares it. Second player joins.
- *
- * RUN:
- *   node server.js [port]   (default: 3000)
- *   Open client/index.html in two browser tabs on localhost
+ * STORAGE (no database):
+ *   data/players.json  — all player profiles + ratings
+ *   data/replays/      — one .teza file per completed match
  * ============================================================
  */
+
+'use strict';
 
 const WebSocket = require('ws');
 const http      = require('http');
 const fs        = require('fs');
 const path      = require('path');
-const { createEngine, stepEngine, tickEngine, COLS, VIS_START } = require('../shared/engine');
+const { createEngine, stepEngine, tickEngine } = require('../shared/engine');
 
-const PORT = process.env.PORT || 3000;
+const PORT         = process.env.PORT || 3000;
+const DATA_DIR     = path.join(__dirname, '../data');
+const PLAYERS_FILE = path.join(DATA_DIR, 'players.json');
+const REPLAYS_DIR  = path.join(DATA_DIR, 'replays');
+
+fs.mkdirSync(DATA_DIR,    { recursive: true });
+fs.mkdirSync(REPLAYS_DIR, { recursive: true });
 
 /* ============================================================
- * §1  HTTP SERVER
- * Serves the client files so you can just run `node server.js`
- * and open localhost:3000 without a separate web server.
+ * §1  HTTP SERVER + REST API
  * ============================================================ */
 const httpServer = http.createServer((req, res) => {
+  if (req.url.startsWith('/api/')) return handleApi(req, res);
+
   let filePath = req.url === '/' ? '/index.html' : req.url;
   const ext    = path.extname(filePath);
-  const mime   = { '.html':'text/html', '.js':'application/javascript', '.css':'text/css' };
+  const mime   = {
+    '.html': 'text/html',
+    '.js':   'application/javascript',
+    '.css':  'text/css',
+    '.json': 'application/json',
+  };
 
-  // Serve shared engine to client at /shared/engine.js
-  const candidates = [
-    path.join(__dirname, '../client', filePath),
-    path.join(__dirname, '..', filePath),
-  ];
-
-  for (const p of candidates) {
+  for (const base of [path.join(__dirname,'../client'), path.join(__dirname,'..')]) {
+    const p = path.join(base, filePath);
     if (fs.existsSync(p)) {
       res.writeHead(200, { 'Content-Type': mime[ext] || 'text/plain' });
       fs.createReadStream(p).pipe(res);
@@ -72,125 +61,372 @@ const httpServer = http.createServer((req, res) => {
   res.writeHead(404); res.end('Not found');
 });
 
+function handleApi(req, res) {
+  res.setHeader('Content-Type', 'application/json');
+  const url = req.url;
+
+  // GET /api/profile/:username
+  const pm = url.match(/^\/api\/profile\/(.+)$/);
+  if (pm && req.method === 'GET') {
+    const p = getPlayer(pm[1]);
+    if (p) res.end(JSON.stringify(sanitizeProfile(p)));
+    else { res.writeHead(404); res.end(JSON.stringify({ error:'Not found' })); }
+    return;
+  }
+
+  // GET /api/leaderboard
+  if (url === '/api/leaderboard' && req.method === 'GET') {
+    const board = Object.values(playerStore)
+      .filter(p => p.gamesPlayed >= 10 && p.rd <= RD_HIDDEN)
+      .sort((a,b) => b.tr - a.tr)
+      .slice(0, 50)
+      .map(sanitizeProfile);
+    res.end(JSON.stringify(board));
+    return;
+  }
+
+  // GET /api/replay/:id
+  const rm = url.match(/^\/api\/replay\/(.+)$/);
+  if (rm && req.method === 'GET') {
+    const f = path.join(REPLAYS_DIR, rm[1] + '.teza');
+    if (fs.existsSync(f)) res.end(fs.readFileSync(f));
+    else { res.writeHead(404); res.end(JSON.stringify({ error:'Not found' })); }
+    return;
+  }
+
+  res.writeHead(404); res.end(JSON.stringify({ error:'Unknown route' }));
+}
+
 /* ============================================================
- * §2  RIBBON CONNECTION CLASS
- * ============================================================
- *
- * Each connected WebSocket gets a RibbonConn that handles:
- *  - Sequence numbering (outbound)
- *  - Ack tracking (inbound)
- *  - Send buffer (last 100 packets for replay on reconnect)
- *  - Heartbeat ping/pong
- *
- * SEQUENCE IDs:
- *   sendSeq: increments with every message we send
- *   recvAck: the last sequence ID we received from the peer
- *
- * BUFFER:
- *   sendBuf[] stores the last MAX_BUF sent packets.
- *   On reconnect, we scan it for any packet with seq > peerAck
- *   and re-send those to fill the gap.
+ * §2  RIBBON CONNECTION (unchanged)
  * ============================================================ */
-const MAX_BUF        = 100;
-const PING_INTERVAL  = 5000;   // ms between heartbeats
-const PING_TIMEOUT   = 10000;  // ms before considering dead
+const MAX_BUF       = 100;
+const PING_INTERVAL = 5000;
+const PING_TIMEOUT  = 10000;
 
 class RibbonConn {
   constructor(ws, id) {
-    this.ws      = ws;
-    this.id      = id;
-    this.sendSeq = 0;
-    this.recvAck = 0;
-    this.sendBuf = [];    // [{ s, packet }]
-    this.alive   = true;
-    this.roomId  = null;
-    this.pingTimer   = null;
-    this.pongTimeout = null;
+    this.ws       = ws;
+    this.id       = id;
+    this.sendSeq  = 0;
+    this.recvAck  = 0;
+    this.sendBuf  = [];
+    this.alive    = true;
+    this.roomId   = null;
+    this.username = null;
     this._startHeartbeat();
   }
-
-  /** Send a typed message with Ribbon envelope */
   send(type, data = {}) {
     if (this.ws.readyState !== WebSocket.OPEN) return;
-    const packet = { t: type, s: this.sendSeq++, a: this.recvAck, d: data };
+    const packet = { t:type, s:this.sendSeq++, a:this.recvAck, d:data };
     const raw    = JSON.stringify(packet);
-    // Store in send buffer for possible replay
-    this.sendBuf.push({ s: packet.s, raw });
+    this.sendBuf.push({ s:packet.s, raw });
     if (this.sendBuf.length > MAX_BUF) this.sendBuf.shift();
     this.ws.send(raw);
   }
-
-  /**
-   * Replay missed packets after reconnect.
-   * Client sends its last known ack; we re-send everything after that.
-   */
   replayFrom(peerAck) {
-    const missed = this.sendBuf.filter(b => b.s > peerAck);
-    console.log(`[Ribbon] Replaying ${missed.length} missed packets for ${this.id}`);
-    for (const b of missed) {
+    for (const b of this.sendBuf.filter(b => b.s > peerAck))
       if (this.ws.readyState === WebSocket.OPEN) this.ws.send(b.raw);
-    }
   }
-
   _startHeartbeat() {
-    this.pingTimer = setInterval(() => {
+    this._pingTimer = setInterval(() => {
       if (!this.alive) { this.ws.terminate(); return; }
       this.alive = false;
       this.send('ping');
-      this.pongTimeout = setTimeout(() => {
-        if (!this.alive) {
-          console.log(`[Heartbeat] ${this.id} timed out`);
-          this.ws.terminate();
-        }
-      }, PING_TIMEOUT);
+      this._pongTimeout = setTimeout(() => { if (!this.alive) this.ws.terminate(); }, PING_TIMEOUT);
     }, PING_INTERVAL);
   }
+  pong() { this.alive = true; clearTimeout(this._pongTimeout); }
+  destroy() { clearInterval(this._pingTimer); clearTimeout(this._pongTimeout); }
+}
 
-  pong() {
-    this.alive = true;
-    clearTimeout(this.pongTimeout);
+/* ============================================================
+ * §3  GLICKO-2 RATING SYSTEM
+ * ============================================================
+ *
+ * Based on Mark Glickman's 2012 paper (glicko.net/glicko/glicko2.pdf)
+ *
+ * INTERNAL SCALE:
+ *   μ   = (r  - 1500) / 173.7178   (rating on Glicko-2 scale)
+ *   φ   = RD / 173.7178             (deviation on Glicko-2 scale)
+ *   σ   = volatility                (unchanged scale)
+ *
+ * SYSTEM CONSTANT τ = 0.6:
+ *   Constrains how much volatility can change per period.
+ *   Range 0.3–1.2; TETR.IO documented as 0.5–0.7; we use 0.6.
+ *
+ * RD BOUNDS:
+ *   Initial: 350 (high uncertainty for new players)
+ *   Floor:    30  (can never be perfectly certain)
+ *   Hidden:  100  (TR not shown publicly above this RD)
+ *
+ * TETRA RATING (TR) FORMULA (community-documented TETR.IO formula):
+ *   TR = 25000 × σ((r-1500)π / (173.7178·√(3ln²(10)·RD²+π²)))
+ *   where σ(x) = 1/(1+10^(-x/400)) — maps rating to 0–25000 range.
+ * ============================================================ */
+const GLICKO_TAU   = 0.6;
+const GLICKO_SCALE = 173.7178;
+const R_INITIAL    = 1500;
+const RD_INITIAL   = 350;
+const RD_MIN       = 30;
+const RD_HIDDEN    = 100;
+const VOL_INITIAL  = 0.06;
+const EPSILON      = 0.000001;
+
+function g(phi)       { return 1/Math.sqrt(1+3*phi*phi/(Math.PI*Math.PI)); }
+function E(mu,muj,pj) { return 1/(1+Math.exp(-g(pj)*(mu-muj))); }
+
+/**
+ * Full Glicko-2 update for a single match result.
+ * score: 1=win, 0=loss, 0.5=draw
+ */
+function updateGlicko2(player, opp, score) {
+  const mu  = (player.r  - R_INITIAL) / GLICKO_SCALE;
+  const phi = player.rd  / GLICKO_SCALE;
+  const muj = (opp.r     - R_INITIAL) / GLICKO_SCALE;
+  const pj  = opp.rd     / GLICKO_SCALE;
+
+  const gj  = g(pj);
+  const ej  = E(mu, muj, pj);
+
+  // Step 3: estimated variance
+  const v = 1 / (gj*gj*ej*(1-ej));
+
+  // Step 4: estimated improvement
+  const delta = v * gj * (score - ej);
+
+  // Step 5: new volatility via Illinois algorithm
+  let A  = Math.log(player.vol * player.vol);
+  let B  = delta*delta > phi*phi+v
+    ? Math.log(delta*delta - phi*phi - v)
+    : (()=>{ let k=1; while (f(A-k*GLICKO_TAU)<0) k++; return A-k*GLICKO_TAU; })();
+
+  function f(x) {
+    const ex = Math.exp(x);
+    const d2 = phi*phi+v+ex;
+    return ex*(delta*delta-phi*phi-v-ex)/(2*d2*d2) - (x-A)/(GLICKO_TAU*GLICKO_TAU);
   }
 
-  destroy() {
-    clearInterval(this.pingTimer);
-    clearTimeout(this.pongTimeout);
+  let fA = f(A), fB = f(B);
+  for (let i=0; i<100 && Math.abs(B-A)>EPSILON; i++) {
+    const C=A+(A-B)*fA/(fB-fA), fC=f(C);
+    if (fC*fB<=0){A=B;fA=fB;}else fA/=2;
+    B=C; fB=fC;
+  }
+  const newVol  = Math.exp(A/2);
+
+  // Step 6-7: update φ and μ
+  const phiStar = Math.sqrt(phi*phi + newVol*newVol);
+  const newPhi  = 1/Math.sqrt(1/(phiStar*phiStar)+1/v);
+  const newMu   = mu + newPhi*newPhi*gj*(score-ej);
+
+  return {
+    r:   newMu*GLICKO_SCALE + R_INITIAL,
+    rd:  Math.max(RD_MIN, newPhi*GLICKO_SCALE),
+    vol: newVol,
+  };
+}
+
+/**
+ * Tetra Rating display formula (community-documented TETR.IO formula).
+ * Maps Glicko-2 r/RD into a 0–25000 display score.
+ * Players with RD > 100 have TR hidden (shown as null publicly).
+ */
+function calcTR(r, rd) {
+  const ln10   = Math.log(10);
+  const denom  = GLICKO_SCALE * Math.sqrt(3*ln10*ln10*rd*rd + Math.PI*Math.PI);
+  return 25000 / (1 + Math.pow(10, (R_INITIAL-r)*Math.PI/denom));
+}
+
+/* ============================================================
+ * §4  PLAYER PROFILE STORE
+ * ============================================================
+ *
+ * Flat JSON store — no database needed for Phase 4.
+ * Loaded into memory at startup, written to disk after changes.
+ *
+ * Profile shape:
+ * {
+ *   username, createdAt,
+ *   r, rd, vol, tr,          ← Glicko-2 fields + display TR
+ *   gamesPlayed, wins, losses,
+ *   totalAttack, totalLines,
+ *   bestAPM, bestPPS,
+ *   replayIds: string[]       ← last 20 replay IDs
+ * }
+ * ============================================================ */
+let playerStore = {};
+
+function loadPlayers() {
+  try {
+    if (fs.existsSync(PLAYERS_FILE))
+      playerStore = JSON.parse(fs.readFileSync(PLAYERS_FILE,'utf8'));
+    console.log(`[Store] ${Object.keys(playerStore).length} players loaded`);
+  } catch(e) {
+    console.error('[Store] Load failed:', e.message);
+    playerStore = {};
+  }
+}
+function savePlayers() {
+  try { fs.writeFileSync(PLAYERS_FILE, JSON.stringify(playerStore,null,2)); }
+  catch(e) { console.error('[Store] Save failed:', e.message); }
+}
+function getPlayer(username) { return playerStore[username.toLowerCase()] || null; }
+function createPlayer(username) {
+  const key = username.toLowerCase();
+  if (playerStore[key]) return playerStore[key];
+  playerStore[key] = {
+    username, createdAt: new Date().toISOString(),
+    r: R_INITIAL, rd: RD_INITIAL, vol: VOL_INITIAL,
+    tr: calcTR(R_INITIAL, RD_INITIAL),
+    gamesPlayed:0, wins:0, losses:0,
+    totalAttack:0, totalLines:0,
+    bestAPM:0, bestPPS:0,
+    replayIds:[],
+  };
+  savePlayers();
+  return playerStore[key];
+}
+function getOrCreate(username) { return getPlayer(username) || createPlayer(username); }
+
+function recordResult(winnerName, loserName, wStats, lStats, replayId) {
+  const W = getOrCreate(winnerName);
+  const L = getOrCreate(loserName);
+  const wPre = { r:W.r, rd:W.rd };
+  const lPre = { r:L.r, rd:L.rd };
+
+  const wNew = updateGlicko2({r:W.r,rd:W.rd,vol:W.vol}, lPre, 1.0);
+  Object.assign(W, wNew);
+  W.tr = calcTR(W.r, W.rd);
+  W.gamesPlayed++; W.wins++;
+  W.totalAttack += wStats.attack||0; W.totalLines += wStats.lines||0;
+  W.bestAPM = Math.max(W.bestAPM, wStats.apm||0);
+  W.bestPPS = Math.max(W.bestPPS, wStats.pps||0);
+  if (replayId) { W.replayIds.unshift(replayId); W.replayIds = W.replayIds.slice(0,20); }
+
+  const lNew = updateGlicko2({r:L.r,rd:L.rd,vol:L.vol}, wPre, 0.0);
+  Object.assign(L, lNew);
+  L.tr = calcTR(L.r, L.rd);
+  L.gamesPlayed++; L.losses++;
+  L.totalAttack += lStats.attack||0; L.totalLines += lStats.lines||0;
+  L.bestAPM = Math.max(L.bestAPM, lStats.apm||0);
+  L.bestPPS = Math.max(L.bestPPS, lStats.pps||0);
+  if (replayId) { L.replayIds.unshift(replayId); L.replayIds = L.replayIds.slice(0,20); }
+
+  savePlayers();
+  console.log(`[Rating] ${winnerName} TR: ${Math.round(wPre.r)} → ${Math.round(W.tr)}`);
+  console.log(`[Rating] ${loserName}  TR: ${Math.round(lPre.r)} → ${Math.round(L.tr)}`);
+  return { wOld: wPre, lOld: lPre, wNew: W, lNew: L };
+}
+
+function sanitizeProfile(p) {
+  return {
+    username:    p.username,
+    tr:          p.rd <= RD_HIDDEN ? Math.round(p.tr) : null,
+    rd:          Math.round(p.rd),
+    gamesPlayed: p.gamesPlayed,
+    wins:        p.wins,
+    losses:      p.losses,
+    winRate:     p.gamesPlayed > 0 ? Math.round(p.wins/p.gamesPlayed*100) : 0,
+    bestAPM:     Math.round(p.bestAPM),
+    bestPPS:     p.bestPPS.toFixed(2),
+    createdAt:   p.createdAt,
+    replayIds:   p.replayIds,
+  };
+}
+
+loadPlayers();
+
+/* ============================================================
+ * §5  MATCHMAKING QUEUE
+ * ============================================================
+ *
+ * Algorithm:
+ *   - Players enter queue with their current TR (or 1500 default)
+ *   - Every RANGE_EXPAND_MS seconds, accepted TR difference widens
+ *   - When two players' ranges overlap, they are paired
+ *
+ * RANGE LOGIC:
+ *   Initial acceptable difference: ±500 TR
+ *   Expands by +500 every 10s until a match is found.
+ *   After 60s with no match: accept any opponent.
+ * ============================================================ */
+const INITIAL_RANGE    = 500;
+const RANGE_EXPAND     = 500;
+const RANGE_EXPAND_MS  = 10000;
+
+const queue = [];   // [{ conn, tr, range, timer }]
+
+function joinQueue(conn) {
+  leaveQueue(conn);
+  const profile = conn.username ? getPlayer(conn.username) : null;
+  const tr      = profile?.tr ?? R_INITIAL;
+  const entry   = { conn, tr, range: INITIAL_RANGE };
+  entry.timer   = setInterval(() => { entry.range += RANGE_EXPAND; tryMatch(); }, RANGE_EXPAND_MS);
+  queue.push(entry);
+  conn.send('queueJoined', { position: queue.length, tr: Math.round(tr) });
+  console.log(`[Queue] ${conn.id} joined (TR≈${Math.round(tr)}, size=${queue.length})`);
+  tryMatch();
+}
+function leaveQueue(conn) {
+  const i = queue.findIndex(e => e.conn === conn);
+  if (i === -1) return;
+  clearInterval(queue[i].timer);
+  queue.splice(i, 1);
+}
+function tryMatch() {
+  for (let i=0; i<queue.length; i++) {
+    for (let j=i+1; j<queue.length; j++) {
+      const a=queue[i], b=queue[j];
+      if (Math.abs(a.tr-b.tr) <= Math.max(a.range,b.range)) {
+        clearInterval(a.timer); clearInterval(b.timer);
+        queue.splice(j,1); queue.splice(i,1);
+        console.log(`[Queue] Matched ${a.conn.id} vs ${b.conn.id}`);
+        const roomId = makeRoomId();
+        const room   = new Room(roomId, true);
+        rooms.set(roomId, room);
+        room.addPlayer(a.conn);
+        room.addPlayer(b.conn);
+        return;
+      }
+    }
   }
 }
 
 /* ============================================================
- * §3  ROOM SYSTEM
- * ============================================================
- *
- * A Room holds two players and one match.
- * State machine: 'waiting' → 'playing' → 'finished'
- *
- * MATCH SEED:
- *   Generated server-side via crypto.randomBytes (not Math.random).
- *   Sent to both players at match start so their engines are
- *   seeded identically. The server also runs its own engine
- *   for each player for authoritative validation.
- *
- * TICK LOOP:
- *   Server runs a 60Hz interval for gravity/lock ticks.
- *   In a production system you'd use a worker thread — for
- *   Phase 3 a setInterval suffices.
+ * §6  ROOM (extended: spectators, replay recording, rated)
  * ============================================================ */
-const rooms    = new Map();  // roomId → Room
-const connRoom = new Map();  // connId → roomId
+const rooms    = new Map();
+const connRoom = new Map();
+const RECONNECT_GRACE   = 15000;
+const SNAPSHOT_MS       = 250;   // spectator board update rate
 
 function makeRoomId() {
-  const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
-  return Array.from({length:6}, () => chars[Math.floor(Math.random()*chars.length)]).join('');
+  const c='ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+  return Array.from({length:6},()=>c[Math.floor(Math.random()*c.length)]).join('');
 }
 
 class Room {
-  constructor(id) {
-    this.id      = id;
-    this.players = [];   // [RibbonConn, RibbonConn]
-    this.engines = [];   // authoritative engine per player index
-    this.state   = 'waiting';
-    this.seed    = Math.floor(Math.random() * 2147483646) + 1;
-    this.tickInt = null;
+  constructor(id, ranked=false) {
+    this.id         = id;
+    this.ranked     = ranked;
+    this.players    = [];
+    this.spectators = [];
+    this.engines    = [];
+    this.state      = 'waiting';
+    this.seed       = Math.floor(Math.random()*2147483646)+1;
+    this.tickInt    = null;
+    this.snapInt    = null;
+    this.ready      = [false,false];
+    this.deadFlags  = [false,false];
+    this.matchStats = [];
+    /*
+     * REPLAY RECORDER
+     * Records { seed, inputs[], events[], meta } — enough to
+     * deterministically reconstruct any match from scratch.
+     * Saved as a .teza JSON file when the match ends.
+     */
+    this.replay = { version:'0.4.0', seed:this.seed, inputs:[], events:[], meta:{}, tick:0 };
   }
 
   addPlayer(conn) {
@@ -198,255 +434,359 @@ class Room {
     this.players.push(conn);
     conn.roomId = this.id;
     connRoom.set(conn.id, this.id);
-    conn.send('roomJoined', { roomId: this.id, playerIndex: idx, playerCount: this.players.length });
-    console.log(`[Room ${this.id}] Player ${conn.id} joined (${this.players.length}/2)`);
-    if (this.players.length === 2) this._startMatch();
+    conn.send('roomJoined',{
+      roomId:this.id, playerIndex:idx,
+      playerCount:this.players.length, ranked:this.ranked,
+    });
+    if (this.players.length===2) this._startMatch();
+  }
+
+  addSpectator(conn) {
+    this.spectators.push(conn);
+    conn.roomId = this.id;
+    connRoom.set(conn.id, this.id);
+    conn.send('spectatorJoined',{
+      roomId:this.id, state:this.state,
+      players: this.players.map(p=>p.username||p.id),
+    });
+    if (this.engines.length) this._sendSnap(conn);
   }
 
   _startMatch() {
-    this.state = 'playing';
-    // Create authoritative engine for each player with same seed
-    this.engines = [
-      createEngine(this.seed),
-      createEngine(this.seed),
+    this.state     = 'playing';
+    this.ready     = [false,false];
+    this.deadFlags = [false,false];
+    this.tickInt   = null;
+    this.engines   = [createEngine(this.seed), createEngine(this.seed)];
+    this.matchStats = [
+      {attack:0,lines:0,apm:0,pps:0,pieces:0,t0:Date.now()},
+      {attack:0,lines:0,apm:0,pps:0,pieces:0,t0:Date.now()},
     ];
-    console.log(`[Room ${this.id}] Match started, seed=${this.seed}`);
-
-    for (let i = 0; i < 2; i++) {
-      this.players[i].send('matchStart', {
+    this.replay.seed        = this.seed;
+    this.replay.meta        = {
+      startedAt: new Date().toISOString(),
+      players:   this.players.map(p=>p.username||p.id),
+      ranked:    this.ranked,
+    };
+    console.log(`[Room ${this.id}] Match start (${this.ranked?'RANKED':'casual'}), seed=${this.seed}`);
+    for (let i=0;i<2;i++) {
+      const opp = this.players[1-i];
+      this.players[i].send('matchStart',{
         seed:        this.seed,
         playerIndex: i,
-        opponent:    this.players[1-i].id,
+        opponent:    opp.username||opp.id,
+        ranked:      this.ranked,
+        opponentProfile: opp.username ? sanitizeProfile(getOrCreate(opp.username)) : null,
       });
     }
+    this._broadcastSpecs('spectatorMatchStart',{ players:this.replay.meta.players });
+    this._readyTimeout = setTimeout(()=>{ if(!this.tickInt) this._startTick(); }, 5000);
+  }
 
-    // Server-side 60Hz tick loop
-    const TICK_MS = 1000 / 60;
-    this.tickInt  = setInterval(() => this._tick(), TICK_MS);
+  playerReady(conn) {
+    const idx = this.players.indexOf(conn);
+    if (idx===-1) return;
+    this.ready[idx]=true;
+    if (this.ready[0]&&this.ready[1]) { clearTimeout(this._readyTimeout); this._startTick(); }
+  }
+
+  _startTick() {
+    if (this.tickInt) return;
+    this.tickInt = setInterval(()=>this._tick(), 1000/60);
+    this.snapInt = setInterval(()=>{ if(this.spectators.length) this._broadcastSnap(); }, SNAPSHOT_MS);
+    this._broadcast('matchLive',{});
+    console.log(`[Room ${this.id}] Live`);
   }
 
   _tick() {
-    if (this.state !== 'playing') return;
-    for (let i = 0; i < 2; i++) {
-      const eng    = this.engines[i];
-      const events = tickEngine(eng);
-      this._handleEvents(i, events);
+    if (this.state!=='playing') return;
+    this.replay.tick++;
+    for (let i=0;i<2;i++) {
+      if (this.deadFlags[i]) continue;
+      const evs = tickEngine(this.engines[i]);
+      if (evs.length) {
+        evs.forEach(e=>this.replay.events.push({tick:this.replay.tick,pi:i,e}));
+        this._handleEvents(i,evs);
+      }
     }
   }
 
-  /**
-   * Receive a player input, apply to server engine, forward events.
-   *
-   * ANTI-CHEAT NOTE:
-   *   The server applies every input to its own authoritative engine.
-   *   If the server's resulting board diverges significantly from the
-   *   client's reported state, we can flag/kick. For Phase 3 we
-   *   trust the client but lay the groundwork.
-   */
   handleInput(conn, input) {
     const idx = this.players.indexOf(conn);
-    if (idx === -1 || this.state !== 'playing') return;
-    const eng    = this.engines[idx];
-    const events = stepEngine(eng, input);
-    this._handleEvents(idx, events);
+    if (idx===-1||this.state!=='playing'||this.deadFlags[idx]) return;
+    this.replay.inputs.push({tick:this.replay.tick, pi:idx, input});
+    const evs = stepEngine(this.engines[idx], input);
+    // Update live stats
+    const eng=this.engines[idx], st=this.matchStats[idx];
+    st.attack=eng.attack; st.lines=eng.lines;
+    const sec=(Date.now()-st.t0)/1000;
+    st.apm=sec>0?(eng.attack/sec)*60:0;
+    st.pps=sec>0?eng.lines/sec*0.5:0;
+    this._handleEvents(idx,evs);
   }
 
-  _handleEvents(playerIdx, events) {
-    if (!events.length) return;
-    const sender   = this.players[playerIdx];
-    const opponent = this.players[1 - playerIdx];
-
-    for (const ev of events) {
-      switch (ev.type) {
-        case 'attack':
-          // Forward garbage to opponent's engine and client
-          if (opponent) {
-            stepEngine(this.engines[1-playerIdx], { type:'receiveGarbage', value: ev.lines });
-            opponent.send('incomingGarbage', { lines: ev.lines, from: sender.id, spin: ev.spin, b2b: ev.b2b });
-          }
-          // Ack the attack back to sender for their stats
-          sender.send('attackSent', { lines: ev.lines, spin: ev.spin, b2b: ev.b2b, allClear: ev.allClear });
-          break;
-
-        case 'gameOver':
-          this._endMatch(1 - playerIdx);  // Other player wins
-          break;
-
-        case 'allClear':
-          // Broadcast to both for spectator display
-          this._broadcast('allClear', { player: playerIdx });
-          break;
+  _handleEvents(pi, evs) {
+    const sender = this.players[pi];
+    const opp    = this.players[1-pi];
+    for (const ev of evs) {
+      if (ev.type==='attack') {
+        if (opp) {
+          stepEngine(this.engines[1-pi],{type:'receiveGarbage',value:ev.lines});
+          opp.send('incomingGarbage',{lines:ev.lines,from:sender.id,spin:ev.spin,b2b:ev.b2b});
+        }
+        sender.send('attackSent',{lines:ev.lines,spin:ev.spin,b2b:ev.b2b,allClear:ev.allClear});
+        this._broadcastSpecs('specAttack',{pi,lines:ev.lines,spin:ev.spin});
+      } else if (ev.type==='gameOver') {
+        if (!this.deadFlags[pi]) { this.deadFlags[pi]=true; this._endMatch(1-pi); }
+      } else if (ev.type==='allClear') {
+        this._broadcast('allClear',{player:pi});
       }
     }
   }
 
   _endMatch(winnerIdx) {
-    if (this.state !== 'playing') return;
-    this.state = 'finished';
-    clearInterval(this.tickInt);
-    console.log(`[Room ${this.id}] Match over. Winner: player ${winnerIdx}`);
-    for (let i = 0; i < 2; i++) {
-      const won = (i === winnerIdx);
-      this.players[i].send('matchOver', { won, winnerIndex: winnerIdx });
+    if (this.state!=='playing') return;
+    this.state='finished';
+    clearInterval(this.tickInt); clearInterval(this.snapInt);
+    clearTimeout(this._readyTimeout);
+    this.tickInt=null;
+
+    // Finalize stats
+    for (let i=0;i<2;i++) {
+      const st=this.matchStats[i], sec=(Date.now()-st.t0)/1000;
+      st.apm=sec>0?(this.engines[i].attack/sec)*60:0;
+      st.pps=sec>0?this.engines[i].lines/sec*0.4:0;
     }
+
+    // Save replay
+    this.replay.meta.duration = Date.now()-new Date(this.replay.meta.startedAt).getTime();
+    this.replay.meta.result   = { winnerIdx, players:this.replay.meta.players };
+    const replayId = this._saveReplay();
+
+    // Update ratings if ranked + both logged in
+    let ratingData = null;
+    if (this.ranked) {
+      const wConn=this.players[winnerIdx], lConn=this.players[1-winnerIdx];
+      if (wConn.username && lConn.username) {
+        ratingData = recordResult(
+          wConn.username, lConn.username,
+          this.matchStats[winnerIdx], this.matchStats[1-winnerIdx],
+          replayId
+        );
+      }
+    }
+
+    console.log(`[Room ${this.id}] Winner: P${winnerIdx} | Replay: ${replayId}`);
+
+    for (let i=0;i<2;i++) {
+      const won   = i===winnerIdx;
+      const trOld = ratingData && this.players[i].username
+        ? Math.round(won ? ratingData.wOld.r : ratingData.lOld.r)
+        : null;
+      const trNew = ratingData && this.players[i].username
+        ? Math.round(won ? ratingData.wNew.tr : ratingData.lNew.tr)
+        : null;
+      this.players[i].send('matchOver',{
+        won, winnerIdx, replayId,
+        myStats:  this.matchStats[i],
+        oppStats: this.matchStats[1-i],
+        trOld, trNew,
+        trDelta: (trNew!=null&&trOld!=null) ? trNew-trOld : null,
+      });
+    }
+    this._broadcastSpecs('specMatchOver',{ winnerIdx, replayId });
   }
 
-  _broadcast(type, data) {
-    for (const p of this.players) p.send(type, data);
+  _saveReplay() {
+    const id  = `${Date.now()}-${Math.random().toString(36).slice(2,7)}`;
+    try {
+      fs.writeFileSync(path.join(REPLAYS_DIR,`${id}.teza`), JSON.stringify(this.replay));
+      console.log(`[Replay] Saved ${id}.teza (${this.replay.inputs.length} inputs)`);
+    } catch(e) { console.error('[Replay] Save failed:',e.message); }
+    return id;
   }
 
-  /**
-   * Handle a player disconnect.
-   * In Ribbon fashion: we don't end the match immediately.
-   * We give them RECONNECT_GRACE ms to reconnect.
-   */
+  _sendSnap(conn) {
+    if (!this.engines.length) return;
+    conn.send('boardSnapshot',{
+      boards:  this.engines.map(e=>e.board),
+      held:    this.engines.map(e=>e.held),
+      active:  this.engines.map(e=>e.active),
+      stats:   this.engines.map((e,i)=>({
+        attack:e.attack, lines:e.lines, b2b:e.b2b,
+        garbageQueue:e.garbageQueue,
+      })),
+      players: this.players.map(p=>p.username||p.id),
+    });
+  }
+  _broadcastSnap() { for(const s of this.spectators) this._sendSnap(s); }
+  _broadcast(t,d) { for(const p of this.players) p.send(t,d); }
+  _broadcastSpecs(t,d) { for(const s of this.spectators) s.send(t,d); }
+
   handleDisconnect(conn) {
-    const idx = this.players.indexOf(conn);
-    if (idx === -1) return;
-    console.log(`[Room ${this.id}] Player ${conn.id} disconnected (grace period starts)`);
-
-    const opponent = this.players[1 - idx];
-    if (opponent) opponent.send('opponentDisconnected', { grace: RECONNECT_GRACE });
-
-    // Give them time to reconnect before forfeiting
-    conn._disconnectTimer = setTimeout(() => {
-      console.log(`[Room ${this.id}] Player ${conn.id} forfeited after grace period`);
-      if (this.state === 'playing') this._endMatch(1 - idx);
-    }, RECONNECT_GRACE);
+    const idx=this.players.indexOf(conn);
+    if (idx!==-1) {
+      this.players[1-idx]?.send('opponentDisconnected',{grace:RECONNECT_GRACE});
+      conn._dcTimer=setTimeout(()=>{ if(this.state==='playing') this._endMatch(1-idx); },RECONNECT_GRACE);
+    }
+    const si=this.spectators.indexOf(conn);
+    if (si!==-1) this.spectators.splice(si,1);
   }
-
-  handleReconnect(conn, peerAck) {
-    const idx = this.players.indexOf(conn);
-    if (idx === -1) return;
-    clearTimeout(conn._disconnectTimer);
-    console.log(`[Room ${this.id}] Player ${conn.id} reconnected`);
+  handleReconnect(conn,peerAck) {
+    const idx=this.players.indexOf(conn);
+    if (idx===-1) return;
+    clearTimeout(conn._dcTimer);
     conn.replayFrom(peerAck);
-    const opponent = this.players[1 - idx];
-    if (opponent) opponent.send('opponentReconnected', {});
+    this.players[1-idx]?.send('opponentReconnected',{});
   }
-
   cleanup() {
-    clearInterval(this.tickInt);
+    clearInterval(this.tickInt); clearInterval(this.snapInt);
+    clearTimeout(this._readyTimeout);
   }
 }
 
-const RECONNECT_GRACE = 15000;  // 15 seconds to reconnect
+/* ============================================================
+ * §7  REPLAY STORE — see _saveReplay() inside Room
+ *
+ * .teza file format:
+ * {
+ *   version:  "0.4.0",
+ *   seed:     number,
+ *   inputs:   [{ tick, pi, input }],
+ *   events:   [{ tick, pi, e }],
+ *   meta:     { startedAt, duration, players, ranked, result }
+ * }
+ *
+ * Replay: createEngine(seed), advance tickEngine() per tick,
+ * feed inputs at their recorded tick boundaries.
+ * ============================================================ */
 
 /* ============================================================
- * §4  WEBSOCKET SERVER & MESSAGE ROUTING
+ * §8  WEBSOCKET SERVER + MESSAGE ROUTER
  * ============================================================ */
-const wss   = new WebSocket.Server({ server: httpServer });
-const conns = new Map();   // connId → RibbonConn
-let   nextId = 1;
+const wss   = new WebSocket.Server({ server:httpServer });
+const conns = new Map();
+let nextId  = 1;
 
-wss.on('connection', (ws, req) => {
+wss.on('connection',(ws,req)=>{
   const id   = `p${nextId++}`;
-  const conn = new RibbonConn(ws, id);
-  conns.set(id, conn);
-  console.log(`[WS] ${id} connected from ${req.socket.remoteAddress}`);
+  const conn = new RibbonConn(ws,id);
+  conns.set(id,conn);
+  conn.send('hello',{id,version:'0.4.0',brand:'teza'});
+  console.log(`[WS] ${id} connected`);
 
-  // Send welcome with assigned ID
-  conn.send('hello', { id, version: '0.3.0', brand: 'teza' });
+  ws.on('message',raw=>{
+    let msg; try{msg=JSON.parse(raw);}catch{return;}
+    if(typeof msg.a==='number') conn.recvAck=msg.a;
+    const{t:type,d:data={}}=msg;
 
-  ws.on('message', raw => {
-    let msg;
-    try { msg = JSON.parse(raw); } catch { return; }
+    switch(type){
+      case 'pong': conn.pong(); break;
 
-    /*
-     * Update our record of what the peer has acknowledged.
-     * This is used during reconnect to know what to replay.
-     */
-    if (typeof msg.a === 'number') conn.recvAck = msg.a;
-
-    const { t: type, d: data = {} } = msg;
-
-    switch (type) {
-
-      /* ── RIBBON HEARTBEAT ───────────────────────────────── */
-      case 'pong':
-        conn.pong();
+      /* ── AUTH ─────────────────────────────────────────────── */
+      case 'login':{
+        const u=(data.username||'').trim().slice(0,20);
+        if(!u||!/^[a-zA-Z0-9_\-]+$/.test(u)){
+          conn.send('loginError',{msg:'Invalid username. Letters, numbers, _ or - only.'}); break;
+        }
+        const profile=getOrCreate(u);
+        conn.username=u;
+        conn.send('loginOk',{username:u,profile:sanitizeProfile(profile)});
         break;
+      }
 
-      /* ── ROOM: CREATE ────────────────────────────────────── */
-      case 'createRoom': {
-        const roomId = makeRoomId();
-        const room   = new Room(roomId);
-        rooms.set(roomId, room);
+      /* ── ROOM ─────────────────────────────────────────────── */
+      case 'createRoom':{
+        const roomId=makeRoomId();
+        const room=new Room(roomId,false);
+        rooms.set(roomId,room);
         room.addPlayer(conn);
         break;
       }
-
-      /* ── ROOM: JOIN ──────────────────────────────────────── */
-      case 'joinRoom': {
-        const { roomId } = data;
-        const room = rooms.get(roomId?.toUpperCase());
-        if (!room) {
-          conn.send('error', { msg: 'Room not found', code: 'ROOM_NOT_FOUND' });
-          break;
-        }
-        if (room.players.length >= 2) {
-          conn.send('error', { msg: 'Room is full', code: 'ROOM_FULL' });
-          break;
-        }
-        room.addPlayer(conn);
+      case 'joinRoom':{
+        const room=rooms.get((data.roomId||'').toUpperCase());
+        if(!room){conn.send('error',{msg:'Room not found',code:'NO_ROOM'});break;}
+        if(room.state!=='waiting'||room.players.length>=2) room.addSpectator(conn);
+        else room.addPlayer(conn);
+        break;
+      }
+      case 'spectate':{
+        const room=rooms.get((data.roomId||'').toUpperCase());
+        if(!room){conn.send('error',{msg:'Room not found',code:'NO_ROOM'});break;}
+        room.addSpectator(conn);
         break;
       }
 
-      /* ── RECONNECT ───────────────────────────────────────── */
-      case 'resume': {
-        const { roomId, peerAck } = data;
-        const room = rooms.get(roomId);
-        if (room) room.handleReconnect(conn, peerAck || 0);
+      /* ── MATCHMAKING ──────────────────────────────────────── */
+      case 'joinQueue':{
+        if(!conn.username){conn.send('error',{msg:'Login required for ranked play',code:'NO_LOGIN'});break;}
+        joinQueue(conn);
+        break;
+      }
+      case 'leaveQueue':{ leaveQueue(conn); conn.send('queueLeft',{}); break; }
+
+      /* ── RECONNECT ────────────────────────────────────────── */
+      case 'resume':{
+        const room=rooms.get(data.roomId);
+        if(room) room.handleReconnect(conn,data.peerAck||0);
         break;
       }
 
-      /* ── GAME INPUT ──────────────────────────────────────── */
-      case 'input': {
-        const roomId = connRoom.get(conn.id);
-        const room   = roomId && rooms.get(roomId);
-        if (room) room.handleInput(conn, data.input);
+      /* ── GAME ─────────────────────────────────────────────── */
+      case 'clientReady':{
+        const room=rooms.get(connRoom.get(conn.id));
+        if(room) room.playerReady(conn);
+        break;
+      }
+      case 'input':{
+        const room=rooms.get(connRoom.get(conn.id));
+        if(room) room.handleInput(conn,data.input);
         break;
       }
 
-      /* ── BOARD SYNC (optional client→server state report) ── */
-      case 'stateReport': {
-        // Future: compare client-reported board hash to server engine
-        // for anti-cheat. Phase 3 placeholder.
+      /* ── PROFILES / LEADERBOARD ───────────────────────────── */
+      case 'getProfile':{
+        const u=data.username||conn.username;
+        const p=u?getPlayer(u):null;
+        if(p) conn.send('profileData',{profile:sanitizeProfile(p)});
+        else conn.send('error',{msg:'Profile not found',code:'NO_PROFILE'});
+        break;
+      }
+      case 'getLeaderboard':{
+        const board=Object.values(playerStore)
+          .filter(p=>p.gamesPlayed>=10&&p.rd<=RD_HIDDEN)
+          .sort((a,b)=>b.tr-a.tr).slice(0,50).map(sanitizeProfile);
+        conn.send('leaderboard',{entries:board});
         break;
       }
 
-      default:
-        console.log(`[WS] Unknown message type: ${type} from ${id}`);
+      default: break;
     }
   });
 
-  ws.on('close', () => {
+  ws.on('close',()=>{
+    leaveQueue(conn);
+    const room=rooms.get(connRoom.get(id));
+    if(room) room.handleDisconnect(conn);
+    conn.destroy(); conns.delete(id); connRoom.delete(id);
     console.log(`[WS] ${id} disconnected`);
-    const roomId = connRoom.get(id);
-    if (roomId) {
-      const room = rooms.get(roomId);
-      if (room) room.handleDisconnect(conn);
-    }
-    conn.destroy();
-    conns.delete(id);
   });
-
-  ws.on('error', err => {
-    console.error(`[WS] Error for ${id}:`, err.message);
-  });
+  ws.on('error',e=>console.error(`[WS] Error ${id}:`,e.message));
 });
 
 /* ============================================================
- * §5  START
+ * §9  START
  * ============================================================ */
-httpServer.listen(PORT, () => {
+httpServer.listen(PORT,()=>{
   console.log(`
-╔══════════════════════════════════════╗
-║   TEZA — Game Server v0.3.0          ║
-║   teza.ke  ·  Built in Kenya 🇰🇪      ║
-╠══════════════════════════════════════╣
-║   HTTP  →  http://localhost:${PORT}     ║
-║   WS    →  ws://localhost:${PORT}       ║
-╚══════════════════════════════════════╝
-  `);
+╔══════════════════════════════════════════╗
+║  TEZA — Game Server v0.4.0               ║
+║  teza.ke  ·  Built in Kenya 🇰🇪           ║
+╠══════════════════════════════════════════╣
+║  HTTP  →  http://localhost:${PORT}           ║
+║  WS    →  ws://localhost:${PORT}             ║
+║                                          ║
+║  Phase 4:  Ratings · Profiles            ║
+║  Matchmaking · Spectator · Replays       ║
+╚══════════════════════════════════════════╝`);
 });
