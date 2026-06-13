@@ -1964,22 +1964,6 @@
                         showScreen("game-screen");
                         hideOv("local");
 
-                        // Auto-garbage every 5 seconds
-                        soloInterval = setInterval(() => {
-                            if (!gameActive || !localEng || localEng.dead) return;
-                            const lines = 1 + Math.floor(Math.random() * 3);
-                            localEng.garbageQueue.push({ count: lines });
-                            updateGMeter(lGm, localEng.garbageQueue);
-
-                            const b = document.getElementById("local-board");
-                            b.style.borderColor = "#ff4c4c";
-                            b.style.boxShadow = "0 0 12px #ff4c4c55";
-                            setTimeout(() => {
-                                b.style.borderColor = "var(--border)";
-                                b.style.boxShadow = "";
-                            }, 600);
-                        }, 5000);
-
                         startLoop();
                     }
 
