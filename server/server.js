@@ -803,7 +803,15 @@ wss.on('connection',(ws,req)=>{
         
         let profile = getPlayer(u);
         if (profile) {
-          if (!bcrypt.compareSync(pw, profile.password_hash)) {
+          if (!profile.password_hash) {
+            // Legacy account (pre-auth) — set password on first login
+            const hash = bcrypt.hashSync(pw, 10);
+            db.run('UPDATE players SET password_hash = $hash WHERE username = $username', {
+              $hash: hash, $username: u.toLowerCase()
+            });
+            _saveDbToDisk();
+            profile.password_hash = hash;
+          } else if (!bcrypt.compareSync(pw, profile.password_hash)) {
             conn.send('loginError',{msg:'Incorrect password.'}); break;
           }
         } else {
