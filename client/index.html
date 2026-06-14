@@ -810,6 +810,14 @@
                 </div>
 
                 <hr class="divider" />
+
+                <div class="section-label">Practice vs Bot</div>
+                <div class="btn-row">
+                    <button id="btn-bot-easy" style="font-size:9px;border-color:#3ddc84;color:#3ddc84">Easy</button>
+                    <button id="btn-bot-medium" style="font-size:9px;border-color:#f7a130;color:#f7a130">Medium</button>
+                    <button id="btn-bot-hard" style="font-size:9px;border-color:#ff4c4c;color:#ff4c4c">Hard</button>
+                </div>
+
                 <button id="btn-solo-lobby" class="btn-solo" style="font-size: 9px; margin-bottom: 4px;">
                     Solo Practice (no server)
                 </button>
@@ -2063,6 +2071,15 @@
         document
             .getElementById("btn-leave-queue")
             .addEventListener("click", () => ribbon?.send("leaveQueue"));
+
+        document.getElementById('btn-bot-easy').addEventListener('click', () =>
+            connectAndDo(() => ribbon.send('joinBot', { difficulty: 'easy' })));
+        document.getElementById('btn-bot-medium').addEventListener('click', () =>
+            connectAndDo(() => ribbon.send('joinBot', { difficulty: 'medium' })));
+        document.getElementById('btn-bot-hard').addEventListener('click', () =>
+            connectAndDo(() => ribbon.send('joinBot', { difficulty: 'hard' })));
+
+
         document
             .getElementById("btn-leaderboard")
             .addEventListener("click", () =>
