@@ -292,20 +292,20 @@ function _dbRowToProfile(row) {
   if (!row) return null;
   return {
     username: row.username,
-    password_hash: row.password_hash,
+    password_hash: row.password_hash || null,
     createdAt: row.created_at,
-    r: row.r,
-    rd: row.rd,
-    vol: row.vol,
-    tr: row.tr,
-    gamesPlayed: row.games_played,
-    wins: row.wins,
-    losses: row.losses,
-    totalAttack: row.total_attack,
-    totalLines: row.total_lines,
-    bestAPM: row.best_apm,
-    bestPPS: row.best_pps,
-    replayIds: JSON.parse(row.replay_ids || '[]')
+    r:           row.r    ?? R_INITIAL,
+    rd:          row.rd   ?? RD_INITIAL,
+    vol:         row.vol  ?? VOL_INITIAL,
+    tr:          row.tr   ?? calcTR(R_INITIAL, RD_INITIAL),
+    gamesPlayed: row.games_played  ?? 0,
+    wins:        row.wins          ?? 0,
+    losses:      row.losses        ?? 0,
+    totalAttack: row.total_attack  ?? 0,
+    totalLines:  row.total_lines   ?? 0,
+    bestAPM:     row.best_apm      ?? 0,
+    bestPPS:     row.best_pps      ?? 0,
+    replayIds:   JSON.parse(row.replay_ids || '[]')
   };
 }
 
@@ -416,18 +416,21 @@ function recordResult(winnerName, loserName, wStats, lStats, replayId) {
 }
 
 function sanitizeProfile(p) {
+  const gp  = p.gamesPlayed ?? 0;
+  const w   = p.wins        ?? 0;
+  const l   = p.losses      ?? 0;
   return {
     username:    p.username,
-    tr:          p.rd <= RD_HIDDEN ? Math.round(p.tr) : null,
-    rd:          Math.round(p.rd),
-    gamesPlayed: p.gamesPlayed,
-    wins:        p.wins,
-    losses:      p.losses,
-    winRate:     p.gamesPlayed > 0 ? Math.round(p.wins/p.gamesPlayed*100) : 0,
-    bestAPM:     Math.round(p.bestAPM),
-    bestPPS:     p.bestPPS.toFixed(2),
+    tr:          (p.rd ?? RD_INITIAL) <= RD_HIDDEN ? Math.round(p.tr ?? 0) : null,
+    rd:          Math.round(p.rd ?? RD_INITIAL),
+    gamesPlayed: gp,
+    wins:        w,
+    losses:      l,
+    winRate:     gp > 0 ? Math.round(w / gp * 100) : 0,
+    bestAPM:     Math.round(p.bestAPM ?? 0),
+    bestPPS:     (p.bestPPS ?? 0).toFixed(2),
     createdAt:   p.createdAt,
-    replayIds:   p.replayIds,
+    replayIds:   p.replayIds || [],
   };
 }
 
