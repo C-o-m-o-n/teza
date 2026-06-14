@@ -49,6 +49,19 @@ jobs:
 
       - name: Health check
         run: |
-          sleep 3
-          curl --silent --fail --retry 5 --retry-delay 2 http://localhost:3000 > /dev/null
+          sleep 10  # Increase from 3 to 10 seconds
+          
+          # Debug: Check if process is running
+          pm2 list
+          
+          # Debug: Check application logs
+          pm2 logs teza --nostream --lines 20
+          
+          # Retry curl with verbose output on failure
+          curl --silent --fail --retry 5 --retry-delay 2 http://localhost:3000 > /dev/null || {
+            echo "❌ Health check failed. Last 50 lines of PM2 logs:"
+            pm2 logs teza --nostream --lines 50
+            exit 1
+          }
+          
           echo "✅ TEZA is live on localhost:3000"
