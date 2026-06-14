@@ -248,7 +248,6 @@ function calcTR(r, rd) {
  * ============================================================ */
 const DB_FILE = path.join(DATA_DIR, 'teza.db');
 let db;
-let stmtGetPlayer, stmtInsertPlayer, stmtUpdatePlayer, stmtLeaderboard;
 
 function initDatabase(SQL) {
   if (fs.existsSync(DB_FILE)) {
@@ -276,37 +275,6 @@ function initDatabase(SQL) {
       best_pps REAL,
       replay_ids TEXT
     )
-  `);
-
-  stmtGetPlayer = db.prepare('SELECT * FROM players WHERE username = $username');
-  stmtInsertPlayer = db.prepare(`
-    INSERT INTO players (
-      username, password_hash, created_at,
-      r, rd, vol, tr,
-      games_played, wins, losses,
-      total_attack, total_lines, best_apm, best_pps,
-      replay_ids
-    ) VALUES (
-      $username, $password_hash, $created_at,
-      $r, $rd, $vol, $tr,
-      $games_played, $wins, $losses,
-      $total_attack, $total_lines, $best_apm, $best_pps,
-      $replay_ids
-    )
-  `);
-  stmtUpdatePlayer = db.prepare(`
-    UPDATE players SET
-      r = $r, rd = $rd, vol = $vol, tr = $tr,
-      games_played = $games_played, wins = $wins, losses = $losses,
-      total_attack = $total_attack, total_lines = $total_lines, best_apm = $best_apm, best_pps = $best_pps,
-      replay_ids = $replay_ids
-    WHERE username = $username
-  `);
-  stmtLeaderboard = db.prepare(`
-    SELECT * FROM players
-    WHERE games_played >= 10 AND rd <= $rd
-    ORDER BY tr DESC
-    LIMIT 50
   `);
 }
 
@@ -342,21 +310,32 @@ function _dbRowToProfile(row) {
 }
 
 function getPlayer(username) {
-  stmtGetPlayer.bind({ $username: username.toLowerCase() });
-  if (stmtGetPlayer.step()) {
-    const row = stmtGetPlayer.getAsObject();
-    stmtGetPlayer.reset();
-    return _dbRowToProfile(row);
-  }
-  stmtGetPlayer.reset();
-  return null;
+  const stmt = db.prepare('SELECT * FROM players WHERE username = $username');
+  const row = stmt.getAsObject({ $username: username.toLowerCase() });
+  stmt.free();
+  if (!row || Object.keys(row).length === 0) return null;
+  return _dbRowToProfile(row);
 }
 
 function createPlayer(username, password_hash) {
   const key = username.toLowerCase();
   const now = new Date().toISOString();
   const tr = calcTR(R_INITIAL, RD_INITIAL);
-  stmtInsertPlayer.run({
+  db.run(`
+    INSERT INTO players (
+      username, password_hash, created_at,
+      r, rd, vol, tr,
+      games_played, wins, losses,
+      total_attack, total_lines, best_apm, best_pps,
+      replay_ids
+    ) VALUES (
+      $username, $password_hash, $created_at,
+      $r, $rd, $vol, $tr,
+      $games_played, $wins, $losses,
+      $total_attack, $total_lines, $best_apm, $best_pps,
+      $replay_ids
+    )
+  `, {
     $username: key,
     $password_hash: password_hash,
     $created_at: now,
@@ -378,7 +357,14 @@ function createPlayer(username, password_hash) {
 }
 
 function savePlayer(p) {
-  stmtUpdatePlayer.run({
+  db.run(`
+    UPDATE players SET
+      r = $r, rd = $rd, vol = $vol, tr = $tr,
+      games_played = $games_played, wins = $wins, losses = $losses,
+      total_attack = $total_attack, total_lines = $total_lines, best_apm = $best_apm, best_pps = $best_pps,
+      replay_ids = $replay_ids
+    WHERE username = $username
+  `, {
     $r: p.r,
     $rd: p.rd,
     $vol: p.vol,
@@ -915,10 +901,16 @@ wss.on('connection',(ws,req)=>{
         break;
       }
       case 'getLeaderboard':{
-        stmtLeaderboard.bind({ $rd: RD_HIDDEN });
+        const stmt = db.prepare(`
+          SELECT * FROM players
+          WHERE games_played >= 10 AND rd <= $rd
+          ORDER BY tr DESC
+          LIMIT 50
+        `);
+        stmt.bind({ $rd: RD_HIDDEN });
         const rows = [];
-        while(stmtLeaderboard.step()) rows.push(stmtLeaderboard.getAsObject());
-        stmtLeaderboard.reset();
+        while(stmt.step()) rows.push(stmt.getAsObject());
+        stmt.free();
         
         const board = rows.map(_dbRowToProfile).map(sanitizeProfile);
         conn.send('leaderboard',{entries:board});
