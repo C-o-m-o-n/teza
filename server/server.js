@@ -25,7 +25,7 @@ const WebSocket = require('ws');
 const http      = require('http');
 const fs        = require('fs');
 const path      = require('path');
-const Database  = require('better-sqlite3');
+const initSqlJs = require('sql.js');
 const bcrypt    = require('bcryptjs');
 const { createEngine, stepEngine, tickEngine, hashEngine } = require('../shared/engine');
 
@@ -78,7 +78,12 @@ function handleApi(req, res) {
 
   // GET /api/leaderboard
   if (url === '/api/leaderboard' && req.method === 'GET') {
-    const board = stmtLeaderboard.all(RD_HIDDEN).map(_dbRowToProfile).map(sanitizeProfile);
+    stmtLeaderboard.bind({ $rd: RD_HIDDEN });
+    const rows = [];
+    while(stmtLeaderboard.step()) rows.push(stmtLeaderboard.getAsObject());
+    stmtLeaderboard.reset();
+    
+    const board = rows.map(_dbRowToProfile).map(sanitizeProfile);
     res.end(JSON.stringify(board));
     return;
   }
@@ -239,64 +244,81 @@ function calcTR(r, rd) {
 /* ============================================================
  * §4  PLAYER PROFILE STORE
  * ============================================================
- * SQLite database store using better-sqlite3.
+ * SQLite database store using sql.js (in-memory, saved to disk)
  * ============================================================ */
 const DB_FILE = path.join(DATA_DIR, 'teza.db');
-const db = new Database(DB_FILE);
+let db;
+let stmtGetPlayer, stmtInsertPlayer, stmtUpdatePlayer, stmtLeaderboard;
 
-db.pragma('journal_mode = WAL');
+function initDatabase(SQL) {
+  if (fs.existsSync(DB_FILE)) {
+    const filebuffer = fs.readFileSync(DB_FILE);
+    db = new SQL.Database(filebuffer);
+  } else {
+    db = new SQL.Database();
+  }
 
-// Create table if not exists
-db.exec(`
-  CREATE TABLE IF NOT EXISTS players (
-    username TEXT PRIMARY KEY,
-    password_hash TEXT,
-    created_at TEXT,
-    r REAL,
-    rd REAL,
-    vol REAL,
-    tr REAL,
-    games_played INTEGER,
-    wins INTEGER,
-    losses INTEGER,
-    total_attack INTEGER,
-    total_lines INTEGER,
-    best_apm REAL,
-    best_pps REAL,
-    replay_ids TEXT
-  )
-`);
+  db.run(`
+    CREATE TABLE IF NOT EXISTS players (
+      username TEXT PRIMARY KEY,
+      password_hash TEXT,
+      created_at TEXT,
+      r REAL,
+      rd REAL,
+      vol REAL,
+      tr REAL,
+      games_played INTEGER,
+      wins INTEGER,
+      losses INTEGER,
+      total_attack INTEGER,
+      total_lines INTEGER,
+      best_apm REAL,
+      best_pps REAL,
+      replay_ids TEXT
+    )
+  `);
 
-const stmtGetPlayer = db.prepare('SELECT * FROM players WHERE username = ?');
-const stmtInsertPlayer = db.prepare(`
-  INSERT INTO players (
-    username, password_hash, created_at,
-    r, rd, vol, tr,
-    games_played, wins, losses,
-    total_attack, total_lines, best_apm, best_pps,
-    replay_ids
-  ) VALUES (
-    ?, ?, ?,
-    ?, ?, ?, ?,
-    ?, ?, ?,
-    ?, ?, ?, ?,
-    ?
-  )
-`);
-const stmtUpdatePlayer = db.prepare(`
-  UPDATE players SET
-    r = ?, rd = ?, vol = ?, tr = ?,
-    games_played = ?, wins = ?, losses = ?,
-    total_attack = ?, total_lines = ?, best_apm = ?, best_pps = ?,
-    replay_ids = ?
-  WHERE username = ?
-`);
-const stmtLeaderboard = db.prepare(`
-  SELECT * FROM players
-  WHERE games_played >= 10 AND rd <= ?
-  ORDER BY tr DESC
-  LIMIT 50
-`);
+  stmtGetPlayer = db.prepare('SELECT * FROM players WHERE username = $username');
+  stmtInsertPlayer = db.prepare(`
+    INSERT INTO players (
+      username, password_hash, created_at,
+      r, rd, vol, tr,
+      games_played, wins, losses,
+      total_attack, total_lines, best_apm, best_pps,
+      replay_ids
+    ) VALUES (
+      $username, $password_hash, $created_at,
+      $r, $rd, $vol, $tr,
+      $games_played, $wins, $losses,
+      $total_attack, $total_lines, $best_apm, $best_pps,
+      $replay_ids
+    )
+  `);
+  stmtUpdatePlayer = db.prepare(`
+    UPDATE players SET
+      r = $r, rd = $rd, vol = $vol, tr = $tr,
+      games_played = $games_played, wins = $wins, losses = $losses,
+      total_attack = $total_attack, total_lines = $total_lines, best_apm = $best_apm, best_pps = $best_pps,
+      replay_ids = $replay_ids
+    WHERE username = $username
+  `);
+  stmtLeaderboard = db.prepare(`
+    SELECT * FROM players
+    WHERE games_played >= 10 AND rd <= $rd
+    ORDER BY tr DESC
+    LIMIT 50
+  `);
+}
+
+function _saveDbToDisk() {
+  try {
+    const data = db.export();
+    const buffer = Buffer.from(data);
+    fs.writeFileSync(DB_FILE, buffer);
+  } catch (e) {
+    console.error('[Store] Save failed:', e.message);
+  }
+}
 
 function _dbRowToProfile(row) {
   if (!row) return null;
@@ -320,31 +342,58 @@ function _dbRowToProfile(row) {
 }
 
 function getPlayer(username) {
-  return _dbRowToProfile(stmtGetPlayer.get(username.toLowerCase()));
+  stmtGetPlayer.bind({ $username: username.toLowerCase() });
+  if (stmtGetPlayer.step()) {
+    const row = stmtGetPlayer.getAsObject();
+    stmtGetPlayer.reset();
+    return _dbRowToProfile(row);
+  }
+  stmtGetPlayer.reset();
+  return null;
 }
 
 function createPlayer(username, password_hash) {
   const key = username.toLowerCase();
   const now = new Date().toISOString();
   const tr = calcTR(R_INITIAL, RD_INITIAL);
-  stmtInsertPlayer.run(
-    key, password_hash, now,
-    R_INITIAL, RD_INITIAL, VOL_INITIAL, tr,
-    0, 0, 0,
-    0, 0, 0, 0,
-    '[]'
-  );
+  stmtInsertPlayer.run({
+    $username: key,
+    $password_hash: password_hash,
+    $created_at: now,
+    $r: R_INITIAL,
+    $rd: RD_INITIAL,
+    $vol: VOL_INITIAL,
+    $tr: tr,
+    $games_played: 0,
+    $wins: 0,
+    $losses: 0,
+    $total_attack: 0,
+    $total_lines: 0,
+    $best_apm: 0,
+    $best_pps: 0,
+    $replay_ids: '[]'
+  });
+  _saveDbToDisk();
   return getPlayer(key);
 }
 
 function savePlayer(p) {
-  stmtUpdatePlayer.run(
-    p.r, p.rd, p.vol, p.tr,
-    p.gamesPlayed, p.wins, p.losses,
-    p.totalAttack, p.totalLines, p.bestAPM, p.bestPPS,
-    JSON.stringify(p.replayIds),
-    p.username.toLowerCase()
-  );
+  stmtUpdatePlayer.run({
+    $r: p.r,
+    $rd: p.rd,
+    $vol: p.vol,
+    $tr: p.tr,
+    $games_played: p.gamesPlayed,
+    $wins: p.wins,
+    $losses: p.losses,
+    $total_attack: p.totalAttack,
+    $total_lines: p.totalLines,
+    $best_apm: p.bestAPM,
+    $best_pps: p.bestPPS,
+    $replay_ids: JSON.stringify(p.replayIds),
+    $username: p.username.toLowerCase()
+  });
+  _saveDbToDisk();
 }
 
 function recordResult(winnerName, loserName, wStats, lStats, replayId) {
@@ -866,7 +915,12 @@ wss.on('connection',(ws,req)=>{
         break;
       }
       case 'getLeaderboard':{
-        const board = stmtLeaderboard.all(RD_HIDDEN).map(_dbRowToProfile).map(sanitizeProfile);
+        stmtLeaderboard.bind({ $rd: RD_HIDDEN });
+        const rows = [];
+        while(stmtLeaderboard.step()) rows.push(stmtLeaderboard.getAsObject());
+        stmtLeaderboard.reset();
+        
+        const board = rows.map(_dbRowToProfile).map(sanitizeProfile);
         conn.send('leaderboard',{entries:board});
         break;
       }
@@ -888,16 +942,23 @@ wss.on('connection',(ws,req)=>{
 /* ============================================================
  * §9  START
  * ============================================================ */
-httpServer.listen(PORT,()=>{
-  console.log(`
-╔══════════════════════════════════════════╗
-║  TEZA — Game Server v0.4.0               ║
-║  teza.ke  ·  Built in Kenya 🇰🇪           ║
-╠══════════════════════════════════════════╣
-║  HTTP  →  http://localhost:${PORT}           ║
-║  WS    →  ws://localhost:${PORT}             ║
-║                                          ║
-║  Phase 4:  Ratings · Profiles            ║
-║  Matchmaking · Spectator · Replays       ║
-╚══════════════════════════════════════════╝`);
+initSqlJs().then(SQL => {
+  initDatabase(SQL);
+  
+  httpServer.listen(PORT,()=>{
+    console.log(`
+  ╔══════════════════════════════════════════╗
+  ║  TEZA — Game Server v0.4.0               ║
+  ║  teza.ke  ·  Built in Kenya 🇰🇪           ║
+  ╠══════════════════════════════════════════╣
+  ║  HTTP  →  http://localhost:${PORT}           ║
+  ║  WS    →  ws://localhost:${PORT}             ║
+  ║                                          ║
+  ║  Phase 4:  Ratings · Profiles            ║
+  ║  Matchmaking · Spectator · Replays       ║
+  ╚══════════════════════════════════════════╝`);
+  });
+}).catch(err => {
+  console.error("Failed to initialize sql.js:", err);
+  process.exit(1);
 });
