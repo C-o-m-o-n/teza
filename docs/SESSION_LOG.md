@@ -49,3 +49,23 @@
 **Next steps**
 - Push `main` once the secrets exist, then check the Actions run and the live URL.
 - Reword backlog item 2, then `/factory next`.
+
+## 2026-10-13 — Workers game server (factory job 002)
+
+**What changed**
+- `wrangler.jsonc` now has a script (`main: worker/index.ts`) next to the `dist/` assets. `run_worker_first: ["/api/*"]` keeps every other path on the static asset handler.
+- `GET /api/match/<id>` (WebSocket) routes to one `Match` Durable Object per id (sqlite-backed class, migration `v1`). Bad ids get 400, non-upgrade requests 426, other `/api/*` 404.
+- `src/server/match.ts` holds the match logic with no Cloudflare imports: Ribbon envelopes `{t,s,a,d}`, a 100-packet resend buffer per slot, input validation (frame order, 30-frame clock tolerance, 60 inputs/s, 1 KB message cap), garbage transfer, top-out and 15 s disconnect forfeit. No tick; engines advance as inputs arrive. Match rules are the client's VS preset (`modeById("vs")`).
+- `test/match.test.ts` (13 tests) drives it with a fake clock and fake sockets.
+- `@cloudflare/workers-types` added; `npm run typecheck` also runs `tsc -p worker`. `dist/` output is byte-identical to before.
+- Deploy workflow curl checks now use `--retry 10 --retry-delay 6 --retry-all-errors`, since a fresh workers.dev URL 404s for a short while.
+
+**Still open**
+- `npx wrangler dev` was not started (needs your OK); routing was checked by running the bundled worker's `fetch` in Node with a stub Durable Object. Worth one `wrangler dev` check before the first real deploy.
+- No client yet: the browser has no online mode, lobby or WebSocket client.
+- Match state lives in memory only. If the Durable Object is evicted (for example, both sockets gone for a while), the match is lost.
+- The first deploy with this config creates the `Match` Durable Object class (migration `v1`). Not tried against the real account; if it fails, check the API token's permissions first.
+
+**Next steps**
+- Run `npx wrangler dev` once and curl `/`, `/api/match/abc`, `/api/match/bad%20id` and `/api/nope`.
+- Next backlog item: online rooms (client WebSocket using the same envelope).

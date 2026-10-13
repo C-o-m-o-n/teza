@@ -20,7 +20,7 @@ Other scripts: `npm run check` (typecheck + tests + build) and `npm run build` (
 
 ## Deploy
 
-Every push to `main` deploys to Cloudflare Workers through `.github/workflows/deploy.yml`. It runs `npm ci` and `npm run check`, then `wrangler deploy` publishes `dist/` as an assets-only Worker (see `wrangler.jsonc`), and the job checks that `/` and `/game.js` load from the deployed URL.
+Every push to `main` deploys to Cloudflare Workers through `.github/workflows/deploy.yml`. It runs `npm ci` and `npm run check`, then `wrangler deploy` publishes `dist/` as static assets plus the game server Worker (see `wrangler.jsonc`), and the job checks that `/` and `/game.js` load from the deployed URL.
 
 The workflow needs two repository secrets:
 
@@ -30,6 +30,44 @@ The workflow needs two repository secrets:
 To deploy by hand, run `npm run build`, then `npx wrangler deploy`.
 
 Live URL: https://teza.comon928.workers.dev/
+
+## Game server
+
+The `teza` Worker (`worker/index.ts`) serves `dist/` as static assets. Only `/api/*` runs the script:
+
+- `GET /api/match/<id>` with `Upgrade: websocket` joins match `<id>`. Each id gets its own `Match` Durable Object, which holds both sockets and runs one headless engine per player. `<id>` must match `^[A-Za-z0-9_-]{1,32}$` (else 400). Without the upgrade header the route returns 426.
+- Any other `/api/*` path returns 404.
+
+The match logic lives in `src/server/match.ts`, which has no Cloudflare imports so the tests can drive it with a fake clock.
+
+Messages are JSON envelopes `{t, s, a, d}` in both directions: type, sequence number (per player slot, +1 per packet sent), ack (last `s` received from the other side) and payload. The server keeps each slot's last 100 packets for reconnects.
+
+| Server to client | `d` |
+|---|---|
+| `welcome` | `{slot, token}`: slot 0 or 1 and the resume token |
+| `start` | `{seed, options}`: both players get the same seed and the VS rules |
+| `opponentInput` | `{frame, action, kind}`: an input the server accepted from the opponent |
+| `garbage` | `{amount, frame}`: attack received, applied at your current server frame |
+| `opponentDisconnected` | `{grace}`: ms the opponent has to come back (15000) |
+| `opponentReconnected` | none |
+| `end` | `{winner, reason}`: reason is `topout` or `disconnect`; sent once |
+| `error` | `{code, message}` |
+| `pong` | none |
+
+| Client to server | `d` |
+|---|---|
+| `input` | `{frame, action, kind}`: action is `left right soft hard cw ccw 180 hold`, kind is `press` or `release` |
+| `resume` | `{token, peerAck}`: rebind a slot on a new socket, then get the missed packets with `s > peerAck` |
+| `ping` | anything; answered with `pong` |
+
+The first two sockets take slots 0 and 1, and the match starts when both are connected. A third socket gets `error` (`full`) and is closed. There is no server tick: a player's engine advances only when one of their inputs is accepted. An input is rejected with `error` and leaves the engine alone when:
+
+- the action or kind is unknown, or `frame` is not a number;
+- `frame` is lower than that player's last accepted frame;
+- `frame` is more than 30 frames ahead of the server clock (ms since `start` × 60 / 1000);
+- the player already sent 60 accepted inputs in the last second.
+
+More than 20 rejected messages (including messages over 1 KB or not JSON) close the socket. When a socket closes mid-match the opponent gets `opponentDisconnected`; the player has 15 s to send `resume` with their token on a new socket, or they forfeit. A wrong token gets `error` and the socket is closed. If the missed packets have already left the 100-packet buffer, the server sends `error` with code `resync` instead of a partial replay.
 
 ## Controls (TETR.IO defaults, rebindable in CONFIG)
 
@@ -44,8 +82,9 @@ Live URL: https://teza.comon928.workers.dev/
 ## Layout
 
 - `src/engine/` — deterministic, headless engine (sub-frame input timing, same as the original)
+- `src/server/` — online match logic (runtime-independent; the Worker in `worker/` wraps it in a Durable Object)
 - `src/ai/bot.ts` — VS opponent: searches every placement, including soft-drop + spin finishes
 - `src/render/` — canvas renderer (board spring physics, particles, action text)
 - `src/audio/` — synthesized WebAudio SFX
 - `src/ui/` — menus, config, results, session orchestration
-- `test/` — engine and bot tests (vitest)
+- `test/` — engine, bot and match server tests (vitest)
