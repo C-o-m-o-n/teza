@@ -5,6 +5,7 @@
   "description": "Teza (tetris + cheza, Swahili for \"play\"): a clean-room modern stacker with TETR.IO-matched mechanics.",
   "type": "module",
   "scripts": {
+    "start": "node build.mjs --serve",
     "typecheck": "tsc --noEmit",
     "build": "node build.mjs",
     "test": "vitest run",

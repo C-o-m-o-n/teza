@@ -13,9 +13,10 @@ None of osk's code, art, music, sounds or fonts is included. The constants were 
 
 ```bash
 npm install
-npm run check      # typecheck + tests + build
-xdg-open dist/index.html   # runs straight from disk, no server needed
+npm start          # → open http://localhost:3000 (rebuilds when you save a file)
 ```
+
+Other scripts: `npm run check` (typecheck + tests + build) and `npm run build` (production build into `dist/`; it's plain static files, so any web server can host it).
 
 ## Controls (TETR.IO defaults, rebindable in CONFIG)
 

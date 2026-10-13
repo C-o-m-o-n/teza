@@ -28,3 +28,5 @@
 **Still open**
 - Not pushed yet. The old version had a server (accounts, leaderboard, bot matches, pm2 `ecosystem.config.js`). This rebuild is client-only, so whatever deploys from `main` will lose those features until they are ported.
 - The user accepted dropping the old server features for now. They are queued in `.factory/backlog.md` (git-excluded) as 8 items: homelab deploy, game server, accounts, online rooms, ratings/matchmaking, leaderboard/profiles, spectator, replays. Run them with `/factory next`.
+- Added `npm start` (esbuild watch + serve on http://localhost:3000, `PORT` overrides it) and moved the README's Run section to use it. Tested with curl: index, game.js and style.css all returned 200.
+- Benchmark (headless Node, this machine): simulating 2 minutes of one player's game takes about 24 ms of CPU, so one core can check roughly 5,000 live players. A bot decision takes about 28 ms per piece, so bots should stay in the browser.
