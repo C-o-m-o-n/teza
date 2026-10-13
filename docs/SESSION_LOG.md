@@ -84,3 +84,19 @@
 
 **Next steps**
 - Run `npx wrangler dev` once and curl `/`, `/api/match/abc`, `/api/match/bad%20id` and `/api/nope`.
+
+## 2026-10-13 — Custom domain and reconnect/idle fixes (factory job 002, rework 2)
+
+**What changed**
+- `wrangler.jsonc`: the Worker is served on the custom domain `teza.comonhq.com` (`custom_domain: true`) and `workers_dev` is off, so the zone's rate-limit rule can't be skipped via workers.dev.
+- `.github/workflows/deploy.yml`: the post-deploy check no longer uses wrangler-action's `deployment-url`. It curls a fixed `SITE_URL` (`https://teza.comonhq.com`) for `/` and `/game.js`, and requires `/api/match/ci-check` without an upgrade header to return 426.
+- Reconnect can't be blocked: a returning player puts `?resume=<token>&ack=<peerAck>` on the upgrade URL. The Durable Object checks it before accepting (400 malformed, 403 unknown token) and the socket takes its slot without waiting among the pending sockets.
+- Idle deadline: if neither player sends a valid message for 60 s after `start`, both engines run to the clock (a top-out decides it) or the match ends as a draw (`end {winner: null, reason: "idle"}`). Catch-up now moves lagging engines together frame by frame, so whoever tops out first loses.
+- README: live URL is https://teza.comonhq.com/; documents the zone rate-limit rule and same-origin API calls.
+
+**Still open**
+- The DNS/custom-domain setup and the rate-limit rule (comonhq.com zone, hostname `teza.comonhq.com`, path `/api/match/*`, per IP, block) are dashboard config; confirm both exist before the next deploy. The API token may also need zone permissions for the custom domain route.
+- `npx wrangler dev` has still not been run; no client yet.
+
+**Next steps**
+- After the next deploy, confirm the CI check passes against https://teza.comonhq.com.
