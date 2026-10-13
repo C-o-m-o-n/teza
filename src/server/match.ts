@@ -1,7 +1,8 @@
 // Authoritative logic for one online VS match. Runtime-independent: the Durable Object in
 // worker/index.ts owns the WebSockets and feeds this module, and the tests drive it with
-// fake connections and a fake clock. There is no tick: each player's engine only advances
-// when one of their inputs arrives and is accepted.
+// fake connections and a fake clock. There is no tick: engines advance when a message
+// arrives, either to an accepted input's frame or, for a player who has fallen behind the
+// server clock, up to the lag limit (so nobody can stall a match by going quiet).
 //
 // Wire format is the Ribbon envelope from the old server, {t, s, a, d}: type, sequence id
 // (per slot, increments per packet sent), ack (last `s` received from the other side) and
@@ -16,6 +17,10 @@ export const FRAME_TOLERANCE = 30; // frames an input may be ahead of the server
 export const MAX_INPUTS_PER_SECOND = 60;
 export const MAX_REJECTED = 20; // rejected messages before the connection is dropped
 export const RECONNECT_GRACE_MS = 15000;
+export const MAX_LAG_FRAMES = 120; // frames an input (or an engine) may trail the server's clock
+export const RESUME_TIMEOUT_MS = 5000; // an extra socket must `resume` within this time
+export const MAX_PENDING = 2; // extra sockets waiting to `resume` at once
+export const LOBBY_TIMEOUT_MS = 120_000; // a match without an opponent by then is reset
 
 const ACTIONS: readonly string[] = ["left", "right", "soft", "hard", "cw", "ccw", "180", "hold"];
 
@@ -75,6 +80,7 @@ export interface Conn {
   slot: Slot | null;
   rejected: number;
   closed: boolean;
+  timer: unknown; // resume deadline while the socket holds no slot
 }
 
 type Message = { t: string; s?: unknown; d?: unknown };
@@ -84,6 +90,8 @@ export class MatchSession {
   private startedAt = 0;
   private started = false;
   private ended = false;
+  private pending = new Set<Conn>(); // sockets without a slot, waiting to `resume`
+  private lobby: unknown = null; // resets the match if it has not started in time
   private garbageOut: { slot: Slot; amount: number; frame: number }[] = [];
 
   constructor(private clock: Clock, private random: Random = cryptoRandom) {}
@@ -98,8 +106,10 @@ export class MatchSession {
   }
 
   connect(peer: Peer): Conn {
-    const conn: Conn = { peer, slot: null, rejected: 0, closed: false };
-    if (this.slots.length < 2) {
+    const conn: Conn = { peer, slot: null, rejected: 0, closed: false, timer: null };
+    if (this.ended) {
+      this.reject(conn, "ended", "the match is over");
+    } else if (this.slots.length < 2) {
       const slot: Slot = {
         index: this.slots.length as SlotIndex, token: this.random.token(), conn, seq: 0, ack: 0,
         buffer: [], game: null, lastFrame: 0, recent: [], grace: null,
@@ -107,16 +117,27 @@ export class MatchSession {
       this.slots.push(slot);
       conn.slot = slot;
       this.send(slot, "welcome", { slot: slot.index, token: slot.token });
+      if (slot.index === 0) this.lobby = this.clock.setTimeout(() => this.reset(), LOBBY_TIMEOUT_MS);
       this.maybeStart();
     } else if (!this.slots.some((s) => s.conn === null)) {
       this.reject(conn, "full", "match is full");
+    } else if (this.pending.size >= MAX_PENDING) {
+      this.reject(conn, "busy", "too many sockets waiting to resume");
+    } else {
+      // a slot is free: the socket waits unbound until it sends `resume`
+      this.pending.add(conn);
+      conn.timer = this.clock.setTimeout(() => {
+        conn.timer = null;
+        this.reject(conn, "resume-timeout", "send resume first");
+      }, RESUME_TIMEOUT_MS);
     }
-    // otherwise the socket waits unbound until it sends `resume`
     return conn;
   }
 
   message(conn: Conn, data: string | ArrayBuffer): void {
     if (conn.closed) return;
+    this.catchUp();
+    if (conn.closed) return; // the catch-up ended the match
     const msg = parse(data);
     if (typeof msg === "string") return this.reject(conn, msg, "unreadable message");
     const slot = conn.slot;
@@ -138,6 +159,7 @@ export class MatchSession {
   disconnect(conn: Conn): void {
     if (conn.closed) return;
     conn.closed = true;
+    this.unpend(conn);
     const slot = conn.slot;
     if (!slot) return;
     conn.slot = null;
@@ -153,6 +175,58 @@ export class MatchSession {
 
   // ---------------------------------------------------------------- internals
 
+  private unpend(conn: Conn): void {
+    this.pending.delete(conn);
+    if (conn.timer !== null) this.clock.clearTimeout(conn.timer);
+    conn.timer = null;
+  }
+
+  /** Close every socket the match knows about; ones still waiting to resume get an `error` first. */
+  private closeAll(code: number, reason: string, message: string): void {
+    for (const conn of [...this.pending]) this.reject(conn, reason, message);
+    for (const slot of this.slots) if (slot.conn) this.drop(slot.conn, code, reason);
+  }
+
+  /** Nobody joined in time: close the lone player's socket and start over, so the id can be reused. */
+  private reset(): void {
+    this.lobby = null;
+    if (this.started) return;
+    for (const slot of this.slots) if (slot.conn) this.send(slot, "error", { code: "no-opponent", message: "nobody joined" });
+    this.closeAll(1000, "no-opponent", "nobody joined");
+    this.slots = [];
+  }
+
+  private wallFrame(): number {
+    return ((this.clock.now() - this.startedAt) * 60) / 1000;
+  }
+
+  /**
+   * Bring any engine that trails the server clock by more than MAX_LAG_FRAMES up to that
+   * limit, as if the player had pressed nothing. The target is a whole frame so the engine's
+   * per-frame steps are the same as if the next input had advanced it.
+   */
+  private catchUp(): void {
+    if (!this.started || this.ended) return;
+    const target = Math.floor(this.wallFrame() - MAX_LAG_FRAMES);
+    let moved = false;
+    for (const slot of this.slots) {
+      if (!slot.game || slot.game.frame >= target) continue;
+      slot.game.advance(target - slot.game.frame);
+      moved = true;
+    }
+    if (moved) this.settle();
+  }
+
+  /** Send garbage queued by attacks, then end the match if an engine has topped out. */
+  private settle(): void {
+    const garbage = this.garbageOut;
+    this.garbageOut = [];
+    for (const g of garbage) this.send(g.slot, "garbage", { amount: g.amount, frame: g.frame });
+    // VS has no objective, so over = topped out
+    const out = this.slots.find((s) => s.game?.over);
+    if (out) this.finish(this.other(out).index, "topout");
+  }
+
   private other(slot: Slot): Slot {
     return this.slots[1 - slot.index];
   }
@@ -166,6 +240,7 @@ export class MatchSession {
 
   /** Send an `error`. Unbound sockets are closed at once; bound ones after too many. */
   private reject(conn: Conn, code: string, message: string): void {
+    if (conn.closed) return;
     if (conn.slot) this.send(conn.slot, "error", { code, message });
     else conn.peer.send(JSON.stringify({ t: "error", s: 0, a: 0, d: { code, message } }));
     if (!conn.slot || ++conn.rejected > MAX_REJECTED) this.drop(conn, 1008, code);
@@ -183,6 +258,8 @@ export class MatchSession {
     if (this.started || this.slots.length < 2 || this.slots.some((s) => s.conn === null)) return;
     this.started = true;
     this.startedAt = this.clock.now();
+    if (this.lobby !== null) this.clock.clearTimeout(this.lobby);
+    this.lobby = null;
     const seed = this.random.seed();
     const options = matchOptions(seed);
     for (const slot of this.slots) {
@@ -206,6 +283,7 @@ export class MatchSession {
     const slot = this.slots.find((s) => s.token === d.token);
     if (!slot) return this.reject(conn, "bad-token", "unknown resume token");
     const peerAck = d.peerAck as number;
+    this.unpend(conn);
 
     if (slot.conn) {
       // the client reconnected before the old socket's close reached us
@@ -248,9 +326,9 @@ export class MatchSession {
     const frame = d.frame;
     if (frame < slot.lastFrame) return this.reject(conn, "frame-behind", "frame is before the last accepted input");
     const now = this.clock.now();
-    if (frame > ((now - this.startedAt) * 60) / 1000 + FRAME_TOLERANCE) {
-      return this.reject(conn, "frame-ahead", "frame is ahead of the server clock");
-    }
+    const wall = this.wallFrame();
+    if (frame > wall + FRAME_TOLERANCE) return this.reject(conn, "frame-ahead", "frame is ahead of the server clock");
+    if (frame < wall - MAX_LAG_FRAMES) return this.reject(conn, "frame-late", "frame is too far behind the server clock");
     slot.recent = slot.recent.filter((t) => t > now - 1000);
     if (slot.recent.length >= MAX_INPUTS_PER_SECOND) return this.reject(conn, "rate-limit", "too many inputs");
 
@@ -262,10 +340,7 @@ export class MatchSession {
     else game.release(action);
 
     this.send(this.other(slot), "opponentInput", { frame, action, kind: d.kind });
-    const garbage = this.garbageOut;
-    this.garbageOut = [];
-    for (const g of garbage) this.send(g.slot, "garbage", { amount: g.amount, frame: g.frame });
-    if (game.over) this.finish(this.other(slot).index, "topout"); // VS has no objective, so over = topped out
+    this.settle();
   }
 
   private finish(winner: SlotIndex, reason: string): void {
@@ -277,6 +352,7 @@ export class MatchSession {
       if (slot.game) slot.game.onAttack = null;
     }
     for (const slot of this.slots) this.send(slot, "end", { winner, reason });
+    this.closeAll(1000, "ended", "the match is over");
   }
 }
 
