@@ -60,14 +60,16 @@ Messages are JSON envelopes `{t, s, a, d}` in both directions: type, sequence nu
 | `resume` | `{token, peerAck}`: rebind a slot on a new socket, then get the missed packets with `s > peerAck` |
 | `ping` | anything; answered with `pong` |
 
-The first two sockets take slots 0 and 1, and the match starts when both are connected. A third socket gets `error` (`full`) and is closed. There is no server tick: a player's engine advances only when one of their inputs is accepted. An input is rejected with `error` and leaves the engine alone when:
+The first two sockets take slots 0 and 1, and the match starts when both are connected. A third socket gets `error` (`full`) and is closed. If no second player joins within 2 minutes, the first gets `error` (`no-opponent`), its socket is closed and the match id starts fresh.
+
+There is no server tick. Engines advance when a message arrives: a player's engine moves to the frame of each input it accepts, and any engine more than 120 frames behind the server clock (ms since `start` × 60 / 1000) is first moved up to that limit, as if the player pressed nothing. A player who goes quiet therefore keeps falling and can still top out. An input is rejected with `error` and leaves the engine alone when:
 
 - the action or kind is unknown, or `frame` is not a number;
 - `frame` is lower than that player's last accepted frame;
-- `frame` is more than 30 frames ahead of the server clock (ms since `start` × 60 / 1000);
+- `frame` is more than 30 frames ahead of the server clock, or more than 120 frames behind it;
 - the player already sent 60 accepted inputs in the last second.
 
-More than 20 rejected messages (including messages over 1 KB or not JSON) close the socket. When a socket closes mid-match the opponent gets `opponentDisconnected`; the player has 15 s to send `resume` with their token on a new socket, or they forfeit. A wrong token gets `error` and the socket is closed. If the missed packets have already left the 100-packet buffer, the server sends `error` with code `resync` instead of a partial replay.
+More than 20 rejected messages (including messages over 1 KB or not JSON) close the socket. When a socket closes mid-match the opponent gets `opponentDisconnected`; the player has 15 s to send `resume` with their token on a new socket, or they forfeit. While a slot is free, at most 2 new sockets may wait to resume (more get `busy`), and each must send `resume` within 5 s (else `resume-timeout`). A wrong token gets `error` and the socket is closed. If the missed packets have already left the 100-packet buffer, the server sends `error` with code `resync` instead of a partial replay. After `end` the server closes both sockets, and new sockets get `error` (`ended`) and are closed.
 
 ## Controls (TETR.IO defaults, rebindable in CONFIG)
 

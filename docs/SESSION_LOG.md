@@ -69,3 +69,18 @@
 **Next steps**
 - Run `npx wrangler dev` once and curl `/`, `/api/match/abc`, `/api/match/bad%20id` and `/api/nope`.
 - Next backlog item: online rooms (client WebSocket using the same envelope).
+
+## 2026-10-13 — Game server hardening (factory job 002, rework 1)
+
+**What changed**
+- `src/server/match.ts`: a player can no longer stall a match. Inputs more than 120 frames behind the server clock are rejected (`frame-late`), and on every incoming message any engine more than 120 frames behind is advanced to that limit on a whole frame, so a silent player keeps falling and tops out. Still no tick or interval.
+- Idle sockets are bounded: sockets waiting to `resume` must do so within 5 s and at most 2 may wait at once (`busy`); a match with no second player after 2 minutes is reset (`no-opponent`); after `end` both sockets are closed and new ones get `ended`.
+- `test/match.test.ts` has 6 new tests for these rules (19 in the file). The fake clock no longer fires a timer that an earlier timer cleared in the same step.
+
+**Still open**
+- Same as the entry above: `npx wrangler dev` has not been run, no client yet.
+- A Cloudflare rate-limiting rule on `/api/match/*` would still help against many match ids being opened at once; that is dashboard config, not code.
+- The 120-frame lag limit and 5 s / 2-minute timeouts are first guesses; tune them once a real client exists.
+
+**Next steps**
+- Run `npx wrangler dev` once and curl `/`, `/api/match/abc`, `/api/match/bad%20id` and `/api/nope`.
