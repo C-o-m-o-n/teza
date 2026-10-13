@@ -51,6 +51,6 @@ jobs:
             exit 1
           fi
           URL="${DEPLOY_URL%/}"
-          curl --silent --show-error --fail --retry 5 --retry-delay 3 "$URL/" > /dev/null
-          curl --silent --show-error --fail --retry 5 --retry-delay 3 "$URL/game.js" > /dev/null
+          curl --silent --show-error --fail --retry 10 --retry-delay 6 --retry-all-errors "$URL/" > /dev/null
+          curl --silent --show-error --fail --retry 10 --retry-delay 6 --retry-all-errors "$URL/game.js" > /dev/null
           echo "TEZA is live at $URL"
