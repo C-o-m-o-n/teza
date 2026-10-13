@@ -100,3 +100,19 @@
 
 **Next steps**
 - After the next deploy, confirm the CI check passes against https://teza.comonhq.com.
+
+## 2026-10-13 — Player accounts (factory job 003, build round 1)
+
+**What changed**
+- New `Accounts` Durable Object (one global instance, SQLite, migration `v2`, binding `ACCOUNTS`) serving `/api/account/register|login|logout|me|records`. Logic in `src/server/accounts.ts`, tested with an in-memory store in `test/accounts.test.ts`.
+- Passwords: PBKDF2-SHA-256, 16-byte salt, 100000 iterations, constant-time compare. Sessions: 32-byte token in an HttpOnly/Secure/SameSite=Strict cookie on `/api`, 30 days, only its SHA-256 stored. Cross-origin POST/PUT get 403.
+- `src/profile.ts` now holds `Records`/`RunRecord` (re-exported from `src/settings.ts`), the records validator and the better-wins merge, shared by client and server.
+- Client: SIGN IN entry and signed-in panel (username, 40L PB, Blitz PB, bot W–L, SIGN OUT) on the main menu, an ACCOUNT screen with sign-in/register tabs and inline errors, and records sync on start and after every run.
+- The Worker reads account request bodies (max 4 KB) itself and forwards them buffered: streaming them on to the Durable Object broke the connection whenever it answered early (403/415), which reset the object.
+
+**Still open**
+- No rate-limit rule yet for `/api/account/*`; add one in the comonhq.com zone dashboard (login and register, per IP) before relying on accounts.
+- Under `wrangler dev`, refusing an oversized chunked upload makes wrangler's local proxy drop its connection once; a POST sent right after can fail with 500. Not seen with a Content-Length body; production untested.
+
+**Next steps**
+- After deploy, register a test account on https://teza.comonhq.com and check that records sync between two browsers.
