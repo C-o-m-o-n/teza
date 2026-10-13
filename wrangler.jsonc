@@ -1,0 +1,8 @@
+{
+  "name": "teza",
+  "compatibility_date": "2026-04-01",
+  // Assets-only Worker: no script, Cloudflare serves the static build in dist/.
+  "assets": {
+    "directory": "./dist"
+  }
+}

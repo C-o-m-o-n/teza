@@ -1,4 +1,4 @@
-name: Deploy to Homelab
+name: Deploy to Cloudflare Workers
 
 on:
   push:
@@ -6,13 +6,16 @@ on:
   workflow_dispatch:
 
 concurrency:
-  group: deploy-homelab
+  group: deploy-cloudflare
   cancel-in-progress: false
+
+permissions:
+  contents: read
 
 jobs:
   deploy:
     name: Deploy TEZA
-    runs-on: self-hosted
+    runs-on: ubuntu-latest
 
     steps:
       - name: Checkout
@@ -30,25 +33,25 @@ jobs:
       - name: Typecheck, test and build
         run: npm run check
 
-      - name: Publish dist/
-        run: |
-          mkdir -p "$HOME/teza-dist"
-          rsync -a --delete dist/ "$HOME/teza-dist/"
+      - name: Deploy with Wrangler
+        id: deploy
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          # 4.86.0 is the last wrangler release that supports Node 20.
+          wranglerVersion: "4.86.0"
+          command: deploy
 
-      - name: Serve on port 3000
+      - name: Check deployed site
+        env:
+          DEPLOY_URL: ${{ steps.deploy.outputs.deployment-url }}
         run: |
-          PID_FILE="$HOME/teza-serve.pid"
-          if [ -f "$PID_FILE" ]; then
-            kill "$(cat "$PID_FILE")" 2>/dev/null || true
-            rm -f "$PID_FILE"
-            sleep 1
+          if [ -z "$DEPLOY_URL" ]; then
+            echo "::error::wrangler-action returned no deployment-url; cannot check the deployed site."
+            exit 1
           fi
-          RUNNER_TRACKING_ID="" setsid nohup python3 -m http.server 3000 --directory "$HOME/teza-dist" \
-            > "$HOME/teza-serve.log" 2>&1 < /dev/null &
-          echo $! > "$PID_FILE"
-
-      - name: Health check
-        run: |
-          curl --silent --fail --retry 5 --retry-delay 2 --retry-connrefused http://localhost:3000/ > /dev/null
-          curl --silent --fail --retry 5 --retry-delay 2 --retry-connrefused http://localhost:3000/game.js > /dev/null
-          echo "TEZA is live on localhost:3000"
+          URL="${DEPLOY_URL%/}"
+          curl --silent --show-error --fail --retry 5 --retry-delay 3 "$URL/" > /dev/null
+          curl --silent --show-error --fail --retry 5 --retry-delay 3 "$URL/game.js" > /dev/null
+          echo "TEZA is live at $URL"

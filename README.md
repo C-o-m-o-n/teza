@@ -20,7 +20,16 @@ Other scripts: `npm run check` (typecheck + tests + build) and `npm run build` (
 
 ## Deploy
 
-Every push to `main` runs `.github/workflows/deploy.yml` on the self-hosted homelab runner. It runs `npm ci` and `npm run check`, copies `dist/` to `$HOME/teza-dist`, and serves it with `python3 -m http.server` on port 3000. The runner needs node, npm and python3.
+Every push to `main` deploys to Cloudflare Workers through `.github/workflows/deploy.yml`. It runs `npm ci` and `npm run check`, then `wrangler deploy` publishes `dist/` as an assets-only Worker (see `wrangler.jsonc`), and the job checks that `/` and `/game.js` load from the deployed URL.
+
+The workflow needs two repository secrets:
+
+- `CLOUDFLARE_API_TOKEN`: an API token with the **Workers Scripts: Edit** permission on the account.
+- `CLOUDFLARE_ACCOUNT_ID`: the Cloudflare account ID.
+
+To deploy by hand, run `npm run build`, then `npx wrangler deploy`.
+
+Live URL: TODO: add the deployed URL after the first deploy.
 
 ## Controls (TETR.IO defaults, rebindable in CONFIG)
 
