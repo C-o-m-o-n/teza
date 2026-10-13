@@ -1,8 +1,16 @@
 {
   "name": "teza",
+  "main": "worker/index.ts",
   "compatibility_date": "2026-04-01",
-  // Assets-only Worker: no script, Cloudflare serves the static build in dist/.
+  // Cloudflare serves the static build in dist/. Only /api/* runs the script first;
+  // everything else is an asset (the script only sees asset misses).
   "assets": {
-    "directory": "./dist"
-  }
+    "directory": "./dist",
+    "run_worker_first": ["/api/*"]
+  },
+  // One Match Durable Object per match id (worker/index.ts).
+  "durable_objects": {
+    "bindings": [{ "name": "MATCH", "class_name": "Match" }]
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["Match"] }]
 }
