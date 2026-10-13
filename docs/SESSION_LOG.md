@@ -27,3 +27,4 @@
 
 **Still open**
 - Not pushed yet. The old version had a server (accounts, leaderboard, bot matches, pm2 `ecosystem.config.js`). This rebuild is client-only, so whatever deploys from `main` will lose those features until they are ported.
+- The user accepted dropping the old server features for now. They are queued in `.factory/backlog.md` (git-excluded) as 8 items: homelab deploy, game server, accounts, online rooms, ratings/matchmaking, leaderboard/profiles, spectator, replays. Run them with `/factory next`.
