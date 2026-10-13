@@ -2,6 +2,10 @@
   "name": "teza",
   "main": "worker/index.ts",
   "compatibility_date": "2026-04-01",
+  // Served only on the custom domain. workers.dev is off so nobody can bypass the
+  // comonhq.com zone's rate-limit rule on /api/match/* (see README "Game server").
+  "routes": [{ "pattern": "teza.comonhq.com", "custom_domain": true }],
+  "workers_dev": false,
   // Cloudflare serves the static build in dist/. Only /api/* runs the script first;
   // everything else is an asset (the script only sees asset misses).
   "assets": {
