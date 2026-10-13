@@ -18,6 +18,19 @@ npm start          # → open http://localhost:3000 (rebuilds when you save a fi
 
 Other scripts: `npm run check` (typecheck + tests + build) and `npm run build` (production build into `dist/`; it's plain static files, so any web server can host it).
 
+## Deploy
+
+Every push to `main` deploys to Cloudflare Workers through `.github/workflows/deploy.yml`. It runs `npm ci` and `npm run check`, then `wrangler deploy` publishes `dist/` as an assets-only Worker (see `wrangler.jsonc`), and the job checks that `/` and `/game.js` load from the deployed URL.
+
+The workflow needs two repository secrets:
+
+- `CLOUDFLARE_API_TOKEN`: an API token with the **Workers Scripts: Edit** permission on the account.
+- `CLOUDFLARE_ACCOUNT_ID`: the Cloudflare account ID.
+
+To deploy by hand, run `npm run build`, then `npx wrangler deploy`.
+
+Live URL: TODO: add the deployed URL after the first deploy.
+
 ## Controls (TETR.IO defaults, rebindable in CONFIG)
 
 | Action | Keys |

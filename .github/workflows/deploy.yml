@@ -1,0 +1,56 @@
+name: Deploy to Cloudflare Workers
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-cloudflare
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    name: Deploy TEZA
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Typecheck, test and build
+        run: npm run check
+
+      - name: Deploy with Wrangler
+        id: deploy
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          wranglerVersion: "4.150.0"
+          command: deploy
+
+      - name: Check deployed site
+        env:
+          DEPLOY_URL: ${{ steps.deploy.outputs.deployment-url }}
+        run: |
+          if [ -z "$DEPLOY_URL" ]; then
+            echo "::error::wrangler-action returned no deployment-url; cannot check the deployed site."
+            exit 1
+          fi
+          URL="${DEPLOY_URL%/}"
+          curl --silent --show-error --fail --retry 5 --retry-delay 3 "$URL/" > /dev/null
+          curl --silent --show-error --fail --retry 5 --retry-delay 3 "$URL/game.js" > /dev/null
+          echo "TEZA is live at $URL"
