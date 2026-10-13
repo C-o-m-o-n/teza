@@ -29,7 +29,7 @@ The workflow needs two repository secrets:
 
 To deploy by hand, run `npm run build`, then `npx wrangler deploy`.
 
-Live URL: TODO: add the deployed URL after the first deploy.
+Live URL: https://teza.comon928.workers.dev/
 
 ## Controls (TETR.IO defaults, rebindable in CONFIG)
 

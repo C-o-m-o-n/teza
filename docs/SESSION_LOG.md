@@ -30,3 +30,22 @@
 - The user accepted dropping the old server features for now. They are queued in `.factory/backlog.md` (git-excluded) as 8 items: homelab deploy, game server, accounts, online rooms, ratings/matchmaking, leaderboard/profiles, spectator, replays. Run them with `/factory next`.
 - Added `npm start` (esbuild watch + serve on http://localhost:3000, `PORT` overrides it) and moved the README's Run section to use it. Tested with curl: index, game.js and style.css all returned 200.
 - Benchmark (headless Node, this machine): simulating 2 minutes of one player's game takes about 24 ms of CPU, so one core can check roughly 5,000 live players. A bot decision takes about 28 ms per piece, so bots should stay in the browser.
+
+## 2026-10-13 — hosting moved to Cloudflare Workers (factory job 001)
+
+**What changed**
+- Decided to host on Cloudflare Workers instead of the homelab self-hosted runner. Factory job `001-homelab-deploy` started as a homelab workflow, then was reworked twice and merged to local `main` (merge `87edd70`, not pushed).
+- `wrangler.jsonc`: an assets-only Worker named `teza` that serves `./dist`.
+- `.github/workflows/deploy.yml`: on push to `main` or manual dispatch, a GitHub-hosted runner with Node 22 runs `npm ci` and `npm run check`, deploys with `cloudflare/wrangler-action@v3` (wrangler 4.150.0), then curls `/` and `/game.js` on the deployed URL.
+- `.wrangler/` added to `.gitignore`. The README Deploy section lists the secrets and token permission.
+- Verified: typecheck, 20 tests and the build pass, and `wrangler deploy --dry-run` read 4 assets. No real deploy has run.
+
+**Still open**
+- Add the GitHub repo secrets `CLOUDFLARE_API_TOKEN` (Workers Scripts: Edit) and `CLOUDFLARE_ACCOUNT_ID` before pushing, or the first deploy fails.
+- The post-deploy check relies on the workers.dev URL. Fill in the README `TODO:` with the live URL after the first deploy.
+- Backlog item 2 still says "Node game server". It should be reworded for Durable Objects (rooms, matchmaking), D1 (players) and R2 (replays).
+- `.factory/profile.md` notes are stale: they say there are no commits and the branch is `master`.
+
+**Next steps**
+- Push `main` once the secrets exist, then check the Actions run and the live URL.
+- Reword backlog item 2, then `/factory next`.
