@@ -49,3 +49,54 @@
 **Next steps**
 - Push `main` once the secrets exist, then check the Actions run and the live URL.
 - Reword backlog item 2, then `/factory next`.
+
+## 2026-10-13 — Workers game server (factory job 002)
+
+**What changed**
+- `wrangler.jsonc` now has a script (`main: worker/index.ts`) next to the `dist/` assets. `run_worker_first: ["/api/*"]` keeps every other path on the static asset handler.
+- `GET /api/match/<id>` (WebSocket) routes to one `Match` Durable Object per id (sqlite-backed class, migration `v1`). Bad ids get 400, non-upgrade requests 426, other `/api/*` 404.
+- `src/server/match.ts` holds the match logic with no Cloudflare imports: Ribbon envelopes `{t,s,a,d}`, a 100-packet resend buffer per slot, input validation (frame order, 30-frame clock tolerance, 60 inputs/s, 1 KB message cap), garbage transfer, top-out and 15 s disconnect forfeit. No tick; engines advance as inputs arrive. Match rules are the client's VS preset (`modeById("vs")`).
+- `test/match.test.ts` (13 tests) drives it with a fake clock and fake sockets.
+- `@cloudflare/workers-types` added; `npm run typecheck` also runs `tsc -p worker`. `dist/` output is byte-identical to before.
+- Deploy workflow curl checks now use `--retry 10 --retry-delay 6 --retry-all-errors`, since a fresh workers.dev URL 404s for a short while.
+
+**Still open**
+- `npx wrangler dev` was not started (needs your OK); routing was checked by running the bundled worker's `fetch` in Node with a stub Durable Object. Worth one `wrangler dev` check before the first real deploy.
+- No client yet: the browser has no online mode, lobby or WebSocket client.
+- Match state lives in memory only. If the Durable Object is evicted (for example, both sockets gone for a while), the match is lost.
+- The first deploy with this config creates the `Match` Durable Object class (migration `v1`). Not tried against the real account; if it fails, check the API token's permissions first.
+
+**Next steps**
+- Run `npx wrangler dev` once and curl `/`, `/api/match/abc`, `/api/match/bad%20id` and `/api/nope`.
+- Next backlog item: online rooms (client WebSocket using the same envelope).
+
+## 2026-10-13 — Game server hardening (factory job 002, rework 1)
+
+**What changed**
+- `src/server/match.ts`: a player can no longer stall a match. Inputs more than 120 frames behind the server clock are rejected (`frame-late`), and on every incoming message any engine more than 120 frames behind is advanced to that limit on a whole frame, so a silent player keeps falling and tops out. Still no tick or interval.
+- Idle sockets are bounded: sockets waiting to `resume` must do so within 5 s and at most 2 may wait at once (`busy`); a match with no second player after 2 minutes is reset (`no-opponent`); after `end` both sockets are closed and new ones get `ended`.
+- `test/match.test.ts` has 6 new tests for these rules (19 in the file). The fake clock no longer fires a timer that an earlier timer cleared in the same step.
+
+**Still open**
+- Same as the entry above: `npx wrangler dev` has not been run, no client yet.
+- A Cloudflare rate-limiting rule on `/api/match/*` would still help against many match ids being opened at once; that is dashboard config, not code.
+- The 120-frame lag limit and 5 s / 2-minute timeouts are first guesses; tune them once a real client exists.
+
+**Next steps**
+- Run `npx wrangler dev` once and curl `/`, `/api/match/abc`, `/api/match/bad%20id` and `/api/nope`.
+
+## 2026-10-13 — Custom domain and reconnect/idle fixes (factory job 002, rework 2)
+
+**What changed**
+- `wrangler.jsonc`: the Worker is served on the custom domain `teza.comonhq.com` (`custom_domain: true`) and `workers_dev` is off, so the zone's rate-limit rule can't be skipped via workers.dev.
+- `.github/workflows/deploy.yml`: the post-deploy check no longer uses wrangler-action's `deployment-url`. It curls a fixed `SITE_URL` (`https://teza.comonhq.com`) for `/` and `/game.js`, and requires `/api/match/ci-check` without an upgrade header to return 426.
+- Reconnect can't be blocked: a returning player puts `?resume=<token>&ack=<peerAck>` on the upgrade URL. The Durable Object checks it before accepting (400 malformed, 403 unknown token) and the socket takes its slot without waiting among the pending sockets.
+- Idle deadline: if neither player sends a valid message for 60 s after `start`, both engines run to the clock (a top-out decides it) or the match ends as a draw (`end {winner: null, reason: "idle"}`). Catch-up now moves lagging engines together frame by frame, so whoever tops out first loses.
+- README: live URL is https://teza.comonhq.com/; documents the zone rate-limit rule and same-origin API calls.
+
+**Still open**
+- The DNS/custom-domain setup and the rate-limit rule (comonhq.com zone, hostname `teza.comonhq.com`, path `/api/match/*`, per IP, block) are dashboard config; confirm both exist before the next deploy. The API token may also need zone permissions for the custom domain route.
+- `npx wrangler dev` has still not been run; no client yet.
+
+**Next steps**
+- After the next deploy, confirm the CI check passes against https://teza.comonhq.com.

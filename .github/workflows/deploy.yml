@@ -16,6 +16,8 @@ jobs:
   deploy:
     name: Deploy TEZA
     runs-on: ubuntu-latest
+    env:
+      SITE_URL: https://teza.comonhq.com
 
     steps:
       - name: Checkout
@@ -34,7 +36,6 @@ jobs:
         run: npm run check
 
       - name: Deploy with Wrangler
-        id: deploy
         uses: cloudflare/wrangler-action@v3
         with:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
@@ -43,14 +44,14 @@ jobs:
           command: deploy
 
       - name: Check deployed site
-        env:
-          DEPLOY_URL: ${{ steps.deploy.outputs.deployment-url }}
         run: |
-          if [ -z "$DEPLOY_URL" ]; then
-            echo "::error::wrangler-action returned no deployment-url; cannot check the deployed site."
+          CURL="curl --silent --show-error --retry 10 --retry-delay 6 --retry-all-errors"
+          $CURL --fail "$SITE_URL/" > /dev/null
+          $CURL --fail "$SITE_URL/game.js" > /dev/null
+          # No upgrade header: the Worker itself must answer 426, proving /api/* reaches the script.
+          STATUS=$($CURL --output /dev/null --write-out "%{http_code}" "$SITE_URL/api/match/ci-check")
+          if [ "$STATUS" != "426" ]; then
+            echo "::error::$SITE_URL/api/match/ci-check returned $STATUS, expected 426."
             exit 1
           fi
-          URL="${DEPLOY_URL%/}"
-          curl --silent --show-error --fail --retry 5 --retry-delay 3 "$URL/" > /dev/null
-          curl --silent --show-error --fail --retry 5 --retry-delay 3 "$URL/game.js" > /dev/null
-          echo "TEZA is live at $URL"
+          echo "TEZA is live at $SITE_URL"
