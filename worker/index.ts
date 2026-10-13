@@ -5,7 +5,7 @@
 // /api/account/* goes to the single `Accounts` Durable Object (src/server/accounts.ts).
 
 import { DurableObject } from "cloudflare:workers";
-import { AccountRow, AccountStore, handleAccount, SessionRow } from "../src/server/accounts";
+import { AccountRow, AccountStore, handleAccount, MAX_BODY_BYTES, readBody, SessionRow } from "../src/server/accounts";
 import { MatchSession, ResumeRequest } from "../src/server/match";
 
 export interface Env {
@@ -30,7 +30,15 @@ function resumeParams(url: URL): ResumeRequest | undefined | null {
 export default {
   async fetch(request, env): Promise<Response> {
     const path = new URL(request.url).pathname;
-    if (path.startsWith("/api/account/")) return env.ACCOUNTS.get(env.ACCOUNTS.idFromName("accounts")).fetch(request);
+    if (path.startsWith("/api/account/")) {
+      // Hand the Durable Object a buffered body: a streamed one breaks the connection when the
+      // object answers (e.g. 403, 415) before reading it.
+      const body = request.body ? await readBody(request) : null;
+      if (body === null && request.body) {
+        return Response.json({ error: `Body must be at most ${MAX_BODY_BYTES} bytes.` }, { status: 413 });
+      }
+      return env.ACCOUNTS.get(env.ACCOUNTS.idFromName("accounts")).fetch(new Request(request, { body }));
+    }
     const route = MATCH_ROUTE.exec(path);
     if (!route) return new Response("Not found", { status: 404 });
     if (!MATCH_ID.test(route[1])) return new Response("Bad match id", { status: 400 });

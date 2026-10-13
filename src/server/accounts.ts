@@ -106,7 +106,7 @@ function cookieToken(request: Request): string | null {
 }
 
 /** The body as text, or null if it is over MAX_BODY_BYTES. Stops reading once over the limit. */
-async function readBody(request: Request): Promise<string | null> {
+export async function readBody(request: Request): Promise<string | null> {
   if (Number(request.headers.get("Content-Length") ?? 0) > MAX_BODY_BYTES) return null;
   if (!request.body) return "";
   const reader = request.body.getReader();
