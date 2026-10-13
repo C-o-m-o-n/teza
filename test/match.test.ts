@@ -1,8 +1,8 @@
 import { describe, expect, it } from "vitest";
 import { Action, Game } from "../src/engine/game";
 import {
-  Clock, Conn, Envelope, LOBBY_TIMEOUT_MS, MAX_LAG_FRAMES, MAX_PENDING, MatchSession, Peer, RECONNECT_GRACE_MS,
-  RESUME_TIMEOUT_MS, SEND_BUFFER, matchOptions,
+  Clock, Conn, Envelope, IDLE_TIMEOUT_MS, LOBBY_TIMEOUT_MS, MAX_LAG_FRAMES, MAX_PENDING, MatchSession, Peer,
+  RECONNECT_GRACE_MS, RESUME_TIMEOUT_MS, ResumeRequest, SEND_BUFFER, matchOptions,
 } from "../src/server/match";
 
 /** Manual clock: time only moves when the test says so. */
@@ -59,9 +59,9 @@ interface Player {
   conn: Conn;
 }
 
-function join(session: MatchSession): Player {
+function join(session: MatchSession, resume?: ResumeRequest): Player {
   const peer = new FakePeer();
-  return { peer, conn: session.connect(peer) };
+  return { peer, conn: session.connect(peer, resume) };
 }
 
 function setup() {
@@ -121,7 +121,7 @@ describe("match: joining", () => {
     expect(again.peer.of("welcome")[0].d).toMatchObject({ slot: 0 });
     const p1 = join(session);
     expect(p1.peer.of("start").length).toBe(1);
-    expect(clock.pending).toBe(0); // the second lobby timer was cleared at start
+    expect(clock.pending).toBe(1); // the second lobby timer was cleared at start; only the idle timer is left
   });
 
   it("answers ping with pong", () => {
@@ -370,7 +370,7 @@ describe("match: reconnect", () => {
     expect(back.peer.sent.map((m) => [m.s, m.t])).toEqual([[4, "opponentInput"], [5, "opponentInput"]]);
     expect(back.peer.sent.map((m) => (m.d as { frame: number }).frame)).toEqual([20, 30]);
     expect(p1.peer.last().t).toBe("opponentReconnected");
-    expect(clock.pending).toBe(0);
+    expect(clock.pending).toBe(1); // the forfeit timer is gone; only the idle timer is left
 
     // the rebound socket plays on with the same engine
     input(session, back, 40, "hard");
@@ -422,7 +422,7 @@ describe("match: waiting sockets", () => {
     expect(lastError(idle)).toBe("resume-timeout");
     expect(idle.peer.closed).toMatchObject({ code: 1008 });
     expect(session.isOver).toBe(false);
-    expect(clock.pending).toBe(1); // only player 0's forfeit timer
+    expect(clock.pending).toBe(2); // only player 0's forfeit timer and the idle timer
   });
 
   it("caps the sockets waiting to resume", () => {
@@ -437,7 +437,7 @@ describe("match: waiting sockets", () => {
 
     // a closed waiting socket frees its place, and its timer
     session.disconnect(waiting[0].conn);
-    expect(clock.pending).toBe(MAX_PENDING); // forfeit timer + one resume timer
+    expect(clock.pending).toBe(3); // forfeit timer + one resume timer + idle timer
     const next = join(session);
     expect(next.peer.closed).toBeNull();
     send(session, next, "resume", { token, peerAck: 0 });
@@ -446,7 +446,96 @@ describe("match: waiting sockets", () => {
     clock.advance(RESUME_TIMEOUT_MS);
     expect(waiting[1].peer.closed).not.toBeNull(); // the other one still times out
     expect(next.peer.closed).toBeNull();
+    expect(clock.pending).toBe(1); // the idle timer
+  });
+
+  it("lets the owner resume with the upgrade token while an opponent floods the waiting places", () => {
+    const { clock, session, p0, p1 } = setup();
+    const token = (p0.peer.of("welcome")[0].d as { token: string }).token;
+    session.disconnect(p0.conn);
+
+    // player 1 keeps every waiting place taken: reopens sockets in a loop as they time out or get `busy`
+    const flood: Player[] = [];
+    for (let i = 0; i < 8; i++) flood.push(join(session));
+    expect(flood.filter((f) => f.peer.closed === null).length).toBe(MAX_PENDING);
+    for (let t = 0; t < 10_000; t += 500) {
+      clock.advance(500);
+      for (let i = 0; i < 8; i++) flood.push(join(session));
+    }
+    expect(flood.filter((f) => f.peer.closed === null).length).toBe(MAX_PENDING);
+    expect(lastError(join(session))).toBe("busy"); // a plain socket is still turned away
+
+    // a wrong upgrade token is refused at once and never takes a waiting place
+    expect(session.hasToken("0".repeat(32))).toBe(false);
+    const wrong = join(session, { token: "0".repeat(32), peerAck: 0 });
+    expect(lastError(wrong)).toBe("bad-token");
+    expect(wrong.peer.closed).toMatchObject({ code: 1008 });
+
+    // the real player, with the token on the upgrade, is bound without waiting
+    expect(session.hasToken(token)).toBe(true);
+    const back = join(session, { token, peerAck: 2 });
+    expect(back.peer.closed).toBeNull();
+    expect(back.peer.of("error")).toEqual([]);
+    expect(p1.peer.last().t).toBe("opponentReconnected");
+    input(session, back, 10 * 60, "hard");
+    expect(session.game(0)!.stats.inputs).toBe(1);
+
+    clock.advance(RECONNECT_GRACE_MS);
+    expect(session.isOver).toBe(false); // no forfeit
+    expect(back.peer.closed).toBeNull();
+  });
+});
+
+describe("match: idle", () => {
+  it("ends a started match as a draw when nobody sends anything", () => {
+    const { clock, session, p0, p1 } = setup();
+    clock.advance(IDLE_TIMEOUT_MS - 1);
+    expect(session.isOver).toBe(false);
+    clock.advance(1);
+    expect(session.isOver).toBe(true);
+    // both engines were run to the clock first; with no inputs neither tops out in 60 s
+    expect(session.game(0)!.frame).toBe((IDLE_TIMEOUT_MS * 60) / 1000);
+    expect(session.game(1)!.frame).toBe((IDLE_TIMEOUT_MS * 60) / 1000);
+    for (const p of [p0, p1]) {
+      expect(p.peer.of("end")).toEqual([expect.objectContaining({ d: { winner: null, reason: "idle" } })]);
+      expect(p.peer.closed).toMatchObject({ code: 1000 });
+    }
     expect(clock.pending).toBe(0);
+  });
+
+  it("counts any valid message as activity and lets a top-out decide the match", () => {
+    const { clock, session, p0, p1 } = setup();
+    clock.advance(30_000);
+    send(session, p0, "ping");
+    clock.advance(IDLE_TIMEOUT_MS - 1);
+    expect(session.isOver).toBe(false); // the ping pushed the deadline back
+    expect(clock.pending).toBe(1); // one idle timer, re-armed
+
+    // an invalid message is not activity
+    send(session, p1, "bogus");
+    clock.advance(1);
+    expect(session.isOver).toBe(true);
+    expect(p0.peer.of("end").length).toBe(1);
+    expect(clock.pending).toBe(0);
+  });
+
+  it("decides an idle match by who topped out first", () => {
+    const { clock, session, p0, p1 } = setup();
+    // player 0 stacks pieces fast, then everyone goes quiet; player 0 tops out before player 1
+    let frame = 0;
+    for (let i = 0; i < 6; i++) {
+      clock.advance(100);
+      frame += 6;
+      input(session, p0, frame, "hard");
+    }
+    expect(session.isOver).toBe(false);
+    clock.advance(IDLE_TIMEOUT_MS);
+    expect(session.isOver).toBe(true);
+    expect(session.game(0)!.over).toBe(true);
+    expect(session.game(1)!.over).toBe(false);
+    for (const p of [p0, p1]) {
+      expect(p.peer.of("end")).toEqual([expect.objectContaining({ d: { winner: 1, reason: "topout" } })]);
+    }
   });
 });
 

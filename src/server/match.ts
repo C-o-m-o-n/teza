@@ -21,6 +21,7 @@ export const MAX_LAG_FRAMES = 120; // frames an input (or an engine) may trail t
 export const RESUME_TIMEOUT_MS = 5000; // an extra socket must `resume` within this time
 export const MAX_PENDING = 2; // extra sockets waiting to `resume` at once
 export const LOBBY_TIMEOUT_MS = 120_000; // a match without an opponent by then is reset
+export const IDLE_TIMEOUT_MS = 60_000; // a started match where nobody sends anything for this long ends
 
 const ACTIONS: readonly string[] = ["left", "right", "soft", "hard", "cw", "ccw", "180", "hold"];
 
@@ -85,6 +86,12 @@ export interface Conn {
 
 type Message = { t: string; s?: unknown; d?: unknown };
 
+/** Resume credentials given at upgrade time (`?resume=<token>&ack=<peerAck>`). */
+export interface ResumeRequest {
+  token: string;
+  peerAck: number;
+}
+
 export class MatchSession {
   private slots: Slot[] = [];
   private startedAt = 0;
@@ -92,6 +99,8 @@ export class MatchSession {
   private ended = false;
   private pending = new Set<Conn>(); // sockets without a slot, waiting to `resume`
   private lobby: unknown = null; // resets the match if it has not started in time
+  private idle: unknown = null; // ends a started match nobody is talking in
+  private lastActive = 0; // clock time of the last valid message from a player
   private garbageOut: { slot: Slot; amount: number; frame: number }[] = [];
 
   constructor(private clock: Clock, private random: Random = cryptoRandom) {}
@@ -105,10 +114,21 @@ export class MatchSession {
     return this.ended;
   }
 
-  connect(peer: Peer): Conn {
+  /** Whether `token` belongs to a slot, so the adapter can refuse a bad `?resume=` before accepting. */
+  hasToken(token: string): boolean {
+    return this.slots.some((s) => s.token === token);
+  }
+
+  /**
+   * A new socket. With `resume` (the token from the upgrade URL) the socket rebinds that slot
+   * at once and never waits among the pending sockets, so others can't crowd the owner out.
+   */
+  connect(peer: Peer, resume?: ResumeRequest): Conn {
     const conn: Conn = { peer, slot: null, rejected: 0, closed: false, timer: null };
     if (this.ended) {
       this.reject(conn, "ended", "the match is over");
+    } else if (resume) {
+      this.resume(conn, resume);
     } else if (this.slots.length < 2) {
       const slot: Slot = {
         index: this.slots.length as SlotIndex, token: this.random.token(), conn, seq: 0, ack: 0,
@@ -136,7 +156,7 @@ export class MatchSession {
 
   message(conn: Conn, data: string | ArrayBuffer): void {
     if (conn.closed) return;
-    this.catchUp();
+    this.catchUp(MAX_LAG_FRAMES);
     if (conn.closed) return; // the catch-up ended the match
     const msg = parse(data);
     if (typeof msg === "string") return this.reject(conn, msg, "unreadable message");
@@ -144,8 +164,10 @@ export class MatchSession {
     if (slot && Number.isSafeInteger(msg.s) && (msg.s as number) > slot.ack) slot.ack = msg.s as number;
     switch (msg.t) {
       case "ping":
-        if (slot) this.send(slot, "pong");
-        else conn.peer.send(JSON.stringify({ t: "pong", s: 0, a: 0 }));
+        if (slot) {
+          this.lastActive = this.clock.now();
+          this.send(slot, "pong");
+        } else conn.peer.send(JSON.stringify({ t: "pong", s: 0, a: 0 }));
         return;
       case "resume":
         return this.resume(conn, msg.d);
@@ -196,25 +218,42 @@ export class MatchSession {
     this.slots = [];
   }
 
+  /**
+   * Fires IDLE_TIMEOUT_MS after the last valid player message (one timer, re-armed for the
+   * remainder when there was activity since). On expiry both engines run to the clock, so a
+   * top-out still decides the match; otherwise it ends as a draw.
+   */
+  private armIdle(ms: number): void {
+    this.idle = this.clock.setTimeout(() => {
+      this.idle = null;
+      if (this.ended) return;
+      const left = this.lastActive + IDLE_TIMEOUT_MS - this.clock.now();
+      if (left > 0) return this.armIdle(left);
+      this.catchUp(0);
+      this.finish(null, "idle");
+    }, ms);
+  }
+
   private wallFrame(): number {
     return ((this.clock.now() - this.startedAt) * 60) / 1000;
   }
 
   /**
-   * Bring any engine that trails the server clock by more than MAX_LAG_FRAMES up to that
+   * Bring any engine that trails the server clock by more than `lag` frames up to that
    * limit, as if the player had pressed nothing. The target is a whole frame so the engine's
-   * per-frame steps are the same as if the next input had advanced it.
+   * per-frame steps are the same as if the next input had advanced it. Lagging engines move
+   * together one frame at a time and stop at the first top-out, so whoever tops out first loses.
    */
-  private catchUp(): void {
+  private catchUp(lag: number): void {
     if (!this.started || this.ended) return;
-    const target = Math.floor(this.wallFrame() - MAX_LAG_FRAMES);
-    let moved = false;
-    for (const slot of this.slots) {
-      if (!slot.game || slot.game.frame >= target) continue;
-      slot.game.advance(target - slot.game.frame);
-      moved = true;
+    const target = Math.floor(this.wallFrame() - lag);
+    const games = this.slots.map((s) => s.game!).filter((g) => g.frame < target);
+    if (games.length === 0) return;
+    for (let f = Math.floor(Math.min(...games.map((g) => g.frame))) + 1; f <= target; f++) {
+      for (const g of games) if (g.frame < f) g.advance(f - g.frame);
+      if (games.some((g) => g.over)) break;
     }
-    if (moved) this.settle();
+    this.settle();
   }
 
   /** Send garbage queued by attacks, then end the match if an engine has topped out. */
@@ -222,9 +261,10 @@ export class MatchSession {
     const garbage = this.garbageOut;
     this.garbageOut = [];
     for (const g of garbage) this.send(g.slot, "garbage", { amount: g.amount, frame: g.frame });
-    // VS has no objective, so over = topped out
-    const out = this.slots.find((s) => s.game?.over);
-    if (out) this.finish(this.other(out).index, "topout");
+    // VS has no objective, so over = topped out; both on the same catch-up frame is a draw
+    const out = this.slots.filter((s) => s.game?.over);
+    if (out.length === 1) this.finish(this.other(out[0]).index, "topout");
+    else if (out.length === 2) this.finish(null, "topout");
   }
 
   private other(slot: Slot): Slot {
@@ -257,9 +297,10 @@ export class MatchSession {
   private maybeStart(): void {
     if (this.started || this.slots.length < 2 || this.slots.some((s) => s.conn === null)) return;
     this.started = true;
-    this.startedAt = this.clock.now();
+    this.startedAt = this.lastActive = this.clock.now();
     if (this.lobby !== null) this.clock.clearTimeout(this.lobby);
     this.lobby = null;
+    this.armIdle(IDLE_TIMEOUT_MS);
     const seed = this.random.seed();
     const options = matchOptions(seed);
     for (const slot of this.slots) {
@@ -284,6 +325,7 @@ export class MatchSession {
     if (!slot) return this.reject(conn, "bad-token", "unknown resume token");
     const peerAck = d.peerAck as number;
     this.unpend(conn);
+    this.lastActive = this.clock.now();
 
     if (slot.conn) {
       // the client reconnected before the old socket's close reached us
@@ -333,6 +375,7 @@ export class MatchSession {
     if (slot.recent.length >= MAX_INPUTS_PER_SECOND) return this.reject(conn, "rate-limit", "too many inputs");
 
     slot.recent.push(now);
+    this.lastActive = now;
     slot.lastFrame = frame;
     const action = d.action as Action;
     game.advance(frame - game.frame);
@@ -343,9 +386,12 @@ export class MatchSession {
     this.settle();
   }
 
-  private finish(winner: SlotIndex, reason: string): void {
+  /** `winner` is null for a draw (an idle match). */
+  private finish(winner: SlotIndex | null, reason: string): void {
     if (this.ended) return;
     this.ended = true;
+    if (this.idle !== null) this.clock.clearTimeout(this.idle);
+    this.idle = null;
     for (const slot of this.slots) {
       if (slot.grace !== null) this.clock.clearTimeout(slot.grace);
       slot.grace = null;
