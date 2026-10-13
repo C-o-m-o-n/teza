@@ -18,6 +18,10 @@ npm start          # → open http://localhost:3000 (rebuilds when you save a fi
 
 Other scripts: `npm run check` (typecheck + tests + build) and `npm run build` (production build into `dist/`; it's plain static files, so any web server can host it).
 
+## Deploy
+
+Every push to `main` runs `.github/workflows/deploy.yml` on the self-hosted homelab runner. It runs `npm ci` and `npm run check`, copies `dist/` to `$HOME/teza-dist`, and serves it with `python3 -m http.server` on port 3000. The runner needs node, npm and python3.
+
 ## Controls (TETR.IO defaults, rebindable in CONFIG)
 
 | Action | Keys |

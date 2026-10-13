@@ -1,0 +1,54 @@
+name: Deploy to Homelab
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-homelab
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: Deploy TEZA
+    runs-on: self-hosted
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Typecheck, test and build
+        run: npm run check
+
+      - name: Publish dist/
+        run: |
+          mkdir -p "$HOME/teza-dist"
+          rsync -a --delete dist/ "$HOME/teza-dist/"
+
+      - name: Serve on port 3000
+        run: |
+          PID_FILE="$HOME/teza-serve.pid"
+          if [ -f "$PID_FILE" ]; then
+            kill "$(cat "$PID_FILE")" 2>/dev/null || true
+            rm -f "$PID_FILE"
+            sleep 1
+          fi
+          RUNNER_TRACKING_ID="" setsid nohup python3 -m http.server 3000 --directory "$HOME/teza-dist" \
+            > "$HOME/teza-serve.log" 2>&1 < /dev/null &
+          echo $! > "$PID_FILE"
+
+      - name: Health check
+        run: |
+          curl --silent --fail --retry 5 --retry-delay 2 --retry-connrefused http://localhost:3000/ > /dev/null
+          curl --silent --fail --retry 5 --retry-delay 2 --retry-connrefused http://localhost:3000/game.js > /dev/null
+          echo "TEZA is live on localhost:3000"
