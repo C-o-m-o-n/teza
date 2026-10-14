@@ -171,6 +171,7 @@ button { font: inherit; color: inherit; }
 .field input:focus { border-color: #3f6bff; background: rgba(63, 107, 255, 0.12); outline: 2px solid #3f6bff; outline-offset: 2px; }
 .form-error { min-height: 1.4em; margin: 0; color: #ff5f7a; font-size: 15px; }
 .account-form .actions { margin-top: 18px; }
+.account .form-error { margin-top: 10px; }
 .ghost-btn:disabled { opacity: 0.5; cursor: wait; }
 
 /* ------------------------------------------------------------------ config */

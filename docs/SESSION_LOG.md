@@ -127,3 +127,13 @@
 **Still open**
 - Same as round 1: no rate-limit rule for `/api/account/*` yet.
 - On narrow screens ↑/↓ still walks the menu in DOM order (bars first, then SIGN IN), which no longer matches the visual order.
+
+## 2026-10-14 — Player accounts (factory job 003, rework 2)
+
+**What changed**
+- SIGN OUT only signs out when the records `PUT` and then the logout both answer 2xx. Otherwise the player stays signed in, keeps their local records, and the account block shows "Couldn't sign out — check your connection" with SIGN OUT enabled again. Before, a failed logout cleared the UI and records while the server session stayed valid.
+- Every account request is aborted after 8 s (`REQUEST_TIMEOUT_MS` in `src/ui/account.ts`), so SIGN OUT can't stay disabled on a hanging network.
+- `test/account-client.test.ts` covers the upload-failure, logout-failure and timeout paths with a stubbed `fetch`.
+
+**Still open**
+- Same as before: no rate-limit rule for `/api/account/*` yet; ↑/↓ order on narrow screens.

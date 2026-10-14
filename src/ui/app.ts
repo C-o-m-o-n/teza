@@ -5,7 +5,7 @@ import { MODES, Mode, ModeId, modeById } from "../modes";
 import { mergeRecords, passwordError, usernameError } from "../profile";
 import { BoardView, formatTime, Renderer } from "../render/renderer";
 import { BIND_LABELS, BIND_ORDER, Bind, Records, Settings, defaultSettings, loadRecords, loadSettings, saveRecords, saveSettings } from "../settings";
-import { Profile, fetchMe, putRecords, signIn, signOut } from "./account";
+import { Profile, fetchMe, finishSession, putRecords, signIn } from "./account";
 
 type Screen = "menu" | "bots" | "config" | "account" | "play" | "results";
 
@@ -421,10 +421,16 @@ export class App {
     }
     const stat = (label: string, value: string) => el("div", { class: "stat" }, el("span", {}, label), el("strong", {}, value));
     const signOutBtn = el("button", { class: "ghost-btn", "data-nav": "" }, "SIGN OUT");
+    const error = el("p", { class: "form-error", role: "alert" });
     signOutBtn.addEventListener("click", async () => {
       signOutBtn.disabled = true;
-      await putRecords(this.records);
-      await signOut();
+      error.textContent = "";
+      if (!(await finishSession(this.records))) {
+        // Still signed in on the server (or its copy of the records is behind): keep everything.
+        error.textContent = "Couldn't sign out — check your connection";
+        signOutBtn.disabled = false;
+        return;
+      }
       // The records belong to the account now; a shared device must not hand them to the next player.
       this.account = null;
       this.records = { vs: {} };
@@ -436,6 +442,7 @@ export class App {
       el("p", { class: "account-name" }, this.account),
       el("div", { class: "stats" }, stat("40L PB", sprint), stat("BLITZ PB", blitz), stat("BOT W–L", vs)),
       signOutBtn,
+      error,
     );
     return block;
   }
