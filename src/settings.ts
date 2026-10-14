@@ -1,4 +1,7 @@
 import { Action, DEFAULT_HANDLING, Handling } from "./engine/game";
+import { Records } from "./profile";
+
+export type { Records, RunRecord } from "./profile";
 
 export type Bind = Action | "retry" | "exit";
 
@@ -83,20 +86,6 @@ export function loadSettings(): Settings {
 
 export function saveSettings(s: Settings): void {
   write(KEY, s);
-}
-
-export interface RunRecord {
-  value: number; // frames for 40L, score for blitz
-  pps: number;
-  apm: number;
-  pieces: number;
-  date: number;
-}
-
-export interface Records {
-  "40l"?: RunRecord;
-  blitz?: RunRecord;
-  vs: Record<string, { wins: number; losses: number }>;
 }
 
 export function loadRecords(): Records {

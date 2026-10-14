@@ -39,9 +39,10 @@ The `teza` Worker (`worker/index.ts`) serves `dist/` as static assets. Only `/ap
 
 - `GET /api/match/<id>` with `Upgrade: websocket` joins match `<id>`. Each id gets its own `Match` Durable Object, which holds both sockets and runs one headless engine per player. `<id>` must match `^[A-Za-z0-9_-]{1,32}$` (else 400). Without the upgrade header the route returns 426.
 - `GET /api/match/<id>?resume=<token>&ack=<peerAck>` is the same upgrade for a player coming back: the token is checked before the socket is accepted (malformed parameters give 400, an unknown token 403), and the socket takes its slot at once. `ack` defaults to 0.
+- `/api/account/*` is the accounts API (see Accounts below).
 - Any other `/api/*` path returns 404.
 
-`/api/match/*` is rate-limited per IP by a Cloudflare rate-limiting rule in the comonhq.com zone (hostname `teza.comonhq.com`, path `/api/match/*`, action block). The rule is dashboard config that lives in the zone, not in this repo: if the domain changes, recreate it for the new hostname. Clients must call the API same-origin with a relative URL (`/api/match/<id>`), never a hardcoded host.
+All of `/api/*` (the match and account routes) is rate-limited per IP by a Cloudflare rate-limiting rule in the comonhq.com zone (hostname `teza.comonhq.com`, path `/api/*`, action block). The rule is dashboard config that lives in the zone, not in this repo: if the domain changes, recreate it for the new hostname. Clients must call the API same-origin with a relative URL (`/api/match/<id>`), never a hardcoded host.
 
 The match logic lives in `src/server/match.ts`, which has no Cloudflare imports so the tests can drive it with a fake clock.
 
@@ -76,6 +77,30 @@ There is no server tick. Engines advance when a message arrives: a player's engi
 
 More than 20 rejected messages (including messages over 1 KB or not JSON) close the socket. When a socket closes mid-match the opponent gets `opponentDisconnected`; the player has 15 s to reconnect with `?resume=<token>&ack=<peerAck>` (or to send `resume` on a new socket), or they forfeit. While a slot is free, at most 2 sockets without a resume token may wait to resume (more get `busy`), and each must send `resume` within 5 s (else `resume-timeout`). A socket with a valid token on the upgrade never waits, so other sockets can't block the owner's reconnect. A wrong token gets `error` and the socket is closed. If the missed packets have already left the 100-packet buffer, the server sends `error` with code `resync` instead of a partial replay. If neither player sends a valid message (an accepted input, a ping or a resume) for 60 s after `start`, both engines are run to the server clock: a top-out decides the match, otherwise it ends as a draw with reason `idle`. After `end` the server closes both sockets, and new sockets get `error` (`ended`) and are closed.
 
+## Accounts
+
+Signing in is optional: without an account the game keeps records in localStorage only, exactly as before. With one, personal bests and bot W–L follow you between browsers.
+
+`/api/account/*` goes to a single `Accounts` Durable Object (`idFromName("accounts")`, SQLite storage, migration `v2`). The logic lives in `src/server/accounts.ts`; the records shape, its validator and the merge rule are in `src/profile.ts`, shared with the client. All routes speak JSON. POST and PUT need `Content-Type: application/json` (else 415) and a body of at most 4 KB (else 413).
+
+| Route | Body | Result |
+|---|---|---|
+| `POST /api/account/register` | `{username, password}` | 201 and signed in; 409 if the name is taken (case-insensitive) |
+| `POST /api/account/login` | `{username, password}` | 200 and signed in; 401 with the same message for an unknown user or a wrong password |
+| `POST /api/account/logout` | none | 200; deletes the session and clears the cookie |
+| `GET /api/account/me` | | 200 `{username, createdAt, records}`, or 401 |
+| `PUT /api/account/records` | `{records}` | 200 `{records}` after merging, or 401 without a session |
+
+Usernames are 3-16 characters of `A-Z a-z 0-9 _ -`; passwords are 8-128 characters. Anything else gives 400 with a message. Passwords are stored only as PBKDF2-SHA-256 with a random 16-byte salt and 100000 iterations (`pbkdf2-sha256$<iterations>$<salt>$<hash>`).
+
+A session is a random 32-byte token in the cookie `teza_session` (`HttpOnly; Secure; SameSite=Strict; Path=/api; Max-Age=2592000`, 30 days); the server stores only its SHA-256. POST and PUT requests whose `Origin` header is present and is not the site's own origin get 403.
+
+Records have the same shape as the client's `teza:records`. A `PUT` is merged with what the server has and the better value wins: fewer frames for 40L, a higher score for Blitz, the larger wins and losses count per bot. Records with non-finite or negative numbers, a 40L time outside 1..10^7 frames, unknown keys, more than 20 bot names or a bot name over 32 characters are refused with 400 and change nothing. The client calls `me` on start; when signed in it merges local and server records the same way, saves the result locally and `PUT`s it, and it `PUT`s again after every finished run. SIGN OUT (labelled SIGNING OUT… while it waits) sends a last `PUT`, then logs out, then clears the local records so the next player on a shared device starts fresh. A 401 from the `PUT` or the logout means the session has already ended, so the client treats it as signed out and clears the local records too; after a 401 on the `PUT` that last upload is lost and logout is skipped. If either request fails any other way (another non-2xx status, a network error, or no answer within 8 s, the timeout on every account request), the player stays signed in with their local records and the menu shows "Couldn't sign out — check your connection". Any other failed call never blocks play.
+
+Login and register are covered by the zone's per-IP rate-limit rule on `/api/*` (see Game server). That rule is dashboard config in the comonhq.com zone, not code in this repo.
+
+For local testing of the API, build and run `npx wrangler dev --local-upstream 127.0.0.1:8787` (with the port you use). Without `--local-upstream`, wrangler rewrites the request URL to the route host `teza.comonhq.com`, so the browser's own `Origin` doesn't match and sign-in gets 403. `npm start` serves only static files, so the account screen there says accounts aren't available.
+
 ## Controls (TETR.IO defaults, rebindable in CONFIG)
 
 | Action | Keys |
@@ -89,9 +114,10 @@ More than 20 rejected messages (including messages over 1 KB or not JSON) close 
 ## Layout
 
 - `src/engine/` — deterministic, headless engine (sub-frame input timing, same as the original)
-- `src/server/` — online match logic (runtime-independent; the Worker in `worker/` wraps it in a Durable Object)
+- `src/server/` — online match and accounts logic (runtime-independent; the Worker in `worker/` wraps each in a Durable Object)
+- `src/profile.ts` — records type, validator and merge, shared by the client and the accounts server
 - `src/ai/bot.ts` — VS opponent: searches every placement, including soft-drop + spin finishes
 - `src/render/` — canvas renderer (board spring physics, particles, action text)
 - `src/audio/` — synthesized WebAudio SFX
 - `src/ui/` — menus, config, results, session orchestration
-- `test/` — engine, bot and match server tests (vitest)
+- `test/` — engine, bot, match server and accounts tests (vitest)

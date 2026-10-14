@@ -33,7 +33,7 @@ button { font: inherit; color: inherit; }
   inset: 0;
   display: grid;
   grid-template-columns: minmax(280px, 0.9fr) 1.3fr;
-  grid-template-rows: 1fr auto;
+  grid-template-rows: auto 1fr auto;
   column-gap: 4vw;
   padding: 7vh 0 4vh 5vw;
   background: linear-gradient(90deg, rgba(8, 8, 15, 0.92) 0 45%, rgba(8, 8, 15, 0.55));
@@ -54,11 +54,15 @@ button { font: inherit; color: inherit; }
 .brand p { max-width: 30ch; margin: 2.2em 0 0; color: var(--muted); font-size: 17px; line-height: 1.45; }
 .brand.small h1 { font-size: clamp(56px, 8vw, 120px); }
 
+.bars, .account-form {
+  grid-column: 2;
+  grid-row: 1 / span 2;
+  align-self: center;
+}
 .bars {
   display: flex;
   flex-direction: column;
   gap: 10px;
-  align-self: center;
 }
 
 .bar {
@@ -130,6 +134,45 @@ button { font: inherit; color: inherit; }
   font-size: 14px;
   letter-spacing: 0.12em;
 }
+
+/* ------------------------------------------------------------------ account */
+
+.account {
+  grid-column: 1;
+  align-self: end;
+  max-width: 420px;
+  margin-bottom: 3vh;
+  border-top: 3px solid var(--ink);
+  padding-top: 12px;
+}
+.account-label { margin: 0 0 12px; color: var(--muted); font-size: 13px; letter-spacing: 0.16em; }
+.account .account-label:has(+ .account-name) { margin-bottom: 2px; }
+.account-name { margin: 0 0 6px; font-family: var(--display); font-size: 34px; line-height: 1.1; overflow-wrap: anywhere; }
+.account .stats { display: grid; grid-template-columns: repeat(3, 1fr); margin-bottom: 14px; }
+.account .stat { padding: 8px 0; border-bottom: 1px solid var(--line); }
+.account .stat span { display: block; color: var(--muted); font-size: 12px; letter-spacing: 0.16em; }
+.account .stat strong { font-family: var(--display); font-weight: 400; font-size: 20px; }
+
+.account-form { width: min(460px, 100%); }
+.account-form .tabs { display: flex; gap: 12px; margin-bottom: 28px; }
+.field { display: block; margin-bottom: 18px; }
+.field span { display: block; margin-bottom: 6px; color: var(--muted); font-size: 13px; letter-spacing: 0.16em; }
+.field input {
+  width: 100%;
+  border: 0;
+  border-bottom: 2px solid var(--ink);
+  background: rgba(255, 255, 255, 0.05);
+  padding: 10px 12px;
+  font-family: var(--display);
+  font-size: 20px;
+  color: var(--ink);
+  outline: none;
+}
+.field input:focus { border-color: #3f6bff; background: rgba(63, 107, 255, 0.12); outline: 2px solid #3f6bff; outline-offset: 2px; }
+.form-error { min-height: 1.4em; margin: 0; color: #ff5f7a; font-size: 15px; }
+.account-form .actions { margin-top: 18px; }
+.account .form-error { margin-top: 10px; }
+.ghost-btn:disabled { opacity: 0.5; cursor: wait; }
 
 /* ------------------------------------------------------------------ config */
 
@@ -238,7 +281,10 @@ button { font: inherit; color: inherit; }
 .results .stat strong { font-family: var(--display); font-weight: 400; font-size: 30px; }
 
 @media (max-width: 860px) {
-  .menu { grid-template-columns: 1fr; padding: 5vh 16px; row-gap: 3vh; overflow: auto; }
+  .menu { grid-template-columns: 1fr; grid-template-rows: none; padding: 5vh 16px; row-gap: 3vh; overflow: auto; }
+  .bars, .account-form, .account { grid-column: 1; grid-row: auto; }
+  .menu > .brand { order: -2; }
+  .menu > .account { order: -1; margin-bottom: 0; }
   .bar { margin-left: 0; }
   .bar-meta { display: none; }
 }

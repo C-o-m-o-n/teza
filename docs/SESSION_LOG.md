@@ -100,3 +100,51 @@
 
 **Next steps**
 - After the next deploy, confirm the CI check passes against https://teza.comonhq.com.
+
+## 2026-10-13 — Player accounts (factory job 003, build round 1)
+
+**What changed**
+- New `Accounts` Durable Object (one global instance, SQLite, migration `v2`, binding `ACCOUNTS`) serving `/api/account/register|login|logout|me|records`. Logic in `src/server/accounts.ts`, tested with an in-memory store in `test/accounts.test.ts`.
+- Passwords: PBKDF2-SHA-256, 16-byte salt, 100000 iterations, constant-time compare. Sessions: 32-byte token in an HttpOnly/Secure/SameSite=Strict cookie on `/api`, 30 days, only its SHA-256 stored. Cross-origin POST/PUT get 403.
+- `src/profile.ts` now holds `Records`/`RunRecord` (re-exported from `src/settings.ts`), the records validator and the better-wins merge, shared by client and server.
+- Client: SIGN IN entry and signed-in panel (username, 40L PB, Blitz PB, bot W–L, SIGN OUT) on the main menu, an ACCOUNT screen with sign-in/register tabs and inline errors, and records sync on start and after every run.
+- The Worker reads account request bodies (max 4 KB) itself and forwards them buffered: streaming them on to the Durable Object broke the connection whenever it answered early (403/415), which reset the object.
+
+**Still open**
+- No rate-limit rule yet for `/api/account/*`; add one in the comonhq.com zone dashboard (login and register, per IP) before relying on accounts.
+- Under `wrangler dev`, refusing an oversized chunked upload makes wrangler's local proxy drop its connection once; a POST sent right after can fail with 500. Not seen with a Content-Length body; production untested.
+
+**Next steps**
+- After deploy, register a test account on https://teza.comonhq.com and check that records sync between two browsers.
+
+## 2026-10-14 — Player accounts (factory job 003, rework 1)
+
+**What changed**
+- SIGN OUT now sends a last records `PUT`, signs out, then clears the local records, so the next player on a shared device doesn't inherit (or merge into their own account) the previous player's bests.
+- Account screen: the submit button reads LOG IN → / CREATE ACCOUNT → so it no longer repeats the SIGN IN tab label, and the tabs carry `aria-pressed`. Inputs show a 2px blue focus outline.
+- Under 860 px the account block sits between the brand and the mode bars, so SIGN IN is visible without scrolling.
+
+**Still open**
+- Same as round 1: no rate-limit rule for `/api/account/*` yet.
+- On narrow screens ↑/↓ still walks the menu in DOM order (bars first, then SIGN IN), which no longer matches the visual order.
+
+## 2026-10-14 — Player accounts (factory job 003, rework 2)
+
+**What changed**
+- SIGN OUT only signs out when the records `PUT` and then the logout both answer 2xx. Otherwise the player stays signed in, keeps their local records, and the account block shows "Couldn't sign out — check your connection" with SIGN OUT enabled again. Before, a failed logout cleared the UI and records while the server session stayed valid.
+- Every account request is aborted after 8 s (`REQUEST_TIMEOUT_MS` in `src/ui/account.ts`), so SIGN OUT can't stay disabled on a hanging network.
+- `test/account-client.test.ts` covers the upload-failure, logout-failure and timeout paths with a stubbed `fetch`.
+
+**Still open**
+- Same as before: no rate-limit rule for `/api/account/*` yet; ↑/↓ order on narrow screens.
+
+## 2026-10-14 — Player accounts (factory job 003, rework 3)
+
+**What changed**
+- SIGN OUT treats a 401 from the records `PUT` or the logout as already signed out: it clears the account and the local records instead of showing an error. After a 401 on the `PUT`, logout is skipped and that last upload is lost (the server keeps every earlier one). Network errors, timeouts and other non-2xx still keep the player signed in with the inline error.
+- The button reads SIGNING OUT… while it waits.
+- `test/account-client.test.ts` covers both 401 paths.
+- README: the Cloudflare zone rate-limit rule now covers all of `/api/*` on teza.comonhq.com (the user widened it in the dashboard), so login and register are rate-limited.
+
+**Still open**
+- ↑/↓ order on narrow screens still follows DOM order (bars first, then SIGN IN).

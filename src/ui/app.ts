@@ -2,10 +2,12 @@ import { Bot, BOT_PROFILES, BotProfile } from "../ai/bot";
 import { sfx } from "../audio/sfx";
 import { Action, Game, GameEvent } from "../engine/game";
 import { MODES, Mode, ModeId, modeById } from "../modes";
+import { mergeRecords, passwordError, usernameError } from "../profile";
 import { BoardView, formatTime, Renderer } from "../render/renderer";
 import { BIND_LABELS, BIND_ORDER, Bind, Records, Settings, defaultSettings, loadRecords, loadSettings, saveRecords, saveSettings } from "../settings";
+import { Profile, fetchMe, finishSession, putRecords, signIn } from "./account";
 
-type Screen = "menu" | "bots" | "config" | "play" | "results";
+type Screen = "menu" | "bots" | "config" | "account" | "play" | "results";
 
 const GAME_ACTIONS: Action[] = ["left", "right", "soft", "hard", "cw", "ccw", "180", "hold"];
 const COUNTDOWN = [
@@ -56,6 +58,7 @@ interface Session {
 export class App {
   private settings: Settings = loadSettings();
   private records: Records = loadRecords();
+  private account: string | null = null; // signed-in username
   private renderer: Renderer;
   private root: HTMLElement;
   private screen: Screen = "menu";
@@ -78,6 +81,16 @@ export class App {
     window.addEventListener("pointerdown", () => sfx.unlock(), { once: false });
     this.showMenu();
     requestAnimationFrame((t) => this.loop(t));
+    void fetchMe().then((p) => p && this.adoptProfile(p));
+  }
+
+  /** Signed in: merge local and server records (better wins), keep the result in both places. */
+  private adoptProfile(p: Profile): void {
+    this.account = p.username;
+    this.records = mergeRecords(this.records, p.records);
+    saveRecords(this.records);
+    void putRecords(this.records);
+    if (this.screen === "menu") this.showMenu();
   }
 
   private applySettings(): void {
@@ -365,14 +378,14 @@ export class App {
 
   private showMenu(): void {
     const r = this.records;
+    const w = Object.values(r.vs).reduce((a, b) => a + b.wins, 0);
+    const l = Object.values(r.vs).reduce((a, b) => a + b.losses, 0);
+    const sprint = r["40l"] ? `${formatTime(r["40l"].value).main}${formatTime(r["40l"].value).ms}` : null;
+    const blitz = r.blitz ? r.blitz.value.toLocaleString("en-US") : null;
     const meta: Partial<Record<ModeId, string>> = {
-      "40l": r["40l"] ? `PB ${formatTime(r["40l"].value).main}${formatTime(r["40l"].value).ms}` : "NO RECORD",
-      blitz: r.blitz ? `PB ${r.blitz.value.toLocaleString("en-US")}` : "NO RECORD",
-      vs: (() => {
-        const w = Object.values(r.vs).reduce((a, b) => a + b.wins, 0);
-        const l = Object.values(r.vs).reduce((a, b) => a + b.losses, 0);
-        return w + l ? `${w}W – ${l}L` : "UNRANKED";
-      })(),
+      "40l": sprint ? `PB ${sprint}` : "NO RECORD",
+      blitz: blitz ? `PB ${blitz}` : "NO RECORD",
+      vs: w + l ? `${w}W – ${l}L` : "UNRANKED",
       zen: "ENDLESS",
     };
     const bars = MODES.map((m, i) =>
@@ -391,9 +404,112 @@ export class App {
         el("p", {}, "Tetris + cheza — Swahili for play. SRS+, 180 kicks, 7-bag, B2B chaining, with mechanics matched to the modern online stacker."),
       ),
       el("nav", { class: "bars" }, ...bars),
+      this.accountBlock(sprint ?? "—", blitz ?? "—", `${w}W – ${l}L`),
       el("footer", { class: "hint" }, "↑ ↓ to choose · ENTER to play · ESC to go back"),
     );
     this.setScreen("menu", page);
+  }
+
+  /** Menu corner: SIGN IN when anonymous; username, profile stats and SIGN OUT when signed in. */
+  private accountBlock(sprint: string, blitz: string, vs: string): HTMLElement {
+    const block = el("section", { class: "account" });
+    if (!this.account) {
+      const signInBtn = el("button", { class: "ghost-btn", "data-nav": "" }, "SIGN IN");
+      signInBtn.addEventListener("click", () => this.showAccount());
+      block.append(el("p", { class: "account-label" }, "PLAYING OFFLINE · RECORDS KEPT ON THIS DEVICE"), signInBtn);
+      return block;
+    }
+    const stat = (label: string, value: string) => el("div", { class: "stat" }, el("span", {}, label), el("strong", {}, value));
+    const signOutBtn = el("button", { class: "ghost-btn", "data-nav": "" }, "SIGN OUT");
+    const error = el("p", { class: "form-error", role: "alert" });
+    signOutBtn.addEventListener("click", async () => {
+      signOutBtn.disabled = true;
+      signOutBtn.textContent = "SIGNING OUT…";
+      error.textContent = "";
+      if (!(await finishSession(this.records))) {
+        // Still signed in on the server (or its copy of the records is behind): keep everything.
+        error.textContent = "Couldn't sign out — check your connection";
+        signOutBtn.textContent = "SIGN OUT";
+        signOutBtn.disabled = false;
+        return;
+      }
+      // Signed out. A shared device must not hand these records to the next player. After a 401 the
+      // session had already ended and this last upload was refused; the server keeps every earlier one.
+      this.account = null;
+      this.records = { vs: {} };
+      saveRecords(this.records);
+      if (this.screen === "menu") this.showMenu();
+    });
+    block.append(
+      el("p", { class: "account-label" }, "SIGNED IN AS"),
+      el("p", { class: "account-name" }, this.account),
+      el("div", { class: "stats" }, stat("40L PB", sprint), stat("BLITZ PB", blitz), stat("BOT W–L", vs)),
+      signOutBtn,
+      error,
+    );
+    return block;
+  }
+
+  private showAccount(): void {
+    let kind: "login" | "register" = "login";
+    const tab = (label: string) => el("button", { class: "ghost-btn", type: "button", "data-nav": "" }, label);
+    const loginTab = tab("SIGN IN");
+    const registerTab = tab("REGISTER");
+    const username = el("input", { name: "username", autocomplete: "username", maxlength: "16", spellcheck: "false", "data-nav": "" });
+    const password = el("input", { name: "password", type: "password", maxlength: "128", "data-nav": "" });
+    const error = el("p", { class: "form-error", role: "alert" });
+    const submit = el("button", { class: "ghost-btn primary", type: "submit", "data-nav": "" });
+    const back = el("button", { class: "ghost-btn", type: "button", "data-nav": "" }, "← BACK");
+    const select = (k: typeof kind) => {
+      kind = k;
+      loginTab.classList.toggle("primary", k === "login");
+      registerTab.classList.toggle("primary", k === "register");
+      loginTab.setAttribute("aria-pressed", String(k === "login"));
+      registerTab.setAttribute("aria-pressed", String(k === "register"));
+      submit.textContent = k === "login" ? "LOG IN →" : "CREATE ACCOUNT →";
+      password.autocomplete = k === "login" ? "current-password" : "new-password";
+      error.textContent = "";
+    };
+    select("login");
+    loginTab.addEventListener("click", () => select("login"));
+    registerTab.addEventListener("click", () => select("register"));
+    back.addEventListener("click", () => this.showMenu());
+    const form = el("form", { class: "account-form", novalidate: "" },
+      el("div", { class: "tabs" }, loginTab, registerTab),
+      el("label", { class: "field" }, el("span", {}, "USERNAME"), username),
+      el("label", { class: "field" }, el("span", {}, "PASSWORD"), password),
+      error,
+      el("div", { class: "actions" }, submit, back),
+    );
+    form.addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const invalid = usernameError(username.value) ?? passwordError(password.value);
+      if (invalid) {
+        error.textContent = invalid;
+        return;
+      }
+      error.textContent = "";
+      submit.disabled = true;
+      const result = await signIn(kind, username.value, password.value);
+      submit.disabled = false;
+      if (this.screen !== "account") return;
+      if (typeof result === "string") {
+        error.textContent = result;
+        return;
+      }
+      sfx.confirm();
+      this.adoptProfile(result);
+      this.showMenu();
+    });
+    const page = el("div", { class: "menu" },
+      el("header", { class: "brand small" },
+        el("h1", {}, el("span", {}, "ACCOUNT")),
+        el("p", {}, "Sign in to keep your personal bests and bot record with you. Playing without an account works the same."),
+      ),
+      form,
+      el("footer", { class: "hint" }, "ENTER to submit · ESC to go back"),
+    );
+    this.setScreen("account", page);
   }
 
   private showBots(): void {
@@ -549,6 +665,7 @@ export class App {
       if (s.bot) stats.push(stat("BOT APM", s.bot.apm().toFixed(1)));
     }
     saveRecords(this.records);
+    if (this.account) void putRecords(this.records);
     const retry = el("button", { class: "ghost-btn primary", "data-nav": "" }, s.mode.id === "vs" ? "REMATCH  ·  R" : "RETRY  ·  R");
     retry.addEventListener("click", () => this.retry());
     const back = el("button", { class: "ghost-btn", "data-nav": "" }, "MENU  ·  ESC");
