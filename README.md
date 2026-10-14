@@ -126,6 +126,53 @@ For local testing of the API, build and run `npx wrangler dev --local-upstream 1
 | Hold | C or Shift |
 | Retry / Menu | R / Esc |
 
+## Sound and music
+
+Everything is synthesized with Web Audio at runtime: no audio files. The music runs through light saturation and a compressor into its own bus; the sound effects have their own bus. Both feed one master output.
+
+CONFIG › AUDIO & VISUAL has four audio settings, saved in `localStorage["teza:settings"]`:
+
+- **Sound effects** (`volume`, default 60%).
+- **Music** (`musicVolume`, default 60%). At 0% the music makes no sound and creates no voices.
+- **Music track** (`musicTrack`): Auto (the default: a song per mode, and one for the menus), one song played everywhere, or Off (no music and no scheduler). An unknown saved value falls back to Auto.
+- **Sound pack** (`soundPack`): Arcade (square/triangle chip, the default), Glass (sine and FM bells, soft) or Neon (detuned saws, heavy bass). A pack sets the waveforms, filter brightness and envelopes of both the effects and the music (`src/audio/packs.ts`). A change during play applies from the next sound and the next bar. An unknown saved pack falls back to Arcade.
+
+Saves from before these settings existed load unchanged; missing fields take their defaults.
+
+### Songs
+
+Songs are data in `src/audio/songs.ts`: key, chord loop, swing, kit level and, per gear, a tempo and one-bar patterns for kick, snare, hats, bass, pad, arpeggio and lead. Add a song by appending to `SONGS`. Give it a `mode` to make it that mode's Auto song. Every song is listed under Music track.
+
+| Song | Auto in | Feel | Key | Tempo by gear (BPM) |
+|---|---|---|---|---|
+| Lantern | menus and results | relaxed, warm | F major | 92 |
+| Gridline | 40 LINES | driving four-on-the-floor | E dorian | 118 / 126 / 134 / 152 |
+| Afterburn | BLITZ | frantic synthwave | A minor | 130 / 138 / 146 / 162 |
+| Undertow | VERSUS | dark, aggressive | C♯ phrygian | 108 / 116 / 124 / 142 |
+| Tidepool | ZEN | ambient lo-fi, swung | D major | 72 / 76 / 80 (no danger gear) |
+
+The menu song starts with your first key press or click. Starting a mode crossfades into its song over the 1.5 s countdown. When the run ends (top-out, finish, K.O.) or you leave it, the menu song crossfades back over 2.5 s. Retry starts the mode's song again from the top.
+
+### Gears
+
+During a run the music moves in steps, called gears, driven by an intensity value from 0 to 1. Intensity is the strongest of:
+
+- the player's danger (the value that reddens the board near the top);
+- the stack height plus incoming garbage, at 0.05 per row;
+- a running combo;
+- in BLITZ's last 30 seconds, a ramp from 0.4 to 1.
+
+| Gear | Intensity | Typical board |
+|---|---|---|
+| calm | 0 | empty |
+| groove | ≥ 0.15 | 3-row stack, or 1 COMBO |
+| drive | ≥ 0.4 | 8-row stack, 3 COMBO, or BLITZ's last 30 s |
+| danger | ≥ 0.7 | 14-row stack (stack plus garbage in VERSUS), or BLITZ's last 15 s |
+
+Each gear has its own tempo and a denser arrangement. The danger gear is a jump of 15 BPM or more, with double-time hats, a driving bass and an alarm lead. A gear change lands on the next beat: a crash marks a step up, and a falling sweep marks a step down. A gear holds until intensity falls 0.08 below its threshold, so it drops back after you dig down rather than fluttering. In BLITZ the tempo also multiplies by up to ×1.25 over the last 30 seconds, so Afterburn's danger gear reaches about 200 BPM at time-up.
+
+Each kick ducks the rest of the music (sidechain). Combos (from 1 COMBO) add a melody phrase in the song's key that starts on the next 16th note and grows longer and higher up to 8 COMBO. The phrase is cut when the combo ends. Each of your line clears ducks the music for about a third of a second, and quads, spins and all clears duck it deeper. The effects' chords follow the playing song's key. The bot's sounds are centred. Your piece sounds (move, rotate, hold, drop, spin, clear) are panned left or right by the piece's column. The thresholds and intensity mix are in `src/audio/music.ts` (`GEARS`, `musicIntensity`).
+
 ## Layout
 
 - `src/engine/` — deterministic, headless engine (sub-frame input timing, same as the original)
@@ -133,7 +180,7 @@ For local testing of the API, build and run `npx wrangler dev --local-upstream 1
 - `src/profile.ts` — records type, validator and merge, shared by the client and the accounts server
 - `src/ai/bot.ts` — VS opponent: searches every placement, including soft-drop + spin finishes
 - `src/render/` — canvas renderer (board spring physics, particles, action text)
-- `src/audio/` — synthesized WebAudio SFX
+- `src/audio/` — synthesized WebAudio SFX, sound packs and generative music
 - `src/ui/` — menus, config, results, session orchestration
 - `test/` — engine, bot, match server and accounts tests (vitest)
 - `e2e/` — browser runs of 40 LINES and BLITZ (Playwright, `npm run e2e`)

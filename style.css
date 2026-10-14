@@ -233,6 +233,18 @@ button { font: inherit; color: inherit; }
 .panel output { font-family: var(--display); font-size: 14px; text-align: right; }
 .panel input[type="range"] { width: 100%; accent-color: #3f6bff; }
 .panel input[type="checkbox"] { justify-self: start; width: 18px; height: 18px; margin: 0; accent-color: #3f6bff; }
+.panel select {
+  border: 1px solid var(--line);
+  background: rgba(255, 255, 255, 0.05);
+  color: inherit;
+  padding: 7px 6px;
+  font-family: var(--display);
+  font-size: 13px;
+  cursor: pointer;
+}
+.panel select:hover, .panel select:focus { background: rgba(255, 255, 255, 0.14); outline: none; }
+.panel select:focus-visible { outline: 2px solid #3f6bff; outline-offset: 2px; }
+.panel option { background: var(--bg); }
 .keys .row { grid-template-columns: 1fr 104px 104px; }
 .key {
   border: 1px solid var(--line);

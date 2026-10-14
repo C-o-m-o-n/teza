@@ -1,3 +1,5 @@
+import { SOUND_PACKS } from "./audio/packs";
+import { songById } from "./audio/songs";
 import { Action, DEFAULT_HANDLING, Handling } from "./engine/game";
 import { Records } from "./profile";
 
@@ -8,7 +10,10 @@ export type Bind = Action | "retry" | "exit";
 export interface Settings {
   handling: Handling;
   keys: Record<Bind, string[]>; // KeyboardEvent.code values
-  volume: number;
+  volume: number; // sound effects
+  musicVolume: number;
+  musicTrack: string; // "auto" (each mode's song), "off", or a SONGS id played everywhere
+  soundPack: string; // a SOUND_PACKS id
   bounciness: number; // board physics strength, 0..2
   gridOpacity: number;
   shadowOpacity: number;
@@ -47,6 +52,9 @@ export function defaultSettings(): Settings {
       exit: ["Escape"],
     },
     volume: 0.6,
+    musicVolume: 0.6,
+    musicTrack: "auto",
+    soundPack: SOUND_PACKS[0].id,
     bounciness: 1,
     gridOpacity: 0.1,
     shadowOpacity: 0.3,
@@ -78,12 +86,16 @@ export function loadSettings(): Settings {
   const d = defaultSettings();
   const s = read<Partial<Settings>>(KEY);
   if (!s) return d;
-  return {
+  const merged: Settings = {
     ...d,
     ...s,
     handling: { ...d.handling, ...s.handling },
     keys: { ...d.keys, ...s.keys },
   };
+  if (!SOUND_PACKS.some((p) => p.id === merged.soundPack)) merged.soundPack = d.soundPack;
+  if (merged.musicTrack !== "auto" && merged.musicTrack !== "off" && !songById(merged.musicTrack)) merged.musicTrack = d.musicTrack;
+  if (typeof merged.musicVolume !== "number" || !(merged.musicVolume >= 0 && merged.musicVolume <= 1)) merged.musicVolume = d.musicVolume;
+  return merged;
 }
 
 export function saveSettings(s: Settings): void {
