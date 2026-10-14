@@ -1,5 +1,8 @@
 import { Bot, BOT_PROFILES, BotProfile } from "../ai/bot";
-import { sfx } from "../audio/sfx";
+import { blitzBoost } from "../audio/music";
+import { SOUND_PACKS, packById } from "../audio/packs";
+import { music, sfx } from "../audio/sfx";
+import { PieceType, Rotation } from "../engine/constants";
 import { Action, Game, GameEvent } from "../engine/game";
 import { MODES, Mode, ModeId, modeById } from "../modes";
 import { mergeRecords, passwordError, usernameError } from "../profile";
@@ -97,6 +100,8 @@ export class App {
 
   private applySettings(): void {
     sfx.volume = this.settings.volume;
+    sfx.musicVolume = this.settings.musicVolume;
+    sfx.pack = packById(this.settings.soundPack);
     this.renderer.gridOpacity = this.settings.gridOpacity;
     this.renderer.shadowOpacity = this.settings.shadowOpacity;
     const reduceMotion = this.settings.reduceMotion || (this.motionQuery?.matches ?? false);
@@ -121,6 +126,13 @@ export class App {
     const s = this.session!;
     const dt = Math.min(0.25, (now - s.last) / 1000);
     s.t += dt;
+    if (s.endAt === null) {
+      // only the player's danger drives the music; Blitz speeds up over its final 30 s
+      const obj = s.player.opts.objective;
+      const boost = s.mode.id === "blitz" && obj.type === "timed" ? blitzBoost(s.player.frame, obj.frames) : 1;
+      music.update(s.playerView.danger, boost);
+      if (s.player.stats.combo === 0) music.endCombo();
+    }
     if (!s.started) {
       s.last = now;
       const cd = [...COUNTDOWN].reverse().find((c) => s.t >= c.at);
@@ -194,6 +206,7 @@ export class App {
     this.renderer.overlay = { countdown: null, countdownT: 0 };
     this.renderer.layoutViews();
     this.applySettings();
+    music.start(); // the countdown is the intro; replaces any previous session's music
     this.wireSounds(player, true);
     if (bot) this.wireSounds(bot, false);
     if (bot && botView) {
@@ -219,19 +232,34 @@ export class App {
     target.receive(n);
   }
 
+  /** `loud` is the player's game: every sound, panned by piece column. The bot's is quieter and centred. */
   private wireSounds(game: Game, loud: boolean): void {
+    const centre = (type: PieceType, x: number, y: number, r: Rotation) => {
+      const cells = game.cellsOf(type, x, y, r);
+      return cells.reduce((a, [cx]) => a + cx, 0) / cells.length;
+    };
+    const col = () => (loud ? centre(game.piece.type, game.piece.x, game.piece.y, game.piece.r) : undefined);
+    let last: number | undefined; // column of the last dropped/locked piece, for its clear
     game.on((e) => {
       if (!loud && !["clear", "garbage-tank", "topout"].includes(e.type)) return;
       switch (e.type) {
-        case "move": sfx.move(); break;
+        case "move": sfx.move(col()); break;
         case "wall": break;
-        case "rotate": if (e.spin !== "none") sfx.spin(); else sfx.rotate(); break;
-        case "hold": sfx.hold(); break;
-        case "harddrop": sfx.harddrop(); break;
+        case "rotate": if (e.spin !== "none") sfx.spin(col()); else sfx.rotate(col()); break;
+        case "hold": sfx.hold(col()); break;
+        case "harddrop":
+          last = loud ? centre(e.piece, e.x, e.y, e.r) : undefined;
+          sfx.harddrop(last);
+          break;
+        case "lock": last = col(); break;
         case "clear":
-          sfx.clear(e.info.lines, e.info.spin !== "none", e.info.combo, e.info.btb);
+          sfx.clear(e.info.lines, e.info.spin !== "none", e.info.combo, e.info.btb, last);
           if (e.info.allClear) sfx.allClear();
-          if (e.info.btbBroken >= 2) sfx.btbBreak();
+          if (e.info.btbBroken >= 2) sfx.btbBreak(last);
+          if (loud) {
+            sfx.duckMusic(e.info.lines >= 4 || e.info.spin !== "none" || e.info.allClear);
+            music.combo(e.info.combo - 1); // the on-screen "N COMBO": the first clear of a chain is 0
+          }
           break;
         case "garbage-in": sfx.garbageIn(e.amount); break;
         case "garbage-tank": sfx.garbageRise(); break;
@@ -262,6 +290,7 @@ export class App {
     if (!s || s.endAt !== null) return;
     s.outcome = outcome;
     s.endAt = s.t + (outcome === "clear" || outcome === "win" ? 0.9 : 1.3);
+    music.stop(1.2);
     if (outcome === "win") {
       s.botView!.bigText = { text: "K.O.", t: 0, color: "#ff3f5f" };
       sfx.finish();
@@ -275,6 +304,7 @@ export class App {
   }
 
   private exitToMenu(): void {
+    music.stop(0.3);
     this.session = null;
     this.renderer.views = [];
     this.renderer.flights = [];
@@ -567,6 +597,17 @@ export class App {
       });
       return el("label", { class: "row" }, el("span", {}, label), input, out);
     };
+    const pack = el("select", { name: "soundPack" });
+    for (const p of SOUND_PACKS) pack.append(el("option", { value: p.id }, p.name));
+    pack.value = s.soundPack;
+    const packNote = el("output", {}, packById(s.soundPack).tagline);
+    pack.addEventListener("change", () => {
+      s.soundPack = pack.value;
+      packNote.textContent = packById(s.soundPack).tagline;
+      save();
+      sfx.confirm(); // preview the new timbre
+    });
+    const packSelect = el("label", { class: "row" }, el("span", {}, "Sound pack"), pack, packNote);
     const f = (v: number) => `${v.toFixed(1)}F · ${Math.round((v * 1000) / 60)}ms`;
     const handling = el("section", { class: "panel" },
       el("h2", {}, "HANDLING"),
@@ -578,6 +619,8 @@ export class App {
     const visual = el("section", { class: "panel" },
       el("h2", {}, "AUDIO & VISUAL"),
       slider("Sound effects", 0, 1, 0.05, () => s.volume, (v) => (s.volume = v), (v) => `${Math.round(v * 100)}%`),
+      slider("Music", 0, 1, 0.05, () => s.musicVolume, (v) => (s.musicVolume = v), (v) => `${Math.round(v * 100)}%`),
+      packSelect,
       slider("Board bounciness", 0, 2, 0.1, () => s.bounciness, (v) => (s.bounciness = v), (v) => `${Math.round(v * 100)}%`),
       toggle("Reduce motion", () => s.reduceMotion, (v) => (s.reduceMotion = v)),
       slider("Grid", 0, 0.4, 0.01, () => s.gridOpacity, (v) => (s.gridOpacity = v), (v) => `${Math.round(v * 100)}%`),
