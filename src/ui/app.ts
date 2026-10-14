@@ -67,11 +67,13 @@ export class App {
   private listening: { bind: Bind; slot: number; btn: HTMLButtonElement } | null = null;
   private lastFrame = performance.now();
   private resultsShownAt = 0;
+  private motionQuery: MediaQueryList | null = window.matchMedia?.("(prefers-reduced-motion: reduce)") ?? null;
 
   constructor(canvas: HTMLCanvasElement, root: HTMLElement) {
     this.renderer = new Renderer(canvas);
     this.root = root;
     this.applySettings();
+    this.motionQuery?.addEventListener("change", () => this.applySettings());
     window.addEventListener("keydown", (e) => this.onKeyDown(e));
     window.addEventListener("keyup", (e) => this.onKeyUp(e));
     window.addEventListener("blur", () => {
@@ -97,7 +99,11 @@ export class App {
     sfx.volume = this.settings.volume;
     this.renderer.gridOpacity = this.settings.gridOpacity;
     this.renderer.shadowOpacity = this.settings.shadowOpacity;
-    for (const v of this.renderer.views) v.bounciness = this.settings.bounciness;
+    const reduceMotion = this.settings.reduceMotion || (this.motionQuery?.matches ?? false);
+    for (const v of this.renderer.views) {
+      v.bounciness = this.settings.bounciness;
+      v.reduceMotion = reduceMotion;
+    }
   }
 
   // ------------------------------------------------------------------ loop
@@ -550,6 +556,17 @@ export class App {
       });
       return el("label", { class: "row" }, el("span", {}, label), input, out);
     };
+    const toggle = (label: string, get: () => boolean, set: (v: boolean) => void) => {
+      const out = el("output", {}, get() ? "ON" : "OFF");
+      const input = el("input", { type: "checkbox" });
+      input.checked = get();
+      input.addEventListener("change", () => {
+        set(input.checked);
+        out.textContent = get() ? "ON" : "OFF";
+        save();
+      });
+      return el("label", { class: "row" }, el("span", {}, label), input, out);
+    };
     const f = (v: number) => `${v.toFixed(1)}F · ${Math.round((v * 1000) / 60)}ms`;
     const handling = el("section", { class: "panel" },
       el("h2", {}, "HANDLING"),
@@ -562,6 +579,7 @@ export class App {
       el("h2", {}, "AUDIO & VISUAL"),
       slider("Sound effects", 0, 1, 0.05, () => s.volume, (v) => (s.volume = v), (v) => `${Math.round(v * 100)}%`),
       slider("Board bounciness", 0, 2, 0.1, () => s.bounciness, (v) => (s.bounciness = v), (v) => `${Math.round(v * 100)}%`),
+      toggle("Reduce motion", () => s.reduceMotion, (v) => (s.reduceMotion = v)),
       slider("Grid", 0, 0.4, 0.01, () => s.gridOpacity, (v) => (s.gridOpacity = v), (v) => `${Math.round(v * 100)}%`),
       slider("Ghost piece", 0, 0.8, 0.01, () => s.shadowOpacity, (v) => (s.shadowOpacity = v), (v) => `${Math.round(v * 100)}%`),
     );

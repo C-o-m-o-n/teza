@@ -12,6 +12,7 @@ export interface Settings {
   bounciness: number; // board physics strength, 0..2
   gridOpacity: number;
   shadowOpacity: number;
+  reduceMotion: boolean; // also on when the OS asks for reduced motion
 }
 
 export const BIND_LABELS: Record<Bind, string> = {
@@ -49,6 +50,7 @@ export function defaultSettings(): Settings {
     bounciness: 1,
     gridOpacity: 0.1,
     shadowOpacity: 0.3,
+    reduceMotion: false,
   };
 }
 

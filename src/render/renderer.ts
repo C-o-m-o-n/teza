@@ -60,8 +60,16 @@ interface Spring {
   x: number; y: number; r: number; vx: number; vy: number; vr: number;
 }
 
-interface Particle {
-  x: number; y: number; vx: number; vy: number; life: number; max: number; color: string; size: number;
+/** A shard of a cleared cell: `part` of `parts`×`parts` pieces of the cell's sprite. */
+interface Fragment {
+  x: number; y: number; vx: number; vy: number; rot: number; vr: number;
+  life: number; max: number; color: string; size: number; part: [number, number]; parts: number;
+}
+
+interface Shockwave {
+  y: number; // centre row, board px
+  t: number;
+  strength: number;
 }
 
 interface ActionText {
@@ -99,13 +107,23 @@ export interface ViewOptions {
 export class BoardView {
   layout: ViewLayout = { bx: 0, by: 0, S: 24 };
   spring: Spring = { x: 0, y: 0, r: 0, vx: 0, vy: 0, vr: 0 };
-  particles: Particle[] = [];
+  /** Vertical stretch (+) / squash (−) about the board bottom, with its velocity. */
+  squash = { s: 0, v: 0 };
+  fragments: Fragment[] = [];
+  shockwaves: Shockwave[] = [];
+  /** Heartbeat scale offset this frame (0 unless danger is high). */
+  heartbeat = 0;
+  private heartT = 0;
+  private recoilDir = 1;
+  /** Full rows as they were at the last lock, so cleared cells keep their colours. */
+  private lockedRows = new Map<number, Cell[]>();
   texts: ActionText[] = [];
   flashes: Flash[] = [];
   trails: Trail[] = [];
   bigText: { text: string; t: number; color: string } | null = null;
   danger = 0;
   bounciness = 1;
+  reduceMotion = false;
 
   constructor(public game: Game, public opts: ViewOptions) {
     game.on((e) => this.onEvent(e));
@@ -113,7 +131,11 @@ export class BoardView {
 
   setGame(game: Game): void {
     this.game = game;
-    this.particles = [];
+    this.fragments = [];
+    this.shockwaves = [];
+    this.squash = { s: 0, v: 0 };
+    this.heartbeat = 0;
+    this.heartT = 0;
     this.texts = [];
     this.flashes = [];
     this.trails = [];
@@ -122,8 +144,13 @@ export class BoardView {
     game.on((e) => this.onEvent(e));
   }
 
+  /** Strength of board motion: bounciness, or 0 when motion is reduced. */
+  private get motion(): number {
+    return this.reduceMotion ? 0 : this.bounciness;
+  }
+
   private kick(vx: number, vy: number, vr = 0): void {
-    const k = this.bounciness;
+    const k = this.motion;
     this.spring.vx += vx * k;
     this.spring.vy += vy * k;
     this.spring.vr += vr * k;
@@ -137,6 +164,7 @@ export class BoardView {
         break;
       case "harddrop": {
         this.kick(0, S * 9);
+        this.squash.v += 1.4 * this.motion;
         const cells = this.game.cellsOf(e.piece, e.x, e.y, e.r);
         const tops = new Map<number, number>();
         for (const [x, y] of cells) tops.set(x, Math.min(tops.get(x) ?? 99, y));
@@ -146,10 +174,21 @@ export class BoardView {
       case "rotate":
         if (e.spin !== "none") this.kick(0, 0, 0.06);
         break;
+      case "lock":
+        this.lockedRows.clear();
+        for (let y = 0; y < this.game.board.length; y++) {
+          const row = this.game.board[y];
+          if (row.every((c) => c !== null)) this.lockedRows.set(y, [...row]);
+        }
+        break;
       case "clear": {
         const { info } = e;
         this.flashes.push({ rows: e.rows, t: 0 });
-        this.burst(e.rows, COLORS[info.piece], info.lines >= 4 || info.spin !== "none" ? 2 : 1);
+        this.shatter(e.rows, info.piece);
+        if ((info.spin !== "none" || info.btb > 1) && this.motion > 0) {
+          const mid = (e.rows[0] + e.rows[e.rows.length - 1]) / 2;
+          this.shockwaves.push({ y: (mid - BUFFER + 0.5) * S, t: 0, strength: this.motion });
+        }
         this.kick(0, S * (2 + info.lines * 2), info.spin !== "none" ? (Math.random() < 0.5 ? -0.08 : 0.08) : 0);
         const lines: ActionText["lines"] = [];
         const clearWord = ["", "SINGLE", "DOUBLE", "TRIPLE", "QUAD"][Math.min(info.lines, 4)];
@@ -173,6 +212,10 @@ export class BoardView {
           t: 0, life: 1.4,
         });
         break;
+      case "garbage-in":
+        this.recoilDir = -this.recoilDir;
+        this.kick(this.recoilDir * S * (60 + Math.min(10, e.amount) * 12), 0);
+        break;
       case "garbage-tank":
         this.kick(0, -S * (4 + e.amount * 1.5));
         break;
@@ -185,21 +228,34 @@ export class BoardView {
     }
   }
 
-  private burst(rows: number[], color: string, intensity: number): void {
+  /** Break each cleared cell into fragments that fly out and fall. */
+  private shatter(rows: number[], piece: PieceType): void {
+    const k = this.motion;
+    if (k <= 0) return;
     const { S } = this.layout;
+    const parts = k >= 1.5 ? 3 : k >= 0.75 ? 2 : 1;
+    const size = S / parts;
+    const mid = (BOARD_W * S) / 2;
     for (const row of rows) {
-      const n = Math.round(18 * intensity);
-      for (let i = 0; i < n; i++) {
-        this.particles.push({
-          x: Math.random() * BOARD_W * S,
-          y: (row - BUFFER + 0.5) * S,
-          vx: (Math.random() - 0.5) * S * 30,
-          vy: (Math.random() - 0.8) * S * 22,
-          life: 0,
-          max: 0.5 + Math.random() * 0.6,
-          color: Math.random() < 0.5 ? color : "#ffffff",
-          size: S * (0.08 + Math.random() * 0.14),
-        });
+      const cells = this.lockedRows.get(row);
+      for (let x = 0; x < BOARD_W; x++) {
+        const color = COLORS[cells?.[x] ?? piece];
+        for (let px = 0; px < parts; px++) {
+          for (let py = 0; py < parts; py++) {
+            const cx = x * S + (px + 0.5) * size;
+            const cy = (row - BUFFER) * S + (py + 0.5) * size;
+            this.fragments.push({
+              x: cx, y: cy,
+              vx: ((cx - mid) / mid + (Math.random() - 0.5) * 1.4) * S * 9 * k,
+              vy: -(0.3 + Math.random()) * S * 14 * k,
+              rot: 0,
+              vr: (Math.random() - 0.5) * 14 * k,
+              life: 0,
+              max: 0.7 + Math.random() * 0.5,
+              color, size, part: [px, py], parts,
+            });
+          }
+        }
       }
     }
   }
@@ -214,15 +270,21 @@ export class BoardView {
     s.x += s.vx * dt;
     s.y += s.vy * dt;
     s.r += s.vr * dt;
+    const q = this.squash;
+    q.v += (-320 * q.s - 11 * q.v) * dt;
+    q.s = Math.max(-0.2, Math.min(0.2, q.s + q.v * dt));
     const g = this.layout.S * 40;
-    for (const p of this.particles) {
-      p.life += dt;
-      p.vy += g * dt;
-      p.vx *= 1 - 1.5 * dt;
-      p.x += p.vx * dt;
-      p.y += p.vy * dt;
+    for (const f of this.fragments) {
+      f.life += dt;
+      f.vy += g * dt;
+      f.vx *= 1 - 1.2 * dt;
+      f.x += f.vx * dt;
+      f.y += f.vy * dt;
+      f.rot += f.vr * dt;
     }
-    this.particles = this.particles.filter((p) => p.life < p.max);
+    this.fragments = this.fragments.filter((f) => f.life < f.max);
+    for (const w of this.shockwaves) w.t += dt;
+    this.shockwaves = this.shockwaves.filter((w) => w.t < SHOCK_LIFE);
     for (const t of this.texts) t.t += dt;
     this.texts = this.texts.filter((t) => t.t < t.life);
     for (const f of this.flashes) f.t += dt;
@@ -244,8 +306,27 @@ export class BoardView {
     const effective = BOARD_H - top + Math.min(8, this.game.pendingGarbage());
     const target = effective > 15 ? Math.min(1, (effective - 15) / 4) : 0;
     this.danger += (target - this.danger) * Math.min(1, dt * 6);
+    // heartbeat: lub-dub every 1.2 s once danger passes 0.5
+    if (this.danger > 0.5 && this.motion > 0) {
+      this.heartT = (this.heartT + dt) % 1.2;
+      const beat = (at: number, w: number) => Math.exp(-(((this.heartT - at) / w) ** 2));
+      const amp = ((this.danger - 0.5) / 0.5) * 0.022 * this.motion;
+      this.heartbeat = amp * (beat(0.08, 0.05) + 0.65 * beat(0.32, 0.05));
+    } else {
+      this.heartT = 0;
+      this.heartbeat = 0;
+    }
+    if (this.reduceMotion) {
+      // settle instantly so toggling it mid-game leaves the board still
+      this.spring = { x: 0, y: 0, r: 0, vx: 0, vy: 0, vr: 0 };
+      this.squash = { s: 0, v: 0 };
+      this.fragments = [];
+      this.shockwaves = [];
+    }
   }
 }
+
+const SHOCK_LIFE = 0.55;
 
 export interface Flight {
   from: [number, number];
@@ -414,6 +495,14 @@ export class Renderer {
     ctx.save();
     ctx.translate(bx + bw / 2 + s.x * 0.05, by + bh / 2 + s.y * 0.05);
     ctx.rotate(s.r * 0.15);
+    // heartbeat pulses about the centre
+    const hb = 1 + v.heartbeat;
+    ctx.scale(hb, hb);
+    // squash & stretch about the board bottom, keeping area constant
+    const sy = 1 + v.squash.s;
+    ctx.translate(0, bh / 2);
+    ctx.scale(1 / sy, sy);
+    ctx.translate(0, -bh / 2);
     ctx.translate(-(bx + bw / 2), -(by + bh / 2));
 
     // board well
@@ -493,6 +582,25 @@ export class Renderer {
       }
     }
 
+    // shockwaves from spin and B2B clears, kept inside the well
+    if (v.shockwaves.length) {
+      ctx.save();
+      ctx.beginPath();
+      ctx.rect(bx, by - S * 3, bw, bh + S * 3);
+      ctx.clip();
+      for (const w of v.shockwaves) {
+        const p = w.t / SHOCK_LIFE;
+        const e = 1 - (1 - p) ** 3;
+        ctx.globalAlpha = (1 - p) * Math.min(1, 0.55 * w.strength);
+        ctx.strokeStyle = "#ffffff";
+        ctx.lineWidth = S * 0.5 * (1 - p) + 1;
+        ctx.beginPath();
+        ctx.arc(bx + bw / 2, by + w.y, S * (0.5 + 8 * w.strength * e), 0, Math.PI * 2);
+        ctx.stroke();
+      }
+      ctx.restore();
+    }
+
     // board frame
     const danger = v.danger;
     ctx.strokeStyle = danger > 0.02 ? `rgba(255,${Math.round(255 * (1 - danger))},${Math.round(255 * (1 - danger))},0.95)` : "rgba(255,255,255,0.85)";
@@ -514,11 +622,17 @@ export class Renderer {
     this.drawHold(v);
     this.drawNext(v);
 
-    // particles
-    for (const p of v.particles) {
-      ctx.globalAlpha = 1 - p.life / p.max;
-      ctx.fillStyle = p.color;
-      ctx.fillRect(bx + p.x, by + p.y, p.size, p.size);
+    // fragments of cleared cells
+    const px = Math.round(S * this.dpr);
+    for (const f of v.fragments) {
+      const sprite = this.skin.get(f.color, px);
+      const src = px / f.parts;
+      ctx.globalAlpha = Math.min(1, 2 * (1 - f.life / f.max));
+      ctx.save();
+      ctx.translate(bx + f.x, by + f.y);
+      ctx.rotate(f.rot);
+      ctx.drawImage(sprite, f.part[0] * src, f.part[1] * src, src, src, -f.size / 2, -f.size / 2, f.size, f.size);
+      ctx.restore();
     }
     ctx.globalAlpha = 1;
 

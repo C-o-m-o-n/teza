@@ -232,6 +232,7 @@ button { font: inherit; color: inherit; }
 }
 .panel output { font-family: var(--display); font-size: 14px; text-align: right; }
 .panel input[type="range"] { width: 100%; accent-color: #3f6bff; }
+.panel input[type="checkbox"] { justify-self: start; width: 18px; height: 18px; margin: 0; accent-color: #3f6bff; }
 .keys .row { grid-template-columns: 1fr 104px 104px; }
 .key {
   border: 1px solid var(--line);

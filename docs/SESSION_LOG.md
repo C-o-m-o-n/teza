@@ -158,3 +158,18 @@
 
 **Still open**
 - e2e is not in `npm run check` or CI (needs a browser install there).
+
+## 2026-10-14 — Board physics and Reduce motion (factory job 006)
+
+**What changed**
+- Hard drop stretches the board up and then squashes it, about the board bottom, on its own spring.
+- Each cleared cell breaks into 1, 4 or 9 shards, depending on bounciness. The shards keep the cell's colour, fly out, spin, fall and fade. They replace the old confetti; the white flash stays.
+- Spin and B2B clears send a white ring outward from the cleared rows.
+- When danger is above 0.5 the board pulses in a lub-dub every 1.2 s.
+- Incoming garbage (`garbage-in`) knocks the board sideways, alternating left and right.
+- Every new effect scales with bounciness and is off at 0%.
+- New CONFIG › AUDIO & VISUAL toggle: Reduce motion (`reduceMotion` in `teza:settings`). It and the OS `prefers-reduced-motion` setting both turn off every board movement, including the old spring kicks. Changes to the OS setting apply live. Flash, action text and the danger colour stay.
+- `test/board-view.test.ts` covers the BoardView logic without a canvas.
+
+**Still open**
+- Nothing known.
