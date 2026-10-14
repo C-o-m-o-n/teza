@@ -137,3 +137,14 @@
 
 **Still open**
 - Same as before: no rate-limit rule for `/api/account/*` yet; ↑/↓ order on narrow screens.
+
+## 2026-10-14 — Player accounts (factory job 003, rework 3)
+
+**What changed**
+- SIGN OUT treats a 401 from the records `PUT` or the logout as already signed out: it clears the account and the local records instead of showing an error. After a 401 on the `PUT`, logout is skipped and that last upload is lost (the server keeps every earlier one). Network errors, timeouts and other non-2xx still keep the player signed in with the inline error.
+- The button reads SIGNING OUT… while it waits.
+- `test/account-client.test.ts` covers both 401 paths.
+- README: the Cloudflare zone rate-limit rule now covers all of `/api/*` on teza.comonhq.com (the user widened it in the dashboard), so login and register are rate-limited.
+
+**Still open**
+- ↑/↓ order on narrow screens still follows DOM order (bars first, then SIGN IN).
