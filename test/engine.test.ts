@@ -66,7 +66,7 @@ describe("spawn, gravity, locking", () => {
 
 describe("handling", () => {
   it("DAS 10 / ARR 2: tap, then auto-repeat every 2 frames", () => {
-    const g = new Game({ g: 0 }, { das: 10, arr: 2, dcd: 0, sdf: 6 });
+    const g = new Game({ g: 0 }, { das: 10, arr: 2, dcd: 0, sdf: 6, irs: true, ihs: true });
     const x0 = g.piece.x;
     g.press("left");
     expect(g.piece.x).toBe(x0 - 1);
@@ -79,7 +79,7 @@ describe("handling", () => {
   });
 
   it("ARR 0 teleports to the wall once DAS charges", () => {
-    const g = new Game({ g: 0 }, { das: 8, arr: 0, dcd: 0, sdf: 6 });
+    const g = new Game({ g: 0 }, { das: 8, arr: 0, dcd: 0, sdf: 6, irs: true, ihs: true });
     g.press("right");
     g.advance(8);
     const cells = g.cellsOf(g.piece.type, g.piece.x, g.piece.y, g.piece.r);
@@ -87,7 +87,7 @@ describe("handling", () => {
   });
 
   it("latest direction wins and falls back to the still-held key", () => {
-    const g = new Game({ g: 0 }, { das: 10, arr: 2, dcd: 0, sdf: 6 });
+    const g = new Game({ g: 0 }, { das: 10, arr: 2, dcd: 0, sdf: 6, irs: true, ihs: true });
     const x0 = g.piece.x;
     g.press("left");
     g.press("right");

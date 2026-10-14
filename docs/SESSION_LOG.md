@@ -198,3 +198,13 @@
 - `npm run e2e` BLITZ takes about 2.2 min of real time (1.4 min on main). The menu and session music create voices under the fake clock.
 - A browser that saved settings from an earlier build of this branch keeps its saved music volume (40%), not the new 60% default.
 - Judged by measurement only. The sandbox has no audio output, so nobody has listened to the mix yet.
+
+## 2026-10-14 — Finesse counter and IRS/IHS (factory job 008)
+
+**What changed**
+- IRS and IHS (`handling.irs`, `handling.ihs`, both on by default; toggles in CONFIG › HANDLING). With no spawn delay, they act on rotate/hold keys held when a piece spawns after a lock: IHS holds once, then IRS rotates the new piece with the most recently pressed rotate key still held. Neither counts as an input.
+- Finesse faults: the player's game counts left/right/rotate presses per piece and adds the excess over an empty-board BFS minimum (`src/engine/finesse.ts`) at each lock. Shown live as FINESSE in 40 LINES and on every results screen.
+- The match server replays inputs with an explicit `MATCH_HANDLING` and sends it in `start`, so an online client can apply IRS/IHS exactly as the server does.
+
+**Still open**
+- There is no online client yet. When one is written it must build its Game with `start.handling`, and send releases for held keys when it calls `releaseAll` on blur.

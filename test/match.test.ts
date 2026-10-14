@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
-import { Action, Game } from "../src/engine/game";
+import { Action, Game, Handling } from "../src/engine/game";
 import {
-  Clock, Conn, Envelope, IDLE_TIMEOUT_MS, LOBBY_TIMEOUT_MS, MAX_LAG_FRAMES, MAX_PENDING, MatchSession, Peer,
+  Clock, Conn, Envelope, IDLE_TIMEOUT_MS, LOBBY_TIMEOUT_MS, MATCH_HANDLING, MAX_LAG_FRAMES, MAX_PENDING, MatchSession, Peer,
   RECONNECT_GRACE_MS, RESUME_TIMEOUT_MS, ResumeRequest, SEND_BUFFER, matchOptions,
 } from "../src/server/match";
 
@@ -236,6 +236,45 @@ describe("match: inputs", () => {
     expect(replay.piece).toEqual(server.piece);
     expect(replay.queue).toEqual(server.queue);
     expect(server.stats.pieces).toBe(4);
+  });
+
+  it("sends its handling in start, and IRS/IHS from held keys replay identically with it", () => {
+    const { clock, session, p0, p1 } = setup();
+    const start = p1.peer.of("start")[0].d as { seed: number; handling: Handling };
+    expect(start.handling).toEqual(MATCH_HANDLING);
+    expect(start.handling).toMatchObject({ irs: true, ihs: true });
+    // cw and hold stay held across both hard drops, so the server applies IHS and IRS at each spawn
+    const script: [number, Action, "press" | "release"][] = [
+      [5, "cw", "press"], [6, "hold", "press"], [10, "hard", "press"], [20, "hard", "press"],
+      [21, "cw", "release"], [22, "hold", "release"], [30, "hard", "press"],
+    ];
+    for (const [frame, action, kind] of script) {
+      clock.advance(250);
+      input(session, p0, frame, action, kind);
+    }
+    expect(p0.peer.of("error")).toEqual([]);
+    const server = session.game(0)!;
+    expect(server.stats.holds).toBe(3); // one pressed, two initial holds
+
+    const replay = (handling: Handling) => {
+      const g = new Game(matchOptions(start.seed), handling);
+      for (const m of p1.peer.of("opponentInput")) {
+        const d = m.d as { frame: number; action: Action; kind: string };
+        g.advance(d.frame - g.frame);
+        if (d.kind === "press") g.press(d.action);
+        else g.release(d.action);
+      }
+      return g;
+    };
+    const same = replay(start.handling);
+    expect(same.stats).toEqual(server.stats);
+    expect(same.board).toEqual(server.board);
+    expect(same.piece).toEqual(server.piece);
+    expect(same.hold).toBe(server.hold);
+    // a client that used its own settings instead would drift, which is why `start` carries them
+    const own = replay({ ...start.handling, irs: false, ihs: false });
+    expect(own.stats.holds).toBe(1);
+    expect(own.board).not.toEqual(server.board);
   });
 
   it("rejects a frame too far behind the server clock", () => {

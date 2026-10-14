@@ -66,7 +66,7 @@ Messages are JSON envelopes `{t, s, a, d}` in both directions: type, sequence nu
 | Server to client | `d` |
 |---|---|
 | `welcome` | `{slot, token}`: slot 0 or 1 and the resume token |
-| `start` | `{seed, options}`: both players get the same seed and the VS rules |
+| `start` | `{seed, options, handling}`: both players get the same seed, the VS rules and the handling the server replays inputs with (DAS/ARR/DCD/SDF and IRS/IHS; a client must use it, not its own settings, to stay in sync) |
 | `opponentInput` | `{frame, action, kind}`: an input the server accepted from the opponent |
 | `garbage` | `{amount, frame}`: attack received, applied at your current server frame |
 | `opponentDisconnected` | `{grace}`: ms the opponent has to come back (15000) |

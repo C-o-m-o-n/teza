@@ -8,7 +8,7 @@
 // (per slot, increments per packet sent), ack (last `s` received from the other side) and
 // payload. The last 100 packets per slot are kept so a reconnecting client can catch up.
 
-import { Action, Game } from "../engine/game";
+import { Action, DEFAULT_HANDLING, Game, Handling } from "../engine/game";
 import { modeById } from "../modes";
 
 export const MAX_MESSAGE_BYTES = 1024;
@@ -29,6 +29,12 @@ const ACTIONS: readonly string[] = ["left", "right", "soft", "hard", "cw", "ccw"
 export function matchOptions(seed: number) {
   return modeById("vs").options(seed);
 }
+
+/**
+ * The handling the server's engines replay inputs with, sent in `start`. IRS and IHS act on
+ * keys held at a spawn, so a client must use these values (not its own settings) to stay in sync.
+ */
+export const MATCH_HANDLING: Handling = { ...DEFAULT_HANDLING };
 
 export interface Envelope {
   t: string;
@@ -304,7 +310,7 @@ export class MatchSession {
     const seed = this.random.seed();
     const options = matchOptions(seed);
     for (const slot of this.slots) {
-      const game = new Game(options);
+      const game = new Game(options, MATCH_HANDLING);
       game.onAttack = (amount) => {
         const target = this.other(slot);
         if (!target.game) return;
@@ -313,7 +319,7 @@ export class MatchSession {
       };
       slot.game = game;
     }
-    for (const slot of this.slots) this.send(slot, "start", { seed, options });
+    for (const slot of this.slots) this.send(slot, "start", { seed, options, handling: MATCH_HANDLING });
   }
 
   private resume(conn: Conn, d: unknown): void {

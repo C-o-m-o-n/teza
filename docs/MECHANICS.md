@@ -21,6 +21,12 @@ Electron shell that loads https://tetr.io, so it contains no game logic.
 - Default handling: ARR 2, DAS 10, DCD 2, SDF 6 (41 = instant). Soft drop = `max(g·sdf, 0.05·sdf)`.
 - `gincrease` / `garbageincrease` are per second, applied as `/60` each frame after their margin.
 
+## IRS / IHS and finesse
+- There is no spawn delay, so IRS/IHS act on keys held at the moment a piece spawns after a lock (not the first piece, not a ZEN wipe). Settings `handling.irs` / `handling.ihs` (CONFIG › HANDLING), both on by default.
+- IHS: hold held → the normal hold, once (the hold's own spawn doesn't chain). IRS: the most recently pressed rotate key still held → one rotation with normal kicks (a held 180 does nothing when 180 is off). IHS goes first, then IRS rotates the swapped-in piece. Neither counts as an input.
+- Finesse (player only, `trackFinesse`): per piece, left/right/cw/ccw/180 presses since it spawned (a DAS slide is one press; drops, hold and IRS/IHS don't count). On lock, `max(0, used − minimum)` is added to `stats.finesse`. The minimum (`src/engine/finesse.ts`) is a BFS on an empty board from spawn: tap left/right, slide to either wall, cw/ccw/180, kicks' horizontal part only, no floor. Placements are compared by cell set; one no BFS move reaches (a tuck or spin) counts 0.
+- Online matches: the server replays inputs with `MATCH_HANDLING` and sends it in `start`, so a client using it applies IRS/IHS exactly as the server does.
+
 ## Attack
 Base: single 0, double 1, triple 2, quad 4; T-spin S/D/T/Q 2/4/6/10; mini S/D/T 0/1/2. All clear +10.
 - B2B (btb > 1): +1, or with chaining `floor(1+log1p((btb-1)·0.8)) + (btb-1==1 ? 0 : (1 + log1p((btb-1)·0.8) % 1)/3)`.

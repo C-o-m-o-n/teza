@@ -2,6 +2,7 @@ import {
   ATTACK, BOARD_T, BOARD_W, BUFFER, Cell, DEFAULT_OPTIONS, GameOptions, I_KICKS, KICKS,
   PIECES, PieceType, Rotation, SCORING, SHAPES, T_CORNERS,
 } from "./constants";
+import { minInputs } from "./finesse";
 import { Rng } from "./rng";
 
 export type Spin = "none" | "mini" | "normal";
@@ -12,9 +13,13 @@ export interface Handling {
   arr: number; // frames, 0 = instant
   dcd: number; // frames
   sdf: number; // soft drop factor, 41 = instant
+  irs: boolean; // initial rotation: a rotate key held when a piece spawns after a lock rotates it
+  ihs: boolean; // initial hold: the hold key held when a piece spawns after a lock holds it
 }
 
-export const DEFAULT_HANDLING: Handling = { das: 10, arr: 2, dcd: 2, sdf: 6 };
+export const DEFAULT_HANDLING: Handling = { das: 10, arr: 2, dcd: 2, sdf: 6, irs: true, ihs: true };
+
+type RotateAction = "cw" | "ccw" | "180";
 
 export interface Falling {
   type: PieceType;
@@ -90,6 +95,7 @@ export interface Stats {
   combo: number;
   maxCombo: number;
   holds: number;
+  finesse: number; // inputs over the minimum, summed over pieces (only with trackFinesse)
   clears: Record<string, number>;
 }
 
@@ -108,6 +114,8 @@ export class Game {
   result: "clear" | "topout" | null = null;
   stats: Stats;
   incoming: Incoming[] = [];
+  /** Count finesse faults at each lock. Only the player's game needs it. */
+  trackFinesse = false;
 
   /** Called with each outgoing attack after cancellation (VS mode). */
   onAttack: ((amount: number) => void) | null = null;
@@ -122,6 +130,9 @@ export class Game {
   private totalRotations = 0;
   private garbageId = 0;
   private lastColumn: number | null = null;
+  private heldRotations: RotateAction[] = []; // rotate keys held, most recent last
+  private holdHeld = false;
+  private pieceInputs = 0; // left/right/rotate presses since the current piece spawned
 
   constructor(opts: Partial<GameOptions> = {}, handling: Handling = DEFAULT_HANDLING) {
     this.opts = { ...DEFAULT_OPTIONS, ...opts };
@@ -134,7 +145,7 @@ export class Game {
     this.stats = {
       pieces: 0, inputs: 0, lines: 0, score: 0, level: 1, levelLines: 0, levelLinesNeeded: 0,
       attack: 0, sent: 0, received: 0, cancelled: 0, btb: 0, maxBtb: 0, combo: 0, maxCombo: 0,
-      holds: 0, clears: {},
+      holds: 0, finesse: 0, clears: {},
     };
     if (this.opts.levels) this.setLevel(1);
     this.spawn();
@@ -224,6 +235,15 @@ export class Game {
   press(action: Action): void {
     if (this.over) return;
     this.stats.inputs++;
+    if (action === "cw" || action === "ccw" || action === "180") {
+      this.heldRotations = this.heldRotations.filter((a) => a !== action);
+      this.heldRotations.push(action);
+    } else if (action === "hold") {
+      this.holdHeld = true;
+    }
+    if (action === "left" || action === "right" || action === "cw" || action === "ccw" || (action === "180" && this.opts.allow180)) {
+      this.pieceInputs++;
+    }
     switch (action) {
       case "left":
       case "right": {
@@ -264,6 +284,10 @@ export class Game {
       if (this.lastShift === s.dir && other.held) this.lastShift = other.dir;
     } else if (action === "soft") {
       this.softdrop = false;
+    } else if (action === "hold") {
+      this.holdHeld = false;
+    } else if (action === "cw" || action === "ccw" || action === "180") {
+      this.heldRotations = this.heldRotations.filter((a) => a !== action);
     }
   }
 
@@ -271,6 +295,8 @@ export class Game {
   releaseAll(): void {
     this.lShift.held = this.rShift.held = false;
     this.softdrop = false;
+    this.heldRotations = [];
+    this.holdHeld = false;
   }
 
   private processShift(s: Shift, dt: number): void {
@@ -484,6 +510,7 @@ export class Game {
       spin: "none", kick: -1, hitWall: false, forceLock: false,
     };
     this.totalRotations = 0;
+    this.pieceInputs = 0;
     this.applyDCD();
     if (!this.isLegal(t, x, y, 0)) this.finish("topout");
   }
@@ -495,6 +522,10 @@ export class Game {
     const cells = this.cellsOf(p.type, p.x, p.y, p.r);
     for (const [cx, cy] of cells) this.board[cy][cx] = p.type;
     this.stats.pieces++;
+    if (this.trackFinesse) {
+      const min = minInputs(p.type, cells, this.opts.allow180);
+      if (min !== null) this.stats.finesse += Math.max(0, this.pieceInputs - min);
+    }
     this.emit({ type: "lock", piece: p.type });
     const lockedAbove = cells.every(([, cy]) => cy < BUFFER);
 
@@ -523,6 +554,18 @@ export class Game {
     }
     this.holdLocked = false;
     this.spawn();
+    this.initialActions();
+  }
+
+  /** IHS then IRS for a piece that just spawned after a lock. The keys were counted when pressed. */
+  private initialActions(): void {
+    const h = this.handling;
+    if (h.ihs && this.holdHeld && !this.over) this.doHold();
+    const rot = this.heldRotations[this.heldRotations.length - 1];
+    if (!h.irs || !rot || this.over) return;
+    if (rot === "cw") this.rotate(1);
+    else if (rot === "ccw") this.rotate(3);
+    else if (this.opts.allow180) this.rotate(2);
   }
 
   /** Applies score/attack for a lock. Returns true when garbage entry is blocked this piece. */
@@ -688,6 +731,7 @@ export class Game {
     raw.listeners = [];
     raw.lShift = { ...this.lShift };
     raw.rShift = { ...this.rShift };
+    raw.heldRotations = this.heldRotations.slice();
     raw.bagRng = Object.assign(Object.create(Rng.prototype), this.bagRng);
     raw.garbageRng = Object.assign(Object.create(Rng.prototype), this.garbageRng);
     c.onAttack = null;

@@ -733,6 +733,7 @@ export class Renderer {
       rows.push(["TIME", time.main, time.ms]);
       rows.push(["LINES", `${g.stats.lines}`, `/${v.opts.objectiveLines ?? 40}`]);
       rows.push(["PIECES", `${g.stats.pieces}`, `${g.pps().toFixed(2)}/S`]);
+      rows.push(["FINESSE", `${g.stats.finesse}`]);
     } else if (v.opts.mode === "blitz") {
       const left = Math.max(0, 120 - secs);
       const t = formatTime(left * 60);
