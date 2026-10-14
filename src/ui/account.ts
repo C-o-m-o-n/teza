@@ -60,22 +60,35 @@ export async function signIn(kind: "login" | "register", username: string, passw
   return res.status === 404 ? "Accounts aren't available on this server." : `Account server error (${res.status}).`;
 }
 
-/** True when the server answered 2xx, false on any other status or a network error. */
-export async function signOut(): Promise<boolean> {
-  const res = await send("POST", "logout", {});
-  return res?.ok ?? false;
+/** The outcome of a sign-out step: 2xx, 401 (the session is already gone), or anything else. */
+export type Outcome = "ok" | "expired" | "failed";
+
+function outcome(res: Response | null): Outcome {
+  if (res?.ok) return "ok";
+  return res?.status === 401 ? "expired" : "failed";
+}
+
+/** "failed" on a network error or any status other than 2xx and 401. */
+export async function signOut(): Promise<Outcome> {
+  return outcome(await send("POST", "logout", {}));
 }
 
 /** The server keeps the better of its records and these. True when it answered 2xx. */
 export async function putRecords(records: Records): Promise<boolean> {
-  const res = await send("PUT", "records", { records });
-  return res?.ok ?? false;
+  return (await uploadRecords(records)) === "ok";
+}
+
+async function uploadRecords(records: Records): Promise<Outcome> {
+  return outcome(await send("PUT", "records", { records }));
 }
 
 /**
  * Uploads the records, then logs out; logout is only tried once the upload succeeded.
+ * A 401 from either means the server session has already ended, so that counts as signed out.
  * False means the caller must stay signed in and keep its local records.
  */
 export async function finishSession(records: Records): Promise<boolean> {
-  return (await putRecords(records)) && (await signOut());
+  const upload = await uploadRecords(records);
+  if (upload !== "ok") return upload === "expired";
+  return (await signOut()) !== "failed";
 }

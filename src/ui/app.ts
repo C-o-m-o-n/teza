@@ -424,14 +424,17 @@ export class App {
     const error = el("p", { class: "form-error", role: "alert" });
     signOutBtn.addEventListener("click", async () => {
       signOutBtn.disabled = true;
+      signOutBtn.textContent = "SIGNING OUT…";
       error.textContent = "";
       if (!(await finishSession(this.records))) {
         // Still signed in on the server (or its copy of the records is behind): keep everything.
         error.textContent = "Couldn't sign out — check your connection";
+        signOutBtn.textContent = "SIGN OUT";
         signOutBtn.disabled = false;
         return;
       }
-      // The records belong to the account now; a shared device must not hand them to the next player.
+      // Signed out. A shared device must not hand these records to the next player. After a 401 the
+      // session had already ended and this last upload was refused; the server keeps every earlier one.
       this.account = null;
       this.records = { vs: {} };
       saveRecords(this.records);

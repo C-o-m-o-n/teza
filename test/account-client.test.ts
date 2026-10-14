@@ -28,13 +28,15 @@ describe("account client", () => {
     vi.unstubAllGlobals();
   });
 
-  it("signOut and putRecords are true only for 2xx", async () => {
-    stubFetch(204, 401, "network");
-    expect(await signOut()).toBe(true);
-    expect(await signOut()).toBe(false);
-    expect(await signOut()).toBe(false);
-    stubFetch(200, 400, 503, "network");
+  it("putRecords is true only for 2xx; signOut tells 2xx, 401 and other failures apart", async () => {
+    stubFetch(204, 401, 500, "network");
+    expect(await signOut()).toBe("ok");
+    expect(await signOut()).toBe("expired");
+    expect(await signOut()).toBe("failed");
+    expect(await signOut()).toBe("failed");
+    stubFetch(200, 400, 401, 503, "network");
     expect(await putRecords(records)).toBe(true);
+    expect(await putRecords(records)).toBe(false);
     expect(await putRecords(records)).toBe(false);
     expect(await putRecords(records)).toBe(false);
     expect(await putRecords(records)).toBe(false);
@@ -55,11 +57,23 @@ describe("account client", () => {
   });
 
   it("a failed logout fails sign-out", async () => {
-    for (const answer of [500, 401, "network"] as Answer[]) {
+    for (const answer of [500, 403, "network"] as Answer[]) {
       const calls = stubFetch(200, answer);
       expect(await finishSession(records)).toBe(false);
       expect(calls).toEqual(["PUT /api/account/records", "POST /api/account/logout"]);
     }
+  });
+
+  it("a 401 from the records upload counts as signed out and skips logout", async () => {
+    const calls = stubFetch(401, 500);
+    expect(await finishSession(records)).toBe(true);
+    expect(calls).toEqual(["PUT /api/account/records"]);
+  });
+
+  it("a 401 from logout counts as signed out", async () => {
+    const calls = stubFetch(200, 401);
+    expect(await finishSession(records)).toBe(true);
+    expect(calls).toEqual(["PUT /api/account/records", "POST /api/account/logout"]);
   });
 
   it("a hanging request is aborted after the timeout and fails sign-out", async () => {
