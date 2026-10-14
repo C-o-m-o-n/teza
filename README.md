@@ -18,6 +18,15 @@ npm start          # → open http://localhost:3000 (rebuilds when you save a fi
 
 Other scripts: `npm run check` (typecheck + tests + build) and `npm run build` (production build into `dist/`; it's plain static files, so any web server can host it).
 
+### End-to-end runs
+
+```bash
+npx playwright install chromium   # once, downloads the browser Playwright drives
+npm run e2e
+```
+
+`npm run e2e` builds `dist/`, serves it from a small static server on a free localhost port (no dev server or network needed) and plays two full games in headless Chromium: a 40 LINES run to `40 LINES CLEARED` and a 2-minute BLITZ run to `TIME'S UP`. Each run opens the game with `?seed=7` (a `?seed=<positive integer>` URL parameter fixes the piece sequence) and presses keys from a plan the game's own bot computes in Node (`e2e/plan.ts`). Playwright's fake clock drives time, so the runs are identical every time and take about 1.5 minutes of real time. The BLITZ score in the browser must equal the score of the same inputs replayed in Node, and any page error or `console.error` fails the run. The e2e files (`e2e/*.e2e.ts`) are not part of `npm test` or `npm run check`.
+
 ## Deploy
 
 Every push to `main` deploys to Cloudflare Workers through `.github/workflows/deploy.yml`. It runs `npm ci` and `npm run check`, then `wrangler deploy` publishes `dist/` as static assets plus the game server Worker (see `wrangler.jsonc`). The job then checks that `/` and `/game.js` load from https://teza.comonhq.com, and that `/api/match/ci-check` (no upgrade header) returns 426, which proves the Worker route is live and not only the assets.
@@ -127,3 +136,4 @@ For local testing of the API, build and run `npx wrangler dev --local-upstream 1
 - `src/audio/` — synthesized WebAudio SFX
 - `src/ui/` — menus, config, results, session orchestration
 - `test/` — engine, bot, match server and accounts tests (vitest)
+- `e2e/` — browser runs of 40 LINES and BLITZ (Playwright, `npm run e2e`)

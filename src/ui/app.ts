@@ -162,7 +162,10 @@ export class App {
 
   private startSession(modeId: ModeId, profile: BotProfile | null = null): void {
     const mode = modeById(modeId);
-    const seed = Math.floor(Math.random() * 2147483646) + 1;
+    // `?seed=<positive integer>` fixes the piece sequence (the e2e runs use it); otherwise random.
+    const param = new URLSearchParams(location.search).get("seed") ?? "";
+    const fixed = /^\d{1,10}$/.test(param) ? Number(param) : 0;
+    const seed = fixed >= 1 && fixed <= 2147483646 ? fixed : Math.floor(Math.random() * 2147483646) + 1;
     const player = new Game(mode.options(seed), this.settings.handling);
     const playerView = new BoardView(player, {
       accent: mode.accent, mode: mode.id, objectiveLines: 40, label: mode.id === "vs" ? "YOU" : undefined,
