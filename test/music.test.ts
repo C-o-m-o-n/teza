@@ -1,5 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { BLITZ_BOOST, COMBO_CAP, LAYERS, blitzBoost, comboNotes, layerLevels, tempoFor } from "../src/audio/music";
+import {
+  BLITZ_BOOST, COMBO_CAP, LAYERS, LAYER_DROP, blitzBoost, comboNotes, layerLevels, musicIntensity, nextLayerLevels, tempoFor,
+} from "../src/audio/music";
 import { SOUND_PACKS, degreeFreq, packById } from "../src/audio/packs";
 import { panForColumn } from "../src/audio/sfx";
 import { defaultSettings, loadSettings } from "../src/settings";
@@ -39,6 +41,59 @@ describe("layerLevels", () => {
       expect(layerLevels(l.at)[l.id]).toBeGreaterThan(0);
     }
     expect(LAYERS.map((l) => l.at)).toEqual([0, 0.15, 0.4, 0.7]);
+  });
+});
+
+describe("musicIntensity", () => {
+  const calm = { danger: 0, stackRows: 0, combo: 0, boost: 1 };
+  const layersAt = (over: Partial<typeof calm>) => layerLevels(musicIntensity({ ...calm, ...over }));
+
+  it("is 0 on an empty board with no combo, so only the pad plays", () => {
+    expect(musicIntensity(calm)).toBe(0);
+  });
+
+  it("brings in bass+kick in a normal mid-game stack and arpeggio+hats from 10 rows", () => {
+    expect(layersAt({ stackRows: 3 }).bass).toBe(0);
+    expect(layersAt({ stackRows: 4 }).bass).toBe(1);
+    expect(layersAt({ stackRows: 8 }).arp).toBe(0);
+    expect(layersAt({ stackRows: 10 }).arp).toBe(1);
+    expect(layersAt({ stackRows: 12 }).lead).toBe(0);
+    let prev = 0;
+    for (let rows = 0; rows <= 20; rows++) {
+      const i = musicIntensity({ ...calm, stackRows: rows });
+      expect(i).toBeGreaterThanOrEqual(prev);
+      prev = i;
+    }
+  });
+
+  it("rises with a running combo", () => {
+    expect(layersAt({ combo: 1 }).bass).toBe(1);
+    expect(layersAt({ combo: 3 }).arp).toBe(1);
+    expect(musicIntensity({ ...calm, combo: 20 })).toBeLessThan(0.7);
+  });
+
+  it("follows danger when it is the strongest signal", () => {
+    expect(musicIntensity({ ...calm, stackRows: 18, danger: 0.9 })).toBe(0.9);
+  });
+
+  it("brings the arpeggio in for Blitz's final 30 s and reaches full intensity at time-up", () => {
+    expect(musicIntensity({ ...calm, boost: blitzBoost(5400, 7200) })).toBe(0);
+    expect(layersAt({ boost: blitzBoost(5401, 7200) }).arp).toBe(1);
+    expect(musicIntensity({ ...calm, boost: blitzBoost(7200, 7200) })).toBe(1);
+    // tempo through Blitz's final 30 s on an empty board: 100 BPM -> 187.5 BPM
+    expect(tempoFor(musicIntensity({ ...calm, boost: blitzBoost(6300, 7200) }), blitzBoost(6300, 7200))).toBeGreaterThan(150);
+    expect(tempoFor(1, BLITZ_BOOST)).toBe(187.5);
+  });
+});
+
+describe("nextLayerLevels", () => {
+  it("keeps a playing layer on until intensity drops LAYER_DROP below its threshold", () => {
+    const off = layerLevels(0);
+    const on = nextLayerLevels(0.4, off);
+    expect(on.arp).toBe(1);
+    expect(nextLayerLevels(0.4 - LAYER_DROP / 2, on).arp).toBe(1);
+    expect(nextLayerLevels(0.4 - LAYER_DROP * 1.5, on).arp).toBe(0);
+    expect(nextLayerLevels(0.4 - LAYER_DROP / 2, off).arp).toBe(0);
   });
 });
 

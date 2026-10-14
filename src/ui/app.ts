@@ -1,8 +1,8 @@
 import { Bot, BOT_PROFILES, BotProfile } from "../ai/bot";
-import { blitzBoost } from "../audio/music";
+import { blitzBoost, musicIntensity } from "../audio/music";
 import { SOUND_PACKS, packById } from "../audio/packs";
 import { music, sfx } from "../audio/sfx";
-import { PieceType, Rotation } from "../engine/constants";
+import { BOARD_H, BUFFER, PieceType, Rotation } from "../engine/constants";
 import { Action, Game, GameEvent } from "../engine/game";
 import { MODES, Mode, ModeId, modeById } from "../modes";
 import { mergeRecords, passwordError, usernameError } from "../profile";
@@ -39,6 +39,14 @@ function keyName(code: string): string {
     AltLeft: "L-ALT", AltRight: "R-ALT", Escape: "ESC", Enter: "ENTER", Backspace: "BKSP",
   };
   return map[code] ?? code.toUpperCase();
+}
+
+/** Height of a game's stack in visible rows (0 = empty board). */
+function stackRows(game: Game): number {
+  for (let y = BUFFER; y < BUFFER + BOARD_H; y++) {
+    if (game.board[y].some((c) => c !== null)) return BUFFER + BOARD_H - y;
+  }
+  return 0;
 }
 
 interface Session {
@@ -127,10 +135,13 @@ export class App {
     const dt = Math.min(0.25, (now - s.last) / 1000);
     s.t += dt;
     if (s.endAt === null) {
-      // only the player's danger drives the music; Blitz speeds up over its final 30 s
+      // only the player's board drives the music; Blitz speeds up over its final 30 s
       const obj = s.player.opts.objective;
       const boost = s.mode.id === "blitz" && obj.type === "timed" ? blitzBoost(s.player.frame, obj.frames) : 1;
-      music.update(s.playerView.danger, boost);
+      const intensity = musicIntensity({
+        danger: s.playerView.danger, stackRows: stackRows(s.player), combo: Math.max(0, s.player.stats.combo - 1), boost,
+      });
+      music.update(intensity, boost);
       if (s.player.stats.combo === 0) music.endCombo();
     }
     if (!s.started) {

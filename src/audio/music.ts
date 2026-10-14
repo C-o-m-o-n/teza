@@ -41,6 +41,38 @@ export function blitzBoost(elapsedFrames: number, totalFrames: number): number {
   return 1 + (BLITZ_BOOST - 1) * clamp01(1 - remaining / BLITZ_RAMP_FRAMES);
 }
 
+/** Hysteresis: a layer that is on stays on until intensity drops this far below its threshold. */
+export const LAYER_DROP = 0.05;
+
+/** Layer levels for `intensity`, given the levels already playing (see LAYER_DROP). */
+export function nextLayerLevels(intensity: number, prev: Record<LayerId, number>): Record<LayerId, number> {
+  const on = layerLevels(intensity);
+  const held = layerLevels(intensity + LAYER_DROP);
+  const out = {} as Record<LayerId, number>;
+  for (const l of LAYERS) out[l.id] = prev[l.id] > 0 ? held[l.id] : on[l.id];
+  return out;
+}
+
+/** What the music reacts to during a session. */
+export interface PlayState {
+  danger: number; // the renderer's danger, 0..1 (0 until the stack is ~15 rows)
+  stackRows: number; // height of the player's stack, 0..20 visible rows
+  combo: number; // on-screen combo ("N COMBO"), 0 when none
+  boost: number; // blitzBoost(), 1 outside the final 30 s of Blitz
+}
+
+/**
+ * Music intensity 0..1 (it drives the layers and tempo). The strongest of: danger; the stack height
+ * (bass+kick from ~4 rows, arpeggio+hats from 10); a running combo; and Blitz's final 30 s, which
+ * starts at the arpeggio layer and rises to full at time-up. An empty board with no combo is 0.
+ */
+export function musicIntensity(s: PlayState): number {
+  const stack = clamp01(s.stackRows / 20) * 0.8;
+  const combo = s.combo > 0 ? Math.min(0.5, 0.1 * (s.combo + 1)) : 0;
+  const blitz = s.boost > 1 ? 0.4 + 0.6 * clamp01((s.boost - 1) / (BLITZ_BOOST - 1)) : 0;
+  return clamp01(Math.max(s.danger, stack, combo, blitz));
+}
+
 // Scale-degree offsets of a combo phrase; it starts higher and runs longer as the combo grows.
 const PHRASE = [0, 2, 4, 2, 5, 4, 7, 6, 9, 7];
 
@@ -70,6 +102,7 @@ const TEMPO_TAU = 1.5; // seconds for the tempo to close ~63% of the gap to its 
 const LAYER_TAU = 0.5;
 const BASS_STEPS = [0, 3, 6, 8, 11, 14];
 const ARP = [0, 2, 4, 7, 4, 2, 4, 9];
+const PULSE = [0, 4, 2, 4]; // quiet quarter-note chord tones under the pad, one per beat
 const TENSION = [6, 8, 4, 6]; // 7th, 9th, 5th, 7th above the chord root
 const SINE: Timbre = { type: "sine", detune: 0, fm: 0 };
 
@@ -149,12 +182,12 @@ export class Music {
     g.linearRampToValueAtTime(0, now + fade);
   }
 
-  /** Per-frame input: the player's danger (0..1) and the tempo multiplier. */
-  update(danger: number, boost: number): void {
+  /** Per-frame input: musicIntensity() (0..1) and the tempo multiplier. */
+  update(intensity: number, boost: number): void {
     const r = this.run;
     if (!r) return;
-    r.target = tempoFor(danger, boost);
-    const levels = layerLevels(danger);
+    r.target = tempoFor(intensity, boost);
+    const levels = nextLayerLevels(intensity, r.levels);
     for (const { id } of LAYERS) {
       if (levels[id] === r.levels[id]) continue;
       r.levels[id] = levels[id];
@@ -219,6 +252,10 @@ export class Music {
       for (const k of [0, 2, 4]) {
         voice(ctx, ch.pad, m.pad, degreeFreq(s, chord + k, -1), t, d16 * 17, { gain: 0.07, attack: m.padAttack, release: d16 * 4, filter: m.brightness });
       }
+    }
+    // a soft pulse on every beat, so even the pad-only state moves
+    if (pos % 4 === 0) {
+      voice(ctx, ch.pad, m.lead, degreeFreq(s, chord + PULSE[pos / 4]), t, d16 * 3, { gain: 0.025, attack: 0.01, filter: m.brightness });
     }
     // the remaining layers are silent below their threshold: skip creating their voices
     if (r.levels.bass > 0) {
