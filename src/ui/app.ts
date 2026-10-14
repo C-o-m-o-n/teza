@@ -2,6 +2,7 @@ import { Bot, BOT_PROFILES, BotProfile } from "../ai/bot";
 import { blitzBoost, musicIntensity } from "../audio/music";
 import { SOUND_PACKS, packById } from "../audio/packs";
 import { music, sfx } from "../audio/sfx";
+import { SONGS, songFor } from "../audio/songs";
 import { BOARD_H, BUFFER, PieceType, Rotation } from "../engine/constants";
 import { Action, Game, GameEvent } from "../engine/game";
 import { MODES, Mode, ModeId, modeById } from "../modes";
@@ -91,7 +92,7 @@ export class App {
       this.held.clear();
       this.session?.player.releaseAll();
     });
-    window.addEventListener("pointerdown", () => sfx.unlock(), { once: false });
+    window.addEventListener("pointerdown", () => this.unlockAudio(), { once: false });
     this.showMenu();
     requestAnimationFrame((t) => this.loop(t));
     void fetchMe().then((p) => p && this.adoptProfile(p));
@@ -104,6 +105,24 @@ export class App {
     saveRecords(this.records);
     void putRecords(this.records);
     if (this.screen === "menu") this.showMenu();
+  }
+
+  /** From a user gesture: unlock audio, and start the menu music if nothing is playing yet. */
+  private unlockAudio(): void {
+    sfx.unlock();
+    if (!music.playing) this.syncMusic();
+  }
+
+  /**
+   * Play the song for where the player is: the mode's song from the countdown until the run ends,
+   * the menu song everywhere else (results included). Crossfades; `restart` starts the song afresh.
+   */
+  private syncMusic(restart = false): void {
+    const s = this.session;
+    const where = s && s.endAt === null ? s.mode.id : "menu";
+    const song = songFor(this.settings.musicTrack, where);
+    if (!song) music.stop(0.6);
+    else music.play(song, { restart, fade: where === "menu" ? 2.5 : 1.5 });
   }
 
   private applySettings(): void {
@@ -139,7 +158,8 @@ export class App {
       const obj = s.player.opts.objective;
       const boost = s.mode.id === "blitz" && obj.type === "timed" ? blitzBoost(s.player.frame, obj.frames) : 1;
       const intensity = musicIntensity({
-        danger: s.playerView.danger, stackRows: stackRows(s.player), combo: Math.max(0, s.player.stats.combo - 1), boost,
+        danger: s.playerView.danger, stackRows: stackRows(s.player), garbage: s.player.pendingGarbage(),
+        combo: Math.max(0, s.player.stats.combo - 1), boost,
       });
       music.update(intensity, boost);
       if (s.player.stats.combo === 0) music.endCombo();
@@ -217,7 +237,7 @@ export class App {
     this.renderer.overlay = { countdown: null, countdownT: 0 };
     this.renderer.layoutViews();
     this.applySettings();
-    music.start(); // the countdown is the intro; replaces any previous session's music
+    this.syncMusic(true); // crossfade into the mode's song: the countdown is its intro
     this.wireSounds(player, true);
     if (bot) this.wireSounds(bot, false);
     if (bot && botView) {
@@ -301,7 +321,7 @@ export class App {
     if (!s || s.endAt !== null) return;
     s.outcome = outcome;
     s.endAt = s.t + (outcome === "clear" || outcome === "win" ? 0.9 : 1.3);
-    music.stop(1.2);
+    this.syncMusic(); // back to the menu song for the results
     if (outcome === "win") {
       s.botView!.bigText = { text: "K.O.", t: 0, color: "#ff3f5f" };
       sfx.finish();
@@ -315,8 +335,8 @@ export class App {
   }
 
   private exitToMenu(): void {
-    music.stop(0.3);
     this.session = null;
+    this.syncMusic();
     this.renderer.views = [];
     this.renderer.flights = [];
     this.renderer.overlay = { countdown: null, countdownT: 0 };
@@ -334,7 +354,7 @@ export class App {
   }
 
   private onKeyDown(e: KeyboardEvent): void {
-    sfx.unlock();
+    this.unlockAudio();
     if (this.listening) {
       e.preventDefault();
       this.finishListening(e.code);
@@ -418,7 +438,7 @@ export class App {
     );
     if (opts.meta) b.append(el("span", { class: "bar-meta" }, opts.meta));
     b.addEventListener("click", () => {
-      sfx.unlock();
+      this.unlockAudio();
       sfx.confirm();
       opts.onClick();
     });
@@ -586,6 +606,7 @@ export class App {
     const save = () => {
       saveSettings(s);
       this.applySettings();
+      this.syncMusic();
     };
     const slider = (label: string, min: number, max: number, step: number, get: () => number, set: (v: number) => void, fmt: (v: number) => string) => {
       const out = el("output", {}, fmt(get()));
@@ -619,6 +640,23 @@ export class App {
       sfx.confirm(); // preview the new timbre
     });
     const packSelect = el("label", { class: "row" }, el("span", {}, "Sound pack"), pack, packNote);
+    const track = el("select", { name: "musicTrack" });
+    track.append(el("option", { value: "auto" }, "Auto"));
+    for (const song of SONGS) track.append(el("option", { value: song.id }, song.name));
+    track.append(el("option", { value: "off" }, "Off"));
+    track.value = s.musicTrack;
+    const trackLabel = () => {
+      if (s.musicTrack === "off") return "No music";
+      if (s.musicTrack === "auto") return "Per mode";
+      return SONGS.find((x) => x.id === s.musicTrack)?.mood ?? "";
+    };
+    const trackNote = el("output", {}, trackLabel());
+    track.addEventListener("change", () => {
+      s.musicTrack = track.value;
+      trackNote.textContent = trackLabel();
+      save();
+    });
+    const trackSelect = el("label", { class: "row" }, el("span", {}, "Music track"), track, trackNote);
     const f = (v: number) => `${v.toFixed(1)}F · ${Math.round((v * 1000) / 60)}ms`;
     const handling = el("section", { class: "panel" },
       el("h2", {}, "HANDLING"),
@@ -631,6 +669,7 @@ export class App {
       el("h2", {}, "AUDIO & VISUAL"),
       slider("Sound effects", 0, 1, 0.05, () => s.volume, (v) => (s.volume = v), (v) => `${Math.round(v * 100)}%`),
       slider("Music", 0, 1, 0.05, () => s.musicVolume, (v) => (s.musicVolume = v), (v) => `${Math.round(v * 100)}%`),
+      trackSelect,
       packSelect,
       slider("Board bounciness", 0, 2, 0.1, () => s.bounciness, (v) => (s.bounciness = v), (v) => `${Math.round(v * 100)}%`),
       toggle("Reduce motion", () => s.reduceMotion, (v) => (s.reduceMotion = v)),
@@ -659,6 +698,7 @@ export class App {
       this.settings = defaultSettings();
       saveSettings(this.settings);
       this.applySettings();
+      this.syncMusic();
       this.showConfig();
     });
     const back = el("button", { class: "ghost-btn", "data-nav": "" }, "← BACK");
