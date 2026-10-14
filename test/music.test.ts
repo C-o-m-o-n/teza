@@ -1,63 +1,73 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
-  BLITZ_BOOST, COMBO_CAP, LAYERS, LAYER_DROP, blitzBoost, comboNotes, layerLevels, musicIntensity, nextLayerLevels, tempoFor,
+  BLITZ_BOOST, COMBO_CAP, GEARS, GEAR_DROP, blitzBoost, comboNotes, gearFor, musicIntensity, songTempo,
 } from "../src/audio/music";
 import { SOUND_PACKS, degreeFreq, packById } from "../src/audio/packs";
 import { panForColumn } from "../src/audio/sfx";
+import { SONGS, songById, songFor } from "../src/audio/songs";
+import { MODES } from "../src/modes";
 import { defaultSettings, loadSettings } from "../src/settings";
 
 const scale = SOUND_PACKS[0].scale;
+const song = (id: string) => songById(id)!;
 
-describe("tempoFor", () => {
-  it("runs 100 BPM at danger 0 to 150 BPM at danger 1", () => {
-    expect(tempoFor(0, 1)).toBe(100);
-    expect(tempoFor(1, 1)).toBe(150);
+describe("gearFor", () => {
+  it("steps up through calm, groove, drive and danger at the GEARS thresholds", () => {
+    expect(GEARS.map((g) => g.at)).toEqual([0, 0.15, 0.4, 0.7]);
+    expect(GEARS.map((g) => g.name)).toEqual(["calm", "groove", "drive", "danger"]);
+    for (let i = 1; i < GEARS.length; i++) {
+      expect(gearFor(GEARS[i].at - 0.01)).toBe(i - 1);
+      expect(gearFor(GEARS[i].at)).toBe(i);
+    }
   });
 
-  it("rises monotonically with danger and scales with the boost", () => {
-    let prev = tempoFor(0, 1);
-    for (let d = 0.05; d <= 1.0001; d += 0.05) {
-      const t = tempoFor(d, 1);
-      expect(t).toBeGreaterThan(prev);
-      prev = t;
-    }
-    expect(tempoFor(0.5, 1.25)).toBeCloseTo(125 * 1.25);
-    expect(tempoFor(2, 1)).toBe(150);
+  it("holds a gear until intensity falls GEAR_DROP below it, then drops back", () => {
+    expect(gearFor(0.7 - GEAR_DROP / 2, 3)).toBe(3);
+    expect(gearFor(0.7 - GEAR_DROP * 1.5, 3)).toBe(2);
+    expect(gearFor(0.7 - GEAR_DROP / 2, 2)).toBe(2); // not yet up
+    expect(gearFor(0, 3)).toBe(0); // a big clear-down falls straight through
+  });
+
+  it("never passes the song's top gear", () => {
+    expect(gearFor(1, 0, 2)).toBe(2);
+    expect(gearFor(1, 0, 0)).toBe(0);
   });
 });
 
-describe("layerLevels", () => {
-  it("plays only the pad at danger 0 and every layer at danger 1", () => {
-    const low = layerLevels(0);
-    expect(low.pad).toBeGreaterThan(0);
-    expect([low.bass, low.arp, low.lead]).toEqual([0, 0, 0]);
-    const high = layerLevels(1);
-    for (const l of LAYERS) expect(high[l.id]).toBeGreaterThan(0);
+describe("songTempo", () => {
+  it("is the gear's BPM, rising with each gear, with a big step into danger", () => {
+    for (const s of SONGS) {
+      for (let g = 1; g < s.gears.length; g++) expect(songTempo(s, g)).toBeGreaterThan(songTempo(s, g - 1));
+    }
+    for (const id of ["gridline", "afterburn", "undertow"]) {
+      const s = song(id);
+      expect(songTempo(s, 3) - songTempo(s, 2)).toBeGreaterThanOrEqual(15);
+    }
   });
 
-  it("brings each layer in at its threshold", () => {
-    for (const l of LAYERS.filter((l) => l.at > 0)) {
-      expect(layerLevels(l.at - 0.01)[l.id]).toBe(0);
-      expect(layerLevels(l.at)[l.id]).toBeGreaterThan(0);
-    }
-    expect(LAYERS.map((l) => l.at)).toEqual([0, 0.15, 0.4, 0.7]);
+  it("clamps the gear to the song and scales with the boost", () => {
+    const zen = song("tidepool");
+    expect(songTempo(zen, 3)).toBe(songTempo(zen, 2));
+    expect(songTempo(song("afterburn"), 3, BLITZ_BOOST)).toBeCloseTo(162 * 1.25);
   });
 });
 
 describe("musicIntensity", () => {
   const calm = { danger: 0, stackRows: 0, combo: 0, boost: 1 };
-  const layersAt = (over: Partial<typeof calm>) => layerLevels(musicIntensity({ ...calm, ...over }));
+  const gearAt = (over: Partial<typeof calm & { garbage: number }>) => gearFor(musicIntensity({ ...calm, ...over }));
 
-  it("is 0 on an empty board with no combo, so only the pad plays", () => {
+  it("is 0 on an empty board with no combo: the calm gear", () => {
     expect(musicIntensity(calm)).toBe(0);
+    expect(gearAt({})).toBe(0);
   });
 
-  it("brings in bass+kick in a normal mid-game stack and arpeggio+hats from 10 rows", () => {
-    expect(layersAt({ stackRows: 3 }).bass).toBe(0);
-    expect(layersAt({ stackRows: 4 }).bass).toBe(1);
-    expect(layersAt({ stackRows: 8 }).arp).toBe(0);
-    expect(layersAt({ stackRows: 10 }).arp).toBe(1);
-    expect(layersAt({ stackRows: 12 }).lead).toBe(0);
+  it("climbs a gear at 3, 8 and 14 rows of stack", () => {
+    expect(gearAt({ stackRows: 2 })).toBe(0);
+    expect(gearAt({ stackRows: 3 })).toBe(1);
+    expect(gearAt({ stackRows: 7 })).toBe(1);
+    expect(gearAt({ stackRows: 8 })).toBe(2);
+    expect(gearAt({ stackRows: 13 })).toBe(2);
+    expect(gearAt({ stackRows: 14 })).toBe(3);
     let prev = 0;
     for (let rows = 0; rows <= 20; rows++) {
       const i = musicIntensity({ ...calm, stackRows: rows });
@@ -66,34 +76,26 @@ describe("musicIntensity", () => {
     }
   });
 
-  it("rises with a running combo", () => {
-    expect(layersAt({ combo: 1 }).bass).toBe(1);
-    expect(layersAt({ combo: 3 }).arp).toBe(1);
-    expect(musicIntensity({ ...calm, combo: 20 })).toBeLessThan(0.7);
+  it("counts incoming garbage on top of the stack (Versus)", () => {
+    expect(gearAt({ stackRows: 6, garbage: 0 })).toBe(1);
+    expect(gearAt({ stackRows: 6, garbage: 8 })).toBe(3);
+  });
+
+  it("rises with a running combo, but a combo alone never reaches danger", () => {
+    expect(gearAt({ combo: 1 })).toBe(1);
+    expect(gearAt({ combo: 3 })).toBe(2);
+    expect(gearAt({ combo: 20 })).toBe(2);
   });
 
   it("follows danger when it is the strongest signal", () => {
-    expect(musicIntensity({ ...calm, stackRows: 18, danger: 0.9 })).toBe(0.9);
+    expect(musicIntensity({ ...calm, stackRows: 12, danger: 0.9 })).toBe(0.9);
   });
 
-  it("brings the arpeggio in for Blitz's final 30 s and reaches full intensity at time-up", () => {
+  it("drives Blitz's final 30 s: drive at 30 s left, danger by 15 s left, full at time-up", () => {
     expect(musicIntensity({ ...calm, boost: blitzBoost(5400, 7200) })).toBe(0);
-    expect(layersAt({ boost: blitzBoost(5401, 7200) }).arp).toBe(1);
+    expect(gearAt({ boost: blitzBoost(5401, 7200) })).toBe(2);
+    expect(gearAt({ boost: blitzBoost(6300, 7200) })).toBe(3);
     expect(musicIntensity({ ...calm, boost: blitzBoost(7200, 7200) })).toBe(1);
-    // tempo through Blitz's final 30 s on an empty board: 100 BPM -> 187.5 BPM
-    expect(tempoFor(musicIntensity({ ...calm, boost: blitzBoost(6300, 7200) }), blitzBoost(6300, 7200))).toBeGreaterThan(150);
-    expect(tempoFor(1, BLITZ_BOOST)).toBe(187.5);
-  });
-});
-
-describe("nextLayerLevels", () => {
-  it("keeps a playing layer on until intensity drops LAYER_DROP below its threshold", () => {
-    const off = layerLevels(0);
-    const on = nextLayerLevels(0.4, off);
-    expect(on.arp).toBe(1);
-    expect(nextLayerLevels(0.4 - LAYER_DROP / 2, on).arp).toBe(1);
-    expect(nextLayerLevels(0.4 - LAYER_DROP * 1.5, on).arp).toBe(0);
-    expect(nextLayerLevels(0.4 - LAYER_DROP / 2, off).arp).toBe(0);
   });
 });
 
@@ -115,7 +117,8 @@ describe("blitzBoost", () => {
   });
 
   it("makes the music faster than the base tempo after 90 s of Blitz", () => {
-    expect(tempoFor(0.3, blitzBoost(95 * 60, 7200))).toBeGreaterThan(tempoFor(0.3, 1));
+    const blitz = song("afterburn");
+    expect(songTempo(blitz, 1, blitzBoost(95 * 60, 7200))).toBeGreaterThan(songTempo(blitz, 1));
   });
 });
 
@@ -155,7 +158,6 @@ describe("sound packs", () => {
     expect(new Set(SOUND_PACKS.map((p) => p.id)).size).toBe(3);
     for (const p of SOUND_PACKS) {
       expect(p.scale.steps).toHaveLength(7);
-      expect(p.progression.length).toBeGreaterThan(0);
       for (const t of [p.sfx.bright, p.sfx.soft, p.sfx.edge, p.music.pad, p.music.bass, p.music.arp, p.music.lead]) {
         expect(["sine", "square", "sawtooth", "triangle"]).toContain(t.type);
         expect(t.detune).toBeGreaterThanOrEqual(0);
@@ -173,6 +175,53 @@ describe("sound packs", () => {
   });
 });
 
+describe("songs", () => {
+  it("has one Auto song per mode and for the menu, with unique ids", () => {
+    expect(new Set(SONGS.map((s) => s.id)).size).toBe(SONGS.length);
+    for (const where of ["menu", ...MODES.map((m) => m.id)]) {
+      expect(SONGS.filter((s) => s.mode === where)).toHaveLength(1);
+    }
+  });
+
+  it("gives each song its own key, chord loop and base tempo", () => {
+    const keys = SONGS.map((s) => `${s.scale.root}:${s.scale.steps.join()}`);
+    expect(new Set(keys).size).toBe(SONGS.length);
+    expect(new Set(SONGS.map((s) => s.progression.join())).size).toBe(SONGS.length);
+    expect(new Set(SONGS.map((s) => s.gears[0].bpm)).size).toBe(SONGS.length);
+  });
+
+  it("is well-formed data", () => {
+    for (const s of SONGS) {
+      expect(s.scale.steps).toHaveLength(7);
+      expect(s.progression.length).toBeGreaterThan(0);
+      expect(s.gears.length).toBeGreaterThanOrEqual(1);
+      expect(s.gears.length).toBeLessThanOrEqual(GEARS.length);
+      for (const g of s.gears) {
+        for (const p of [g.kick, g.snare, g.hat, g.pad]) if (p) expect(p).toMatch(/^[.xX]+$/);
+        for (const p of [g.bass, g.arp, g.lead]) if (p) expect(p).toMatch(/^[.0-9]+$/);
+      }
+    }
+  });
+
+  it("matches each mode's feel: 40 LINES four-on-the-floor, Zen with no danger gear, Versus in a minor mode", () => {
+    for (const g of song("gridline").gears) for (const beat of [0, 4, 8, 12]) expect(g.kick![beat]).toMatch(/[xX]/);
+    expect(song("tidepool").gears).toHaveLength(3);
+    expect(song("undertow").scale.steps[2]).toBe(3); // minor third
+    expect(song("lantern").gears[0].bpm).toBeLessThan(song("gridline").gears[0].bpm);
+  });
+
+  it("picks the song for the mode on Auto, one song everywhere when fixed, none when off", () => {
+    expect(songFor("auto", "menu")!.id).toBe("lantern");
+    expect(songFor("auto", "40l")!.id).toBe("gridline");
+    expect(songFor("auto", "blitz")!.id).toBe("afterburn");
+    expect(songFor("auto", "vs")!.id).toBe("undertow");
+    expect(songFor("auto", "zen")!.id).toBe("tidepool");
+    expect(songFor("afterburn", "zen")!.id).toBe("afterburn");
+    expect(songFor("afterburn", "menu")!.id).toBe("afterburn");
+    expect(songFor("off", "40l")).toBeNull();
+  });
+});
+
 describe("loadSettings audio fields", () => {
   const store = new Map<string, string>();
   const stub = (saved: unknown) => {
@@ -185,10 +234,11 @@ describe("loadSettings audio fields", () => {
     store.clear();
   });
 
-  it("defaults to Arcade, music 40% and SFX 60%", () => {
+  it("defaults to Arcade, Auto music at 60% and SFX 60%", () => {
     const d = defaultSettings();
     expect(d.soundPack).toBe("arcade");
-    expect(d.musicVolume).toBe(0.4);
+    expect(d.musicTrack).toBe("auto");
+    expect(d.musicVolume).toBe(0.6);
     expect(d.volume).toBe(0.6);
   });
 
@@ -196,17 +246,35 @@ describe("loadSettings audio fields", () => {
     stub({ volume: 0.3 });
     const s = loadSettings();
     expect(s.volume).toBe(0.3);
-    expect(s.musicVolume).toBe(0.4);
+    expect(s.musicVolume).toBe(0.6);
     expect(s.soundPack).toBe("arcade");
+    expect(s.musicTrack).toBe("auto");
+  });
+
+  it("loads a save from before music tracks existed unchanged, on Auto", () => {
+    stub({ volume: 0.5, musicVolume: 0.4, soundPack: "neon" });
+    const s = loadSettings();
+    expect([s.volume, s.musicVolume, s.soundPack, s.musicTrack]).toEqual([0.5, 0.4, "neon", "auto"]);
+  });
+
+  it("keeps a valid musicTrack and falls back to Auto for an unknown one", () => {
+    for (const t of ["off", "auto", "tidepool"]) {
+      stub({ musicTrack: t });
+      expect(loadSettings().musicTrack).toBe(t);
+    }
+    stub({ musicTrack: "chiptune-remix" });
+    expect(loadSettings().musicTrack).toBe("auto");
+    stub({ musicTrack: 4 });
+    expect(loadSettings().musicTrack).toBe("auto");
   });
 
   it("falls back to the default for an invalid soundPack or musicVolume", () => {
     stub({ soundPack: "dubstep", musicVolume: "loud" });
     expect(loadSettings().soundPack).toBe("arcade");
-    expect(loadSettings().musicVolume).toBe(0.4);
+    expect(loadSettings().musicVolume).toBe(0.6);
     stub({ soundPack: 3, musicVolume: 7 });
     expect(loadSettings().soundPack).toBe("arcade");
-    expect(loadSettings().musicVolume).toBe(0.4);
+    expect(loadSettings().musicVolume).toBe(0.6);
   });
 
   it("keeps a valid saved pack and volume", () => {

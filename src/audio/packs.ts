@@ -1,4 +1,5 @@
-// Sound packs: plain data choosing the timbre and key of both the SFX and the music.
+// Sound packs: plain data choosing the timbre of both the SFX and the music. The key of the music
+// comes from the song (songs.ts); the pack's scale keys the SFX when no song is playing.
 
 export interface Scale {
   root: number; // MIDI note of the tonic, in the octave the SFX chords use
@@ -16,7 +17,6 @@ export interface SoundPack {
   name: string;
   tagline: string;
   scale: Scale;
-  progression: number[]; // chord roots as scale degrees, one chord per bar
   sfx: {
     bright: Timbre; // moves, UI blips, countdown
     soft: Timbre; // rotate, hold, lock, clear chords
@@ -48,10 +48,9 @@ export const SOUND_PACKS: SoundPack[] = [
     name: "Arcade",
     tagline: "Square chip",
     scale: { root: 67, steps: MAJOR }, // G major
-    progression: [0, 5, 3, 4], // I vi IV V
     sfx: {
       bright: t("square"), soft: t("triangle"), edge: t("sawtooth"),
-      brightness: 20000, attack: 0.004, decay: 1,
+      brightness: 20000, attack: 0.001, decay: 1,
     },
     music: {
       pad: t("triangle"), bass: t("square"), arp: t("square"), lead: t("triangle"),
@@ -63,10 +62,9 @@ export const SOUND_PACKS: SoundPack[] = [
     name: "Glass",
     tagline: "Soft bells",
     scale: { root: 64, steps: LYDIAN }, // E lydian
-    progression: [0, 1, 5, 4],
     sfx: {
       bright: t("sine", 0, 1.2), soft: t("sine", 0, 2), edge: t("triangle", 0, 1.5),
-      brightness: 6000, attack: 0.008, decay: 1.6,
+      brightness: 6000, attack: 0.003, decay: 1.6,
     },
     music: {
       pad: t("sine", 6), bass: t("sine"), arp: t("sine", 0, 2.5), lead: t("sine", 0, 1.2),
@@ -78,10 +76,9 @@ export const SOUND_PACKS: SoundPack[] = [
     name: "Neon",
     tagline: "Detuned saw",
     scale: { root: 62, steps: MINOR }, // D minor
-    progression: [0, 5, 2, 6], // i VI III VII
     sfx: {
       bright: t("sawtooth", 9), soft: t("sawtooth", 12), edge: t("sawtooth", 18),
-      brightness: 3200, attack: 0.006, decay: 1.2,
+      brightness: 3200, attack: 0.002, decay: 1.2,
     },
     music: {
       pad: t("sawtooth", 14), bass: t("sawtooth", 7), arp: t("sawtooth", 8), lead: t("sawtooth", 10),

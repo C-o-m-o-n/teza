@@ -8,6 +8,7 @@ export interface VoiceOpts {
   release?: number; // hold the peak, then fade over this many seconds at the end (pads); unset = decay throughout
   filter?: number; // lowpass cutoff in Hz; >= 18000 or unset means unfiltered
   q?: number;
+  pluck?: number; // the filter opens this many times wider at the onset and closes over ~0.15 s
 }
 
 /** A single enveloped note of `timbre` starting at `t0`, routed into `dest`. */
@@ -21,7 +22,12 @@ export function voice(ctx: BaseAudioContext, dest: AudioNode, timbre: Timbre, fr
   if (o.filter !== undefined && o.filter < 18000) {
     const f = ctx.createBiquadFilter();
     f.type = "lowpass";
-    f.frequency.value = o.filter;
+    if (o.pluck) {
+      f.frequency.setValueAtTime(Math.min(18000, o.filter * o.pluck), t0);
+      f.frequency.exponentialRampToValueAtTime(o.filter, t0 + Math.min(dur, 0.15));
+    } else {
+      f.frequency.value = o.filter;
+    }
     f.Q.value = o.q ?? 0.7;
     g.connect(f).connect(dest);
   } else {
@@ -74,6 +80,34 @@ export function noiseHit(ctx: BaseAudioContext, dest: AudioNode, buffer: AudioBu
   src.connect(f).connect(g).connect(dest);
   src.start(t0, Math.random() * Math.max(0, buffer.duration - dur - 0.05));
   src.stop(t0 + dur + 0.02);
+}
+
+/** A drum thump: a sine whose pitch falls fast from `from` to `to` Hz, plus a short noise click. */
+export function kick(ctx: BaseAudioContext, dest: AudioNode, buffer: AudioBuffer, t0: number, o: { gain: number; from?: number; to?: number; dur?: number; click?: number }): void {
+  const dur = o.dur ?? 0.32;
+  const osc = ctx.createOscillator();
+  osc.type = "sine";
+  osc.frequency.setValueAtTime(o.from ?? 160, t0);
+  osc.frequency.exponentialRampToValueAtTime(o.to ?? 46, t0 + 0.09);
+  const g = ctx.createGain();
+  g.gain.setValueAtTime(0.0001, t0);
+  g.gain.exponentialRampToValueAtTime(o.gain, t0 + 0.003);
+  g.gain.setValueAtTime(o.gain, t0 + 0.03);
+  g.gain.exponentialRampToValueAtTime(0.0001, t0 + dur);
+  osc.connect(g).connect(dest);
+  osc.start(t0);
+  osc.stop(t0 + dur + 0.02);
+  if (o.click) noiseHit(ctx, dest, buffer, t0, 0.012, { gain: o.click, filter: 2500, type: "highpass" });
+}
+
+/** A soft-clipping curve for a WaveShaperNode: tanh with `drive`, normalised so ±1 stays ±1. */
+export function saturationCurve(drive: number, n = 1024): Float32Array {
+  const c = new Float32Array(n);
+  for (let i = 0; i < n; i++) {
+    const x = (i / (n - 1)) * 2 - 1;
+    c[i] = Math.tanh(drive * x) / Math.tanh(drive);
+  }
+  return c;
 }
 
 /** Two seconds of white noise, made once per context. */

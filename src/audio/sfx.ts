@@ -1,12 +1,14 @@
 // Every sound is synthesized with WebAudio — no samples from the original game.
-// Mixer: AudioContext -> musicBus / sfxBus -> master -> destination.
+// Mixer: music -> saturation -> musicBus, sfxBus -> master -> compressor -> destination.
 import { Music, MusicOutput } from "./music";
 import { SOUND_PACKS, SoundPack, Timbre, degreeFreq } from "./packs";
-import { makeNoise, noiseHit, voice } from "./synth";
+import { kick, makeNoise, noiseHit, saturationCurve, voice } from "./synth";
 
 const SINE: Timbre = { type: "sine", detune: 0, fm: 0 };
 const SAW: Timbre = { type: "sawtooth", detune: 0, fm: 0 };
 const BELL: Timbre = { type: "sine", detune: 0, fm: 2.5 };
+const MUSIC_DRIVE = 0.6; // into the music's saturation
+const MUSIC_TRIM = 0.4; // after it
 
 /** Stereo position (-0.7..0.7) for a board column, 0..9 left to right. */
 export function panForColumn(x: number): number {
@@ -18,9 +20,10 @@ export class Sfx {
   private master: GainNode | null = null;
   private sfxBus: GainNode | null = null;
   private musicBus: GainNode | null = null;
+  private musicIn: AudioNode | null = null; // where the music engine plays: the saturation stage
   private noiseBuf: AudioBuffer | null = null;
   private sfxVolume = 0.6;
-  private musicLevel = 0.4;
+  private musicLevel = 0.6;
   pack: SoundPack = SOUND_PACKS[0];
 
   /** SFX volume, 0..1 (scales sfxBus). */
@@ -56,6 +59,23 @@ export class Sfx {
       this.musicBus = ctx.createGain();
       this.musicBus.gain.value = this.musicLevel;
       this.musicBus.connect(this.master);
+      // the music only (a compressor's look-ahead would delay the SFX): light drive into a soft
+      // clipper, then a compressor to glue the kick and bass together
+      const drive = ctx.createGain();
+      drive.gain.value = MUSIC_DRIVE;
+      const shaper = ctx.createWaveShaper();
+      shaper.curve = saturationCurve(1.5);
+      shaper.oversample = "2x";
+      const comp = ctx.createDynamicsCompressor();
+      comp.threshold.value = -18;
+      comp.knee.value = 6;
+      comp.ratio.value = 3;
+      comp.attack.value = 0.005;
+      comp.release.value = 0.12;
+      const trim = ctx.createGain();
+      trim.gain.value = MUSIC_TRIM;
+      drive.connect(shaper).connect(comp).connect(trim).connect(this.musicBus);
+      this.musicIn = drive;
       this.noiseBuf = makeNoise(ctx);
     }
     if (this.ctx.state === "suspended") void this.ctx.resume();
@@ -63,8 +83,8 @@ export class Sfx {
 
   /** Where the music engine plays, or null while audio is still locked. */
   musicOutput(): MusicOutput | null {
-    if (!this.ctx || !this.musicBus || !this.noiseBuf) return null;
-    return { ctx: this.ctx, bus: this.musicBus, noise: this.noiseBuf, pack: this.pack, audible: this.musicLevel > 0 };
+    if (!this.ctx || !this.musicIn || !this.noiseBuf) return null;
+    return { ctx: this.ctx, bus: this.musicIn, noise: this.noiseBuf, pack: this.pack, audible: this.musicLevel > 0 };
   }
 
   /** Dip the music to ~40% (25% when `strong`) within ~30 ms, then recover over ~350 ms. */
@@ -108,9 +128,14 @@ export class Sfx {
     });
   }
 
-  /** A scale degree of the current pack (0 = its tonic in the SFX octave). */
+  /** A scale degree (0 = the tonic in the SFX octave) of the playing song, or of the pack when there is none. */
   private note(degree: number, octave = 0): number {
-    return degreeFreq(this.pack.scale, degree, octave);
+    return degreeFreq(music.scale ?? this.pack.scale, degree, octave);
+  }
+
+  /** A low drum thump through `d`. */
+  private thump(d: AudioNode, gain: number, delay = 0, from = 170, to = 42, dur = 0.3): void {
+    kick(this.ctx!, d, this.noiseBuf!, this.ctx!.currentTime + delay, { gain, from, to, dur, click: gain * 0.4 });
   }
 
   /** Bell over a soft saw an octave down, slow decay, with three fading repeats: the back-to-back colour. */
@@ -146,8 +171,9 @@ export class Sfx {
   harddrop(x?: number): void {
     const d = this.out(x);
     if (!d) return;
-    this.noise(d, 0.09, { gain: 0.35, filter: 900 });
-    this.tone(d, 110, 0.12, { gain: 0.3, slide: 0.5 });
+    this.thump(d, 0.36, 0, 190, 38, 0.22);
+    this.noise(d, 0.07, { gain: 0.3, filter: 1400 });
+    this.noise(d, 0.025, { gain: 0.25, filter: 5000, type: "highpass" });
   }
 
   lock(x?: number): void {
@@ -171,18 +197,26 @@ export class Sfx {
     const d = this.out(x);
     if (!d) return;
     const base = Math.min(combo, 7);
+    const big = lines >= 4 || spin;
     const degrees = spin ? [0, 2, 4, 7, 9] : [0, 2, 4, 7].slice(0, Math.max(2, lines));
-    const timbre = lines >= 4 || spin ? this.pack.sfx.edge : this.pack.sfx.soft;
-    degrees.forEach((k, i) => this.tone(d, this.note(base + k), 0.25, { timbre, gain: 0.07, delay: i * 0.035 }));
-    this.noise(d, 0.18, { gain: 0.12, filter: 4000, type: "highpass" });
+    const timbre = big ? this.pack.sfx.edge : this.pack.sfx.soft;
+    degrees.forEach((k, i) => this.tone(d, this.note(base + k), 0.3, { timbre, gain: 0.1, delay: i * 0.03 }));
+    // octave doubling an octave up, then a burst whose size follows the lines cleared
+    this.tone(d, this.note(base + 7), 0.35, { timbre: this.pack.sfx.bright, gain: 0.04 + lines * 0.01, delay: 0.02 });
+    this.noise(d, 0.15 + lines * 0.06, { gain: 0.12 + lines * 0.04, filter: 3500, type: "highpass" });
+    if (lines >= 2 || spin) this.thump(d, 0.12 + lines * 0.04, 0, 140, 40, 0.3);
     if (btb > 1) this.b2bPatch(d, this.note(base, 1), 0.1);
-    if (lines >= 4) this.tone(d, 98, 0.35, { gain: 0.25, slide: 0.6 });
+    if (big) {
+      this.thump(d, 0.3, 0.02, 120, 32, 0.5);
+      this.noise(d, 0.5, { gain: 0.16, filter: 300, sweep: 10, type: "bandpass", q: 1.5 });
+    }
   }
 
   allClear(): void {
     const d = this.out();
     if (!d) return;
-    [0, 2, 4, 6, 8, 11, 14].forEach((k, i) => this.tone(d, this.note(k), 0.5, { timbre: this.pack.sfx.soft, gain: 0.08, delay: i * 0.06 }));
+    this.thump(d, 0.3, 0, 150, 35, 0.5);
+    [0, 2, 4, 6, 8, 11, 14].forEach((k, i) => this.tone(d, this.note(k), 0.5, { timbre: this.pack.sfx.soft, gain: 0.1, delay: i * 0.05 }));
   }
 
   btbBreak(x?: number): void {
@@ -200,8 +234,8 @@ export class Sfx {
   garbageRise(): void {
     const d = this.out();
     if (!d) return;
-    this.noise(d, 0.3, { gain: 0.3, filter: 300 });
-    this.tone(d, 70, 0.3, { gain: 0.25, slide: 0.8 });
+    this.thump(d, 0.3, 0, 110, 35, 0.4);
+    this.noise(d, 0.3, { gain: 0.35, filter: 300 });
   }
 
   attack(amount: number): void {
