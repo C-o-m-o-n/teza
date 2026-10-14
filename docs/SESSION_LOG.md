@@ -183,5 +183,10 @@
 - The player's piece sounds are panned by column. Spin and B2B have new layered patches.
 - Music starts with the countdown and fades on top-out, finish or K.O. Leaving for the menu stops the scheduler, and retry restarts it.
 
+**Round 2 (design review)**
+- The music now follows an intensity value: the strongest of danger, stack height, the running combo and BLITZ's last 30 s. Before, danger alone was 0 below a ~15-row stack, so normal play heard only the pad.
+- Bass and kick start at a 4-row stack, arpeggio and hats at 10 rows. In BLITZ's last 30 s the arpeggio comes in, and the tempo rises to 187.5 BPM at time-up.
+- The pad has a soft pulse on every beat. Layers have a 0.05 drop-out margin. The pack select shows a focus outline for keyboard users.
+
 **Still open**
-- Danger stays 0 until the stack is about 15 rows high, so most normal play hears only the pad layer.
+- `npm run e2e` BLITZ takes about 1.9 min of real time (1.4 min on main). The music creates more voices under the fake clock.

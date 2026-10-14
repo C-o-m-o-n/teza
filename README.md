@@ -136,16 +136,21 @@ CONFIG › AUDIO & VISUAL has three audio settings, saved in `localStorage["teza
 - **Music** (`musicVolume`, default 40%). At 0% the music makes no sound and creates no voices.
 - **Sound pack** (`soundPack`): Arcade (square/triangle chip, the default), Glass (sine and FM bells, soft) or Neon (detuned saws, heavy bass). A pack sets the waveforms, key, scale, filter brightness and envelopes of both the effects and the music (`src/audio/packs.ts`). A change during play applies from the next sound and the next bar. An unknown saved pack falls back to Arcade.
 
-Music plays only during a game. It starts with the countdown, fades out on top-out, finish or K.O., and stops when you leave for the menu. It follows the player's danger (stack height plus incoming garbage, the value that reddens the board):
+Music plays only during a game. It starts with the countdown, fades out on top-out, finish or K.O., and stops when you leave for the menu. It follows an intensity value from 0 to 1, the strongest of:
 
-| Danger | Layers |
-|---|---|
-| any | pad (the bar's chord) |
-| ≥ 0.15 | + bass and kick |
-| ≥ 0.4 | + arpeggio and hi-hats |
-| ≥ 0.7 | + tension lead |
+- the player's danger (the value that reddens the board near the top);
+- the stack height × 0.04 per row;
+- a running combo;
+- in BLITZ's last 30 seconds, a ramp from 0.4 to 1.
 
-Tempo goes from 100 BPM at danger 0 to 150 BPM at danger 1, easing toward its target rather than jumping. In BLITZ it also speeds up over the last 30 seconds, reaching ×1.25 at time-up. Combos (from 1 COMBO) add a melody phrase that starts on the next 16th note and grows longer and higher up to 8 COMBO. The phrase is cut when the combo ends. Each of your line clears ducks the music for about a third of a second, and quads, spins and all clears duck it deeper. The bot's sounds are centred. Your piece sounds (move, rotate, hold, drop, spin, clear) are panned left or right by the piece's column. The thresholds and tempo range are the constants at the top of `src/audio/music.ts`.
+| Intensity | Layers | Typical board |
+|---|---|---|
+| any | pad (the bar's chord) and a soft pulse on each beat | empty |
+| ≥ 0.15 | + bass and kick | 4-row stack, or 1 COMBO |
+| ≥ 0.4 | + arpeggio and hi-hats | 10-row stack, 3 COMBO, or BLITZ's last 30 s |
+| ≥ 0.7 | + tension lead | near top-out, or BLITZ's last 15 s |
+
+Tempo goes from 100 BPM at intensity 0 to 150 BPM at intensity 1, easing toward its target rather than jumping. In BLITZ it also multiplies by up to ×1.25 over the last 30 seconds, reaching 187.5 BPM at time-up. Combos (from 1 COMBO) add a melody phrase that starts on the next 16th note and grows longer and higher up to 8 COMBO. The phrase is cut when the combo ends. Each of your line clears ducks the music for about a third of a second, and quads, spins and all clears duck it deeper. The bot's sounds are centred. Your piece sounds (move, rotate, hold, drop, spin, clear) are panned left or right by the piece's column. The thresholds, tempo range and intensity mix are in `src/audio/music.ts` (`LAYERS`, `musicIntensity`). A layer that is playing stays on until intensity falls 0.05 below its threshold, so it doesn't flutter.
 
 ## Layout
 
