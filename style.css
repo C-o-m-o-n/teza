@@ -1,3 +1,33 @@
+/* Self-hosted latin subsets (fonts/, SIL Open Font License: see fonts/OFL-*.txt) */
+@font-face {
+  font-family: "Russo One";
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url(fonts/russo-one-400.woff2) format("woff2");
+}
+@font-face {
+  font-family: "Saira Semi Condensed";
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url(fonts/saira-semi-condensed-400.woff2) format("woff2");
+}
+@font-face {
+  font-family: "Saira Semi Condensed";
+  font-style: normal;
+  font-weight: 600;
+  font-display: swap;
+  src: url(fonts/saira-semi-condensed-600.woff2) format("woff2");
+}
+@font-face {
+  font-family: "Saira Semi Condensed";
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  src: url(fonts/saira-semi-condensed-700.woff2) format("woff2");
+}
+
 :root {
   --bg: #08080f;
   --ink: #f4f4fa;
