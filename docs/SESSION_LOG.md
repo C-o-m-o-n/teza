@@ -148,3 +148,13 @@
 
 **Still open**
 - ↑/↓ order on narrow screens still follows DOM order (bars first, then SIGN IN).
+
+## 2026-10-14 — Browser e2e runs (factory job 005)
+
+**What changed**
+- Closes the 2026-10-13 gap "Not verified: a full 40L or 2-minute Blitz run to the results screen in the browser". `npm run e2e` (Playwright, Chromium) builds `dist/` and plays a full 40 LINES run to `40 LINES CLEARED` (LINES 40) and a full 2-minute BLITZ run to `TIME'S UP`, whose score must equal a Node replay of the same inputs.
+- `?seed=<positive integer>` in the URL fixes the session seed; without it the seed is random as before.
+- Inputs come from the game's own bot, planned in Node on the same timeline the browser sees under Playwright's fake clock (`e2e/plan.ts`).
+
+**Still open**
+- e2e is not in `npm run check` or CI (needs a browser install there).
