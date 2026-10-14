@@ -173,3 +173,15 @@
 
 **Still open**
 - Nothing known.
+
+## 2026-10-14 — Procedural music and sound packs (factory job 007)
+
+**What changed**
+- Generative session music (`src/audio/music.ts`), all Web Audio with no audio files. A look-ahead scheduler plays a looping chord progression in the pack's key. The pad always plays. Bass and kick come in at danger 0.15, arpeggio and hats at 0.4, a tension lead at 0.7. Tempo eases from 100 to 150 BPM with danger, and BLITZ adds up to ×1.25 over its last 30 s.
+- Combos (from 1 COMBO) add a melody phrase that starts on the next 16th note. Every player clear ducks the music for about 350 ms.
+- Audio mixer: separate music and SFX buses. CONFIG › AUDIO & VISUAL has new **Music** and **Sound pack** controls (Arcade / Glass / Neon), saved as `musicVolume` and `soundPack` in `teza:settings`.
+- The player's piece sounds are panned by column. Spin and B2B have new layered patches.
+- Music starts with the countdown and fades on top-out, finish or K.O. Leaving for the menu stops the scheduler, and retry restarts it.
+
+**Still open**
+- Danger stays 0 until the stack is about 15 rows high, so most normal play hears only the pad layer.

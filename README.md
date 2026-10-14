@@ -126,6 +126,27 @@ For local testing of the API, build and run `npx wrangler dev --local-upstream 1
 | Hold | C or Shift |
 | Retry / Menu | R / Esc |
 
+## Sound and music
+
+Everything is synthesized with Web Audio at runtime: no audio files. Two buses (music and sound effects) feed one master output.
+
+CONFIG › AUDIO & VISUAL has three audio settings, saved in `localStorage["teza:settings"]`:
+
+- **Sound effects** (`volume`, default 60%).
+- **Music** (`musicVolume`, default 40%). At 0% the music makes no sound and creates no voices.
+- **Sound pack** (`soundPack`): Arcade (square/triangle chip, the default), Glass (sine and FM bells, soft) or Neon (detuned saws, heavy bass). A pack sets the waveforms, key, scale, filter brightness and envelopes of both the effects and the music (`src/audio/packs.ts`). A change during play applies from the next sound and the next bar. An unknown saved pack falls back to Arcade.
+
+Music plays only during a game. It starts with the countdown, fades out on top-out, finish or K.O., and stops when you leave for the menu. It follows the player's danger (stack height plus incoming garbage, the value that reddens the board):
+
+| Danger | Layers |
+|---|---|
+| any | pad (the bar's chord) |
+| ≥ 0.15 | + bass and kick |
+| ≥ 0.4 | + arpeggio and hi-hats |
+| ≥ 0.7 | + tension lead |
+
+Tempo goes from 100 BPM at danger 0 to 150 BPM at danger 1, easing toward its target rather than jumping. In BLITZ it also speeds up over the last 30 seconds, reaching ×1.25 at time-up. Combos (from 1 COMBO) add a melody phrase that starts on the next 16th note and grows longer and higher up to 8 COMBO. The phrase is cut when the combo ends. Each of your line clears ducks the music for about a third of a second, and quads, spins and all clears duck it deeper. The bot's sounds are centred. Your piece sounds (move, rotate, hold, drop, spin, clear) are panned left or right by the piece's column. The thresholds and tempo range are the constants at the top of `src/audio/music.ts`.
+
 ## Layout
 
 - `src/engine/` — deterministic, headless engine (sub-frame input timing, same as the original)
@@ -133,7 +154,7 @@ For local testing of the API, build and run `npx wrangler dev --local-upstream 1
 - `src/profile.ts` — records type, validator and merge, shared by the client and the accounts server
 - `src/ai/bot.ts` — VS opponent: searches every placement, including soft-drop + spin finishes
 - `src/render/` — canvas renderer (board spring physics, particles, action text)
-- `src/audio/` — synthesized WebAudio SFX
+- `src/audio/` — synthesized WebAudio SFX, sound packs and generative music
 - `src/ui/` — menus, config, results, session orchestration
 - `test/` — engine, bot, match server and accounts tests (vitest)
 - `e2e/` — browser runs of 40 LINES and BLITZ (Playwright, `npm run e2e`)
