@@ -33,6 +33,12 @@ To deploy by hand, run `npm run build`, then `npx wrangler deploy`.
 
 Live URL: https://teza.comonhq.com/
 
+### Offline and install (PWA)
+
+The fonts (Russo One, Saira Semi Condensed; SIL Open Font License, see `fonts/OFL-*.txt`) are self-hosted from `fonts/`, so the page makes no request to Google Fonts. `manifest.webmanifest` and the placeholder icons in `icons/` make the game installable.
+
+`sw.js` is a service worker that precaches the static build (`index.html`, `style.css`, `game.js`, the manifest, fonts and icons) on first load and then serves those cache-first, so solo modes work offline. `npm run build` stamps a hash of the build into its cache name, so each deploy gets a fresh cache and the old one is deleted. It only handles same-origin `GET`s: **`/api/*` (accounts, match WebSockets) is never intercepted or cached**, and neither are other methods or cross-origin requests. Under `npm start` the served `sw.js` is a no-op worker, so live rebuilds are never stale; to try offline mode locally, serve a production `dist/` instead.
+
 ## Game server
 
 The `teza` Worker (`worker/index.ts`) serves `dist/` as static assets. Only `/api/*` runs the script:
