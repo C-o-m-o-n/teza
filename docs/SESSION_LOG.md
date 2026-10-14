@@ -116,3 +116,14 @@
 
 **Next steps**
 - After deploy, register a test account on https://teza.comonhq.com and check that records sync between two browsers.
+
+## 2026-10-14 — Player accounts (factory job 003, rework 1)
+
+**What changed**
+- SIGN OUT now sends a last records `PUT`, signs out, then clears the local records, so the next player on a shared device doesn't inherit (or merge into their own account) the previous player's bests.
+- Account screen: the submit button reads LOG IN → / CREATE ACCOUNT → so it no longer repeats the SIGN IN tab label, and the tabs carry `aria-pressed`. Inputs show a 2px blue focus outline.
+- Under 860 px the account block sits between the brand and the mode bars, so SIGN IN is visible without scrolling.
+
+**Still open**
+- Same as round 1: no rate-limit rule for `/api/account/*` yet.
+- On narrow screens ↑/↓ still walks the menu in DOM order (bars first, then SIGN IN), which no longer matches the visual order.

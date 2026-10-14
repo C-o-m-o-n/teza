@@ -423,8 +423,12 @@ export class App {
     const signOutBtn = el("button", { class: "ghost-btn", "data-nav": "" }, "SIGN OUT");
     signOutBtn.addEventListener("click", async () => {
       signOutBtn.disabled = true;
+      await putRecords(this.records);
       await signOut();
+      // The records belong to the account now; a shared device must not hand them to the next player.
       this.account = null;
+      this.records = { vs: {} };
+      saveRecords(this.records);
       if (this.screen === "menu") this.showMenu();
     });
     block.append(
@@ -450,7 +454,9 @@ export class App {
       kind = k;
       loginTab.classList.toggle("primary", k === "login");
       registerTab.classList.toggle("primary", k === "register");
-      submit.textContent = k === "login" ? "SIGN IN" : "CREATE ACCOUNT";
+      loginTab.setAttribute("aria-pressed", String(k === "login"));
+      registerTab.setAttribute("aria-pressed", String(k === "register"));
+      submit.textContent = k === "login" ? "LOG IN →" : "CREATE ACCOUNT →";
       password.autocomplete = k === "login" ? "current-password" : "new-password";
       error.textContent = "";
     };

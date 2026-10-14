@@ -168,7 +168,7 @@ button { font: inherit; color: inherit; }
   color: var(--ink);
   outline: none;
 }
-.field input:focus { border-color: #3f6bff; background: rgba(63, 107, 255, 0.12); }
+.field input:focus { border-color: #3f6bff; background: rgba(63, 107, 255, 0.12); outline: 2px solid #3f6bff; outline-offset: 2px; }
 .form-error { min-height: 1.4em; margin: 0; color: #ff5f7a; font-size: 15px; }
 .account-form .actions { margin-top: 18px; }
 .ghost-btn:disabled { opacity: 0.5; cursor: wait; }
@@ -282,6 +282,8 @@ button { font: inherit; color: inherit; }
 @media (max-width: 860px) {
   .menu { grid-template-columns: 1fr; grid-template-rows: none; padding: 5vh 16px; row-gap: 3vh; overflow: auto; }
   .bars, .account-form, .account { grid-column: 1; grid-row: auto; }
+  .menu > .brand { order: -2; }
+  .menu > .account { order: -1; margin-bottom: 0; }
   .bar { margin-left: 0; }
   .bar-meta { display: none; }
 }
