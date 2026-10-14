@@ -188,5 +188,13 @@
 - Bass and kick start at a 4-row stack, arpeggio and hats at 10 rows. In BLITZ's last 30 s the arpeggio comes in, and the tempo rises to 187.5 BPM at time-up.
 - The pad has a soft pulse on every beat. Layers have a 0.05 drop-out margin. The pack select shows a focus outline for keyboard users.
 
+**Round 3 (rework after listening)**
+- Songs are now data (`src/audio/songs.ts`). There are five original songs, each with its own key, chord loop, groove and tempo: Lantern (menus), Gridline (40 LINES), Afterburn (BLITZ), Undertow (VERSUS) and Tidepool (ZEN, which has no danger gear). Packs now set only the timbre.
+- The music moves in stepped gears (calm, groove, drive, danger). Each gear has its own tempo and arrangement. A gear change lands on the beat with a crash going up or a sweep going down, and there is a 0.08 hysteresis margin. Incoming garbage counts toward VERSUS intensity.
+- Menu music: Lantern plays in the menus, crossfades into the mode's song at the countdown, and crossfades back when the run ends. New CONFIG **Music track** setting: Auto, a fixed song, or Off (`musicTrack`).
+- Punchier mix: a pitch-dropping kick with a click, a plucked bass with a sub, a snare, kick sidechain, and light saturation plus a compressor on the music only. Default music volume is now 60%. SFX have faster attacks, a heavier hard-drop thump and bigger clears that scale with lines, and their chords follow the song's key.
+
 **Still open**
-- `npm run e2e` BLITZ takes about 1.9 min of real time (1.4 min on main). The music creates more voices under the fake clock.
+- `npm run e2e` BLITZ takes about 2.2 min of real time (1.4 min on main). The menu and session music create voices under the fake clock.
+- A browser that saved settings from an earlier build of this branch keeps its saved music volume (40%), not the new 60% default.
+- Judged by measurement only. The sandbox has no audio output, so nobody has listened to the mix yet.
