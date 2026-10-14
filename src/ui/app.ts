@@ -216,6 +216,7 @@ export class App {
     const fixed = /^\d{1,10}$/.test(param) ? Number(param) : 0;
     const seed = fixed >= 1 && fixed <= 2147483646 ? fixed : Math.floor(Math.random() * 2147483646) + 1;
     const player = new Game(mode.options(seed), this.settings.handling);
+    player.trackFinesse = true;
     const playerView = new BoardView(player, {
       accent: mode.accent, mode: mode.id, objectiveLines: 40, label: mode.id === "vs" ? "YOU" : undefined,
     });
@@ -664,6 +665,8 @@ export class App {
       slider("DAS — delayed auto shift", 1, 20, 0.1, () => s.handling.das, (v) => (s.handling.das = v), f),
       slider("DCD — DAS cut delay", 0, 20, 0.1, () => s.handling.dcd, (v) => (s.handling.dcd = v), f),
       slider("SDF — soft drop factor", 5, 41, 1, () => s.handling.sdf, (v) => (s.handling.sdf = v), (v) => (v >= 41 ? "∞" : `${v}×`)),
+      toggle("IRS — initial rotation", () => s.handling.irs, (v) => (s.handling.irs = v)),
+      toggle("IHS — initial hold", () => s.handling.ihs, (v) => (s.handling.ihs = v)),
     );
     const visual = el("section", { class: "panel" },
       el("h2", {}, "AUDIO & VISUAL"),
@@ -740,6 +743,7 @@ export class App {
       stat("PPS", g.pps().toFixed(2)),
       stat("LINES", `${g.stats.lines}`),
       stat("KPP", g.stats.pieces ? (g.stats.inputs / g.stats.pieces).toFixed(2) : "—"),
+      stat("FINESSE", `${g.stats.finesse}`),
     ];
     const run = { pps: g.pps(), apm: g.apm(), pieces: g.stats.pieces, date: Date.now() };
     if (s.mode.id === "40l") {
