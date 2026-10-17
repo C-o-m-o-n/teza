@@ -40,7 +40,7 @@ function el<K extends keyof HTMLElementTagNameMap>(tag: K, attrs: Record<string,
 
 const ARROW_TURN: Record<string, number> = { ArrowUp: 0, ArrowRight: 90, ArrowDown: 180, ArrowLeft: 270 };
 
-/** A binding's label on its key cap. Arrows are drawn: the UI fonts have no ← or →, and their ↑ ↓ are hairlines. */
+/** Poster Slab's label for a key cap. Arrows are drawn: its fonts have no ← or →, and their ↑ ↓ are hairlines (Classic keeps keyName's). */
 function keyLabel(code: string): Node | string {
   const turn = ARROW_TURN[code];
   if (turn === undefined) return keyName(code);

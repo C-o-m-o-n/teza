@@ -5,6 +5,7 @@ import { expect, Page, test } from "@playwright/test";
 import { resolve } from "node:path";
 import { ReplayPlayer, parseReplay } from "../src/engine/replay";
 import { ModeId, modeById } from "../src/modes";
+import { openMenu, seedTheme } from "./menu";
 import { FRAME_MS, Plan, planRun } from "./plan";
 import { serveDist } from "./server";
 
@@ -40,11 +41,7 @@ test.afterEach(() => {
 async function play(page: Page, mode: ModeId, plan: Plan): Promise<void> {
   const ui = page.locator("#ui");
   await page.clock.install({ time: 0 });
-  await page.goto(`${server.url}/?seed=${SEED}`);
-  // The game opens on the title screen; any key skips it to the menu.
-  await expect(ui).toHaveAttribute("data-screen", "title");
-  await page.keyboard.press("Space");
-  await expect(ui).toHaveAttribute("data-screen", "menu");
+  await openMenu(page, `${server.url}/?seed=${SEED}`);
   await page.clock.pauseAt(CLICK_AT);
   await page.locator("button.bar", { hasText: modeById(mode).title }).click();
   await expect(ui).toHaveAttribute("data-screen", "play");
@@ -67,36 +64,45 @@ function stat(page: Page, label: string) {
   return page.locator(".results .stats .stat", { has: page.locator("span", { hasText: new RegExp(`^${label}$`) }) }).locator("strong");
 }
 
-test("40 LINES: full run to 40 LINES CLEARED", async ({ page }) => {
-  const plan = planRun("40l", SEED, CLICK_AT, GAP_MS["40l"]);
-  expect(plan.result, "Node run of the plan").toBe("clear");
-  expect(plan.lines, "Node run of the plan").toBe(40);
+// The same runs in each interface theme: Classic (the default) opens on the menu, Poster Slab on its title.
+for (const theme of ["classic", "poster"]) {
+  test.describe(`${theme} theme`, () => {
+    test.beforeEach(async ({ page }) => {
+      if (theme !== "classic") await seedTheme(page, theme);
+    });
 
-  await play(page, "40l", plan);
-  await expect(page.locator(".results .headline")).toHaveText("40 LINES CLEARED");
-  await expect(stat(page, "LINES")).toHaveText("40");
-  await expect(stat(page, "PIECES")).toHaveText(`${plan.pieces}`);
-  // The first clear is the PB, so its replay is stored; replayed in Node it is the same run.
-  const [ghost, records] = await page.evaluate(() => [localStorage.getItem("teza:ghost40l"), localStorage.getItem("teza:records")]);
-  expect(JSON.parse(records!)["40l"].value, "PB frames").toBe(plan.frames);
-  expect(records, "records hold no replay").not.toContain("events");
-  const replay = parseReplay(ghost, plan.frames);
-  expect(replay, "stored replay of the PB").not.toBeNull();
-  const replayed = new ReplayPlayer(replay!);
-  replayed.advanceTo(replay!.frames);
-  expect([replayed.game.result, replayed.game.frame, replayed.game.stats.pieces]).toEqual(["clear", plan.frames, plan.pieces]);
-  console.log(`40 LINES seed ${SEED}: lines 40, pieces ${plan.pieces}, time ${await page.locator(".results .big").textContent()}`);
-});
+    test("40 LINES: full run to 40 LINES CLEARED", async ({ page }) => {
+      const plan = planRun("40l", SEED, CLICK_AT, GAP_MS["40l"]);
+      expect(plan.result, "Node run of the plan").toBe("clear");
+      expect(plan.lines, "Node run of the plan").toBe(40);
 
-test("BLITZ: full 2-minute run to TIME'S UP", async ({ page }) => {
-  const plan = planRun("blitz", SEED, CLICK_AT, GAP_MS.blitz);
-  expect(plan.result, "Node run of the plan").toBe("clear");
-  expect(plan.score, "Node run of the plan").toBeGreaterThan(0);
+      await play(page, "40l", plan);
+      await expect(page.locator(".results .headline")).toHaveText("40 LINES CLEARED");
+      await expect(stat(page, "LINES")).toHaveText("40");
+      await expect(stat(page, "PIECES")).toHaveText(`${plan.pieces}`);
+      // The first clear is the PB, so its replay is stored; replayed in Node it is the same run.
+      const [ghost, records] = await page.evaluate(() => [localStorage.getItem("teza:ghost40l"), localStorage.getItem("teza:records")]);
+      expect(JSON.parse(records!)["40l"].value, "PB frames").toBe(plan.frames);
+      expect(records, "records hold no replay").not.toContain("events");
+      const replay = parseReplay(ghost, plan.frames);
+      expect(replay, "stored replay of the PB").not.toBeNull();
+      const replayed = new ReplayPlayer(replay!);
+      replayed.advanceTo(replay!.frames);
+      expect([replayed.game.result, replayed.game.frame, replayed.game.stats.pieces]).toEqual(["clear", plan.frames, plan.pieces]);
+      console.log(`40 LINES seed ${SEED}: lines 40, pieces ${plan.pieces}, time ${await page.locator(".results .big").textContent()}`);
+    });
 
-  await play(page, "blitz", plan);
-  await expect(page.locator(".results .headline")).toHaveText("TIME'S UP");
-  const score = Number((await page.locator(".results .big").textContent())?.replaceAll(",", ""));
-  expect(score).toBeGreaterThan(0);
-  expect(score, "browser score equals the Node run of the same inputs").toBe(plan.score);
-  console.log(`BLITZ seed ${SEED}: score ${score}, lines ${plan.lines}, pieces ${plan.pieces}`);
-});
+    test("BLITZ: full 2-minute run to TIME'S UP", async ({ page }) => {
+      const plan = planRun("blitz", SEED, CLICK_AT, GAP_MS.blitz);
+      expect(plan.result, "Node run of the plan").toBe("clear");
+      expect(plan.score, "Node run of the plan").toBeGreaterThan(0);
+
+      await play(page, "blitz", plan);
+      await expect(page.locator(".results .headline")).toHaveText("TIME'S UP");
+      const score = Number((await page.locator(".results .big").textContent())?.replaceAll(",", ""));
+      expect(score).toBeGreaterThan(0);
+      expect(score, "browser score equals the Node run of the same inputs").toBe(plan.score);
+      console.log(`BLITZ seed ${SEED}: score ${score}, lines ${plan.lines}, pieces ${plan.pieces}`);
+    });
+  });
+}
