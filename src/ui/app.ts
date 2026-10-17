@@ -5,10 +5,14 @@ import { music, sfx } from "../audio/sfx";
 import { SONGS, songFor } from "../audio/songs";
 import { BOARD_H, BUFFER, PieceType, Rotation } from "../engine/constants";
 import { Action, Game, GameEvent } from "../engine/game";
+import { Recorder, ReplayInput, ReplayPlayer, restFrame, stepTo } from "../engine/replay";
 import { MODES, Mode, ModeId, modeById } from "../modes";
 import { mergeRecords, passwordError, usernameError } from "../profile";
 import { BoardView, formatTime, Renderer } from "../render/renderer";
-import { BIND_LABELS, BIND_ORDER, Bind, Records, Settings, defaultSettings, loadRecords, loadSettings, saveRecords, saveSettings } from "../settings";
+import {
+  BIND_LABELS, BIND_ORDER, Bind, Records, Settings, defaultSettings, loadGhost, loadRecords, loadSettings, saveGhost,
+  saveRecords, saveSettings,
+} from "../settings";
 import { Profile, fetchMe, finishSession, putRecords, signIn } from "./account";
 
 type Screen = "menu" | "bots" | "config" | "account" | "play" | "results";
@@ -60,6 +64,10 @@ interface Session {
   botAI: Bot | null;
   botProfile: BotProfile | null;
   botAcc: number;
+  recorder: Recorder | null; // 40 LINES: records the player's inputs
+  clock: number; // frames since GO, which the recorded player trails (see advanceTo)
+  ghost: ReplayPlayer | null; // 40 LINES: the PB run, raced alongside
+  ghostView: BoardView | null;
   t: number; // seconds since session start (countdown included)
   started: boolean;
   last: number; // performance.now() of last sim advance
@@ -90,7 +98,7 @@ export class App {
     window.addEventListener("keyup", (e) => this.onKeyUp(e));
     window.addEventListener("blur", () => {
       this.held.clear();
-      this.session?.player.releaseAll();
+      if (this.session) this.input(this.session, { type: "releaseAll" });
     });
     window.addEventListener("pointerdown", () => this.unlockAudio(), { once: false });
     this.showMenu();
@@ -184,18 +192,39 @@ export class App {
     s.started = true;
     s.last = now;
     // keys held through the countdown take effect at GO, like the original
-    for (const b of this.held) if ((GAME_ACTIONS as string[]).includes(b)) s.player.press(b as Action);
+    for (const b of this.held) if ((GAME_ACTIONS as string[]).includes(b)) this.input(s, { type: "press", action: b as Action });
   }
 
-  /** Bring the simulation up to `now` so an input lands at the right sub-frame. */
-  private advanceTo(now: number): void {
+  /** Apply an input to the player's game, recording it in 40 LINES. */
+  private input(s: Session, input: ReplayInput): void {
+    if (s.recorder) s.recorder.apply(input);
+    else if (input.type === "press") s.player.press(input.action);
+    else if (input.type === "release") s.player.release(input.action);
+    else s.player.releaseAll();
+  }
+
+  /**
+   * Bring the simulation up to `now` so an input (`input`) lands at the right sub-frame. A recorded
+   * player rests only on whole frames between inputs, so its replay takes the same steps (replay.ts).
+   */
+  private advanceTo(now: number, input = false): void {
     const s = this.session;
     if (!s || !s.started) return;
     const dt = Math.min(0.25, Math.max(0, (now - s.last) / 1000));
     s.last = now;
     if (s.endAt !== null) return;
     const frames = dt * 60;
-    s.player.advance(frames);
+    if (s.recorder) {
+      s.clock += frames;
+      stepTo(s.player, restFrame(s.clock, input));
+    } else {
+      s.player.advance(frames);
+    }
+    if (s.ghost && s.ghostView) {
+      s.ghost.advanceTo(s.player.frame);
+      const lead = s.ghost.game.stats.lines - s.player.stats.lines;
+      s.ghostView.marker = lead > 0 ? `GHOST +${lead}` : lead < 0 ? `YOU +${-lead}` : "EVEN";
+    }
     if (s.bot && s.botAI && s.botProfile) {
       s.bot.advance(frames);
       s.botAcc += dt;
@@ -223,6 +252,12 @@ export class App {
     let bot: Game | null = null;
     let botView: BoardView | null = null;
     let botAI: Bot | null = null;
+    const replay = mode.id === "40l" ? loadGhost(this.records["40l"]?.value) : null;
+    const ghost = replay ? new ReplayPlayer(replay) : null;
+    const ghostView = ghost
+      ? new BoardView(ghost.game, { accent: mode.accent, mode: "40l", objectiveLines: 40, label: "PB GHOST", compact: true, ghost: true })
+      : null;
+    if (ghostView) ghostView.marker = "EVEN";
     if (mode.id === "vs" && profile) {
       bot = new Game(mode.options(seed));
       botView = new BoardView(bot, { accent: mode.accent, mode: "vs", label: `${profile.name} BOT`, compact: true });
@@ -230,10 +265,11 @@ export class App {
     }
     this.session = {
       mode, seed, player, playerView, bot, botView, botAI, botProfile: profile, botAcc: 0,
+      recorder: mode.id === "40l" ? new Recorder(player) : null, clock: 0, ghost, ghostView,
       t: 0, started: false, last: performance.now(), endAt: null, outcome: null,
     };
     this.renderer.accent = mode.accent;
-    this.renderer.views = botView ? [playerView, botView] : [playerView];
+    this.renderer.views = botView ? [playerView, botView] : ghostView ? [playerView, ghostView] : [playerView];
     this.renderer.flights = [];
     this.renderer.overlay = { countdown: null, countdownT: 0 };
     this.renderer.layoutViews();
@@ -374,8 +410,8 @@ export class App {
       this.held.add(bind);
       const s = this.session;
       if (s?.started && s.endAt === null) {
-        this.advanceTo(performance.now());
-        s.player.press(bind as Action);
+        this.advanceTo(performance.now(), true);
+        this.input(s, { type: "press", action: bind as Action });
       }
       return;
     }
@@ -415,8 +451,8 @@ export class App {
     this.held.delete(bind);
     const s = this.session;
     if (s?.started && (GAME_ACTIONS as string[]).includes(bind)) {
-      this.advanceTo(performance.now());
-      s.player.release(bind as Action);
+      this.advanceTo(performance.now(), true);
+      this.input(s, { type: "release", action: bind as Action });
     }
   }
 
@@ -755,6 +791,7 @@ export class App {
         if (!pb || g.frame < pb.value) {
           badge = pb ? `NEW PERSONAL BEST · −${((pb.value - g.frame) / 60).toFixed(3)}s` : "FIRST RECORD";
           this.records["40l"] = { value: g.frame, ...run };
+          if (s.recorder) saveGhost(s.recorder.replay());
         } else {
           badge = `PB ${formatTime(pb.value).main}${formatTime(pb.value).ms}`;
         }

@@ -101,7 +101,10 @@ export interface ViewOptions {
   mode: "40l" | "blitz" | "zen" | "vs";
   objectiveLines?: number;
   compact?: boolean; // opponent board: fewer stats
+  ghost?: boolean; // PB ghost: drawn translucent, laid out beside the player's board
 }
+
+const GHOST_ALPHA = 0.4;
 
 /** Visual state for one board: springs, particles, action text. */
 export class BoardView {
@@ -121,6 +124,8 @@ export class BoardView {
   flashes: Flash[] = [];
   trails: Trail[] = [];
   bigText: { text: string; t: number; color: string } | null = null;
+  /** Line above the board, e.g. the ghost's lead over the player. */
+  marker: string | null = null;
   danger = 0;
   bounciness = 1;
   reduceMotion = false;
@@ -356,6 +361,7 @@ export class Renderer {
   shadowOpacity = 0.3;
   accent = "#3f6bff";
   private bgT = 0;
+  private layer: HTMLCanvasElement | null = null; // offscreen, for translucent views
 
   constructor(canvas: HTMLCanvasElement) {
     this.canvas = canvas;
@@ -381,7 +387,18 @@ export class Renderer {
     if (!n) return;
     const W = this.width;
     const H = this.height;
-    if (n === 1) {
+    if (n === 2 && this.views[1].opts.ghost) {
+      // the player's board exactly where it is alone, the ghost smaller in the space to its right
+      const [player, ghost] = this.views;
+      const S = Math.floor(Math.min((H * 0.86) / (BOARD_H + 3), (W * 0.94) / (BOARD_W + 13)));
+      const bx = Math.round(W / 2 - (BOARD_W * S) / 2 + S * 0.5);
+      const by = Math.round(H / 2 - (BOARD_H * S) / 2 + S * 0.6);
+      player.layout = { bx, by, S };
+      const left = bx + BOARD_W * S + S * 5.4; // right of the player's next column, plus a gap
+      // ghost width: hold column 5.2 cells, board, next column 4.8 cells
+      const gs = Math.max(4, Math.floor(Math.min(S * 0.62, (W - left - 12) / (BOARD_W + 10))));
+      ghost.layout = { bx: Math.round(left + gs * 5.2), by: by + BOARD_H * (S - gs), S: gs };
+    } else if (n === 1) {
       const S = Math.floor(Math.min((H * 0.86) / (BOARD_H + 3), (W * 0.94) / (BOARD_W + 13)));
       const bx = Math.round(W / 2 - (BOARD_W * S) / 2 + S * 0.5);
       const by = Math.round(H / 2 - (BOARD_H * S) / 2 + S * 0.6);
@@ -424,7 +441,10 @@ export class Renderer {
     const ctx = this.ctx;
     ctx.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
     this.drawBackground();
-    for (const v of this.views) this.drawView(v);
+    for (const v of this.views) {
+      if (v.opts.ghost) this.drawFaded(v, GHOST_ALPHA);
+      else this.drawView(v);
+    }
     this.drawFlights();
   }
 
@@ -484,7 +504,34 @@ export class Renderer {
     ctx.fillText(text, x, y);
   }
 
-  private drawView(v: BoardView): void {
+  /** Draw a view on the offscreen layer, then the layer at `alpha`; name and marker stay opaque. */
+  private drawFaded(v: BoardView, alpha: number): void {
+    const main = this.ctx;
+    const layer = (this.layer ??= document.createElement("canvas"));
+    if (layer.width !== this.canvas.width || layer.height !== this.canvas.height) {
+      layer.width = this.canvas.width;
+      layer.height = this.canvas.height;
+    }
+    const lctx = layer.getContext("2d")!;
+    lctx.setTransform(1, 0, 0, 1, 0, 0);
+    lctx.clearRect(0, 0, layer.width, layer.height);
+    lctx.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
+    this.ctx = lctx;
+    try {
+      this.drawView(v, false);
+    } finally {
+      this.ctx = main;
+    }
+    main.save();
+    main.setTransform(1, 0, 0, 1, 0, 0);
+    main.globalAlpha = alpha;
+    main.drawImage(layer, 0, 0);
+    main.restore();
+    if (v.opts.label) this.drawName(v);
+    if (v.marker) this.drawMarker(v);
+  }
+
+  private drawView(v: BoardView, names = true): void {
     const ctx = this.ctx;
     const g = v.game;
     const { bx, by, S } = v.layout;
@@ -657,7 +704,17 @@ export class Renderer {
       ctx.restore();
     }
     if (this.overlay.countdown && v === this.views[0]) this.drawCountdown(v);
-    for (const vv of this.views) if (vv === v && v.opts.label) this.drawName(v);
+    if (names && v.opts.label) this.drawName(v);
+  }
+
+  private drawMarker(v: BoardView): void {
+    const { bx, by, S } = v.layout;
+    const ctx = this.ctx;
+    ctx.font = `${Math.round(S * 1.1)}px ${DISPLAY}`;
+    ctx.textAlign = "center";
+    ctx.textBaseline = "alphabetic";
+    ctx.fillStyle = v.opts.accent;
+    ctx.fillText(v.marker!, bx + (BOARD_W * S) / 2, by - S * 1.6);
   }
 
   private drawName(v: BoardView): void {
