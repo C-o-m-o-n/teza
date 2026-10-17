@@ -49,9 +49,9 @@ jobs:
           $CURL --fail "$SITE_URL/" > /dev/null
           $CURL --fail "$SITE_URL/game.js" > /dev/null
           # No upgrade header: the Worker itself must answer 426, proving /api/* reaches the script.
-          STATUS=$($CURL --output /dev/null --write-out "%{http_code}" "$SITE_URL/api/match/ci-check")
+          STATUS=$($CURL --output /dev/null --write-out "%{http_code}" "$SITE_URL/api/match/CHECK2")
           if [ "$STATUS" != "426" ]; then
-            echo "::error::$SITE_URL/api/match/ci-check returned $STATUS, expected 426."
+            echo "::error::$SITE_URL/api/match/CHECK2 returned $STATUS, expected 426."
             exit 1
           fi
           echo "TEZA is live at $SITE_URL"
