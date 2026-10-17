@@ -289,5 +289,5 @@
 **Still open**
 - No auto-reconnect or resume UI; a dropped socket ends the session as CONNECTION LOST.
 - The opponent's board rests at the last relayed frame, so between their inputs it doesn't fall.
-- If the server's catch-up ever moves a player's engine past one of their inputs (more than 2 s of lag), that player's predicted board drifts from the server until the match ends; only garbage is rewound.
+- A player more than 2 s behind the server clock has inputs rejected as `frame-late` that their client already applied, so the predicted board drifts from the server until the match ends; only garbage is rewound. (The catch-up target equals the frame-late bound, so a catch-up alone never moves an engine past an accepted input's snapped frame; the relay test moves the engine directly.)
 - Hardening still to do: Origin check on the upgrade, resume token out of the URL, constant-time token compare, CSP.
