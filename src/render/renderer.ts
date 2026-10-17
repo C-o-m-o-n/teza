@@ -105,6 +105,7 @@ export interface ViewOptions {
 }
 
 const GHOST_ALPHA = 0.4;
+const GHOST_MIN_S = 8; // smallest readable ghost cell size, px
 
 /** Visual state for one board: springs, particles, action text. */
 export class BoardView {
@@ -126,6 +127,8 @@ export class BoardView {
   bigText: { text: string; t: number; color: string } | null = null;
   /** Line above the board, e.g. the ghost's lead over the player. */
   marker: string | null = null;
+  /** Not drawn: no room for it at a readable size. */
+  hidden = false;
   danger = 0;
   bounciness = 1;
   reduceMotion = false;
@@ -396,8 +399,9 @@ export class Renderer {
       player.layout = { bx, by, S };
       const left = bx + BOARD_W * S + S * 5.4; // right of the player's next column, plus a gap
       // ghost width: hold column 5.2 cells, board, next column 4.8 cells
-      const gs = Math.max(4, Math.floor(Math.min(S * 0.62, (W - left - 12) / (BOARD_W + 10))));
-      ghost.layout = { bx: Math.round(left + gs * 5.2), by: by + BOARD_H * (S - gs), S: gs };
+      const gs = Math.floor(Math.min(S * 0.62, (W - left - 12) / (BOARD_W + 10)));
+      ghost.hidden = gs < GHOST_MIN_S; // a narrow window: race without the ghost rather than show a sliver
+      ghost.layout = { bx: Math.round(left + gs * 5.2), by: by + BOARD_H * (S - gs), S: Math.max(1, gs) };
     } else if (n === 1) {
       const S = Math.floor(Math.min((H * 0.86) / (BOARD_H + 3), (W * 0.94) / (BOARD_W + 13)));
       const bx = Math.round(W / 2 - (BOARD_W * S) / 2 + S * 0.5);
@@ -442,6 +446,7 @@ export class Renderer {
     ctx.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
     this.drawBackground();
     for (const v of this.views) {
+      if (v.hidden) continue;
       if (v.opts.ghost) this.drawFaded(v, GHOST_ALPHA);
       else this.drawView(v);
     }
@@ -686,7 +691,7 @@ export class Renderer {
     ctx.restore();
 
     this.drawStats(v);
-    this.drawActionText(v);
+    if (!v.opts.ghost) this.drawActionText(v); // the ghost's clear names would crowd its stats and the player's
     if (v.bigText) {
       const t = v.bigText.t;
       const a = t < 0.15 ? t / 0.15 : t > 1.5 ? 1 - (t - 1.5) / 0.5 : 1;
@@ -714,7 +719,8 @@ export class Renderer {
     ctx.textAlign = "center";
     ctx.textBaseline = "alphabetic";
     ctx.fillStyle = v.opts.accent;
-    ctx.fillText(v.marker!, bx + (BOARD_W * S) / 2, by - S * 1.6);
+    // above the three buffer rows where pieces spawn, so the falling piece never covers it
+    ctx.fillText(v.marker!, bx + (BOARD_W * S) / 2, by - S * 3.4);
   }
 
   private drawName(v: BoardView): void {
