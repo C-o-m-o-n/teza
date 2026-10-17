@@ -31,9 +31,10 @@ export async function newRoom(): Promise<string | null> {
 }
 
 /**
- * Whether the match route is served here. A browser can't read the status of a refused WebSocket
- * upgrade, so JOIN asks first: without `Upgrade` the Worker answers 426 (static servers don't).
+ * Whether online play is served here. A browser can't read the status of a refused WebSocket
+ * upgrade, so JOIN asks first, with the one call that answers 201 on the Worker: issuing a code
+ * stores nothing (a room exists once its creator's socket holds a slot).
  */
 export async function onlineAvailable(): Promise<boolean> {
-  return (await send("GET", "/api/match/AAAAAA"))?.status === 426;
+  return (await newRoom()) !== null;
 }

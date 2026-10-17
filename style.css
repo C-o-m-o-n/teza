@@ -225,6 +225,12 @@ button { font: inherit; color: inherit; }
   padding: 6px 12px;
   margin-right: 90px;
 }
+/* VERSUS stacks six bars (four bots, two online rooms): tighter, so they fit a 720px screen */
+:where(html:not([data-theme="poster"])) .bars.dense { gap: 8px; }
+:where(html:not([data-theme="poster"])) .bars.dense .bar { min-height: 84px; padding: 12px 34px 11px 30px; }
+:where(html:not([data-theme="poster"])) .bars.dense .bar-title { font-size: 38px; }
+:where(html:not([data-theme="poster"])) .bars.dense .bar-tagline { font-size: 15px; margin-top: 4px; }
+:where(html:not([data-theme="poster"])) .bars.dense .bar-glyph { font-size: 120px; }
 
 :where(html:not([data-theme="poster"])) .hint {
   grid-column: 1 / -1;
@@ -577,6 +583,10 @@ button { font: inherit; color: inherit; }
   padding: 5px 10px;
   margin-right: 90px;
 }
+/* VERSUS stacks six bars (four bots, two online rooms): tighter, stepping in one column a row */
+:where(html[data-theme="poster"]) .bars.dense .bar { margin-left: calc(var(--i) * var(--col)); padding: 8px 34px 9px 34px; }
+:where(html[data-theme="poster"]) .bars.dense .bar-title { font-size: 46px; }
+:where(html[data-theme="poster"]) .bars.dense .bar-glyph { font-size: 120px; }
 
 :where(html[data-theme="poster"]) .menu-foot {
   display: flex;

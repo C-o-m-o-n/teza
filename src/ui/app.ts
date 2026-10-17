@@ -815,7 +815,7 @@ export class App {
       }),
     );
     const page = this.subPage("VERSUS", "Pick an opponent. First to top out loses.",
-      el("nav", { class: "bars" }, ...bars),
+      el("nav", { class: "bars dense" }, ...bars),
       unavailable,
       el("footer", { class: "hint" }, "ESC to go back"),
     );
@@ -872,7 +872,7 @@ export class App {
       this.leaveRoom();
       this.showBots();
     });
-    this.lobbyPage("ROOM", "Send this code to your opponent. The match starts as soon as they join.",
+    this.lobbyPage("ONLINE", "Send this code to your opponent. The match starts as soon as they join.",
       el("p", { class: "account-label" }, "ROOM CODE"),
       el("p", { class: "room-code", "aria-label": code.split("").join(" ") }, code),
       status,
