@@ -1,13 +1,11 @@
 // Recorded 40 LINES runs: the seed, the handling in effect and every input at the frame it landed,
 // enough to rebuild the run exactly (the PB ghost). No DOM.
 //
-// Game.advance takes its steps between whole frames and the points where it was asked to stop, and
-// lock delay, gravity and DAS resolve at the end of each step, so stopping mid-frame changes the
-// run. A recorded game therefore rests only on whole frames and at its inputs, which sit on a
-// 1/256-frame grid so the frame arithmetic is exact (see `restFrame`). A replay stops at the same
-// points and so takes the same steps.
+// A recorded game rests only on whole frames and at its inputs, on the 1/256-frame grid
+// (stepping.ts). A replay stops at the same points and so takes the same steps.
 import { modeById } from "../modes";
 import { Action, Game, Handling } from "./game";
+import { stepTo } from "./stepping";
 
 export type ReplayInput =
   | { type: "press"; action: Action }
@@ -25,21 +23,6 @@ export interface Replay {
 }
 
 const ACTIONS: readonly Action[] = ["left", "right", "soft", "hard", "cw", "ccw", "180", "hold"];
-const SUBFRAMES = 256;
-
-/**
- * Where a recorded game may rest, given the session clock in frames: the last whole frame between
- * inputs, or the 1/256-frame grid point at an input.
- */
-export function restFrame(clock: number, input: boolean): number {
-  return input ? Math.floor(clock * SUBFRAMES) / SUBFRAMES : Math.floor(clock);
-}
-
-/** Advance `game` to `frame` if it is behind it. */
-export function stepTo(game: Game, frame: number): void {
-  if (frame > game.frame) game.advance(frame - game.frame);
-}
-
 function apply(game: Game, input: ReplayInput): void {
   if (input.type === "press") game.press(input.action);
   else if (input.type === "release") game.release(input.action);

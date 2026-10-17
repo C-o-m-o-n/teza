@@ -5,7 +5,8 @@ import { music, sfx } from "../audio/sfx";
 import { SONGS, songFor } from "../audio/songs";
 import { BOARD_H, BUFFER, PieceType, Rotation } from "../engine/constants";
 import { Action, Game, GameEvent } from "../engine/game";
-import { Recorder, ReplayInput, ReplayPlayer, restFrame, stepTo } from "../engine/replay";
+import { Recorder, ReplayInput, ReplayPlayer } from "../engine/replay";
+import { stepToClock } from "../engine/stepping";
 import { MODES, Mode, ModeId, modeById } from "../modes";
 import { mergeRecords, passwordError, usernameError } from "../profile";
 import { BoardView, formatTime, Renderer } from "../render/renderer";
@@ -86,7 +87,7 @@ interface Session {
   botProfile: BotProfile | null;
   botAcc: number;
   recorder: Recorder | null; // 40 LINES: records the player's inputs
-  clock: number; // frames since GO, which the recorded player trails (see advanceTo)
+  clock: number; // frames since GO, which the player and bot trail (see advanceTo)
   ghost: ReplayPlayer | null; // 40 LINES: the PB run, raced alongside
   ghostView: BoardView | null;
   t: number; // seconds since session start (countdown included)
@@ -240,8 +241,9 @@ export class App {
   }
 
   /**
-   * Bring the simulation up to `now` so an input (`input`) lands at the right sub-frame. A recorded
-   * player rests only on whole frames between inputs, so its replay takes the same steps (replay.ts).
+   * Bring the simulation up to `now` so an input (`input`) lands at the right sub-frame. The player
+   * and bot rest only on whole frames between inputs (stepping.ts), so the result does not depend
+   * on the display's frame timing, and a 40 LINES replay takes the same steps.
    */
   private advanceTo(now: number, input = false): void {
     const s = this.session;
@@ -249,20 +251,15 @@ export class App {
     const dt = Math.min(0.25, Math.max(0, (now - s.last) / 1000));
     s.last = now;
     if (s.endAt !== null) return;
-    const frames = dt * 60;
-    if (s.recorder) {
-      s.clock += frames;
-      stepTo(s.player, restFrame(s.clock, input));
-    } else {
-      s.player.advance(frames);
-    }
+    s.clock += dt * 60;
+    stepToClock(s.player, s.clock, input);
     if (s.ghost && s.ghostView) {
       s.ghost.advanceTo(s.player.frame);
       const lead = s.ghost.game.stats.lines - s.player.stats.lines;
       s.ghostView.marker = lead > 0 ? `GHOST +${lead}` : lead < 0 ? `YOU +${-lead}` : "EVEN";
     }
     if (s.bot && s.botAI && s.botProfile) {
-      s.bot.advance(frames);
+      stepToClock(s.bot, s.clock);
       s.botAcc += dt;
       const interval = 1 / s.botProfile.pps;
       while (s.botAcc >= interval && !s.bot.over) {
