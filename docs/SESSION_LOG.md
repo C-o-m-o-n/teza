@@ -244,3 +244,22 @@
 - CONFIG opens scrolled to the top, so its red header is fully in view (focusing BACK used to scroll it off). A rebind redraws the screen at the scroll position it had. The header band is smaller.
 - Arrow key caps are drawn as SVG block arrows. The brand fonts have no ← or →, and their ↑ ↓ are hairlines. Key-cap text is 16px.
 - The title's "press any key" is paper at 70%, not muted grey. At 390 the small wordmark has more room above the VERSUS and ACCOUNT titles.
+
+## 2026-10-17 — Interface themes, Classic and Poster Slab (factory job 011)
+
+**What changed**
+- New setting `theme` (CONFIG › STYLE › Interface theme), from the registry in `src/ui/themes.ts`: **Classic** (the default, also for saved settings without a theme) and **Poster Slab**. An unknown id falls back to Classic. RESET TO DEFAULTS returns to Classic. Switching redraws CONFIG in place and never starts the title screen.
+- Classic is the UI from before job 010: dark background, stacked TE over ZA with the signed-in stats under it, coloured stepped mode bars, text arrow key caps, no title screen. Poster Slab is job 010's UI, title screen included.
+- `<html data-theme>` and the `theme-color` meta are set by an inline script in `index.html` before the stylesheet, so the first paint is already themed. `style.css` scopes each theme's rules with `:where(...)`, so specificity is unchanged and Classic applies when the attribute is missing or unknown.
+- Classic wordmark: the original heading with the Z drawn as the cut Z, in the original blue `#3F6BFF`, stretched to Russo One's Z so A doesn't move. Each time the menu opens, its four pieces drop in and lock, bottom row first (0.6 s). There is no drop with reduced motion, or when the menu only redraws (sign-in or sign-out).
+- Icons, favicon and the share image are now Classic's: blue Z-tetromino cells with a white accent on `#08080F`, and a dark OG image with the stacked wordmark. The manifest colours are `#08080F` again.
+- e2e: the 40 LINES and BLITZ runs play in both themes, and `e2e/themes.e2e.ts` covers the pre-paint theme, each theme's first screen, the CONFIG switch with reload and reset, and the Z drop with and without reduced motion.
+- Checked by screenshot diff against `b650320` (5faf0c9 plus the PB ghost) for Classic and `86ee106` for Poster Slab, at 1280x800 and 390x844. Menu signed out and in, VERSUS, ACCOUNT, CONFIG and results all matched with 0 differing pixels, apart from the Z box and CONFIG's added STYLE panel. The game canvas was hidden for the diff because its background differs between two loads of the same build.
+
+**Still open**
+- The inline pre-paint script lists the theme ids and colours again. `test/themes.test.ts` fails if it drifts from the registry.
+- If the sign-in check answers while the Z is still dropping, the redraw snaps the pieces into place.
+
+**Round 2 (design review)**
+- CONFIG's STYLE panel is now a row of its own above HANDLING, AUDIO & VISUAL and CONTROLS, one column wide on the same grid. Those three panels lay out as before in both themes, with no hole under STYLE in Poster Slab at 1440. Screenshot diffs with the strip removed show 0 differing pixels against the pre-010 build (Classic) and main (Poster Slab) at 1280x800 and 390x844.
+- In Classic's drop, TE stays in front of the falling Z pieces.

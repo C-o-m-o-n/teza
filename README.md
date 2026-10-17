@@ -25,7 +25,7 @@ npx playwright install chromium   # once, downloads the browser Playwright drive
 npm run e2e
 ```
 
-`npm run e2e` builds `dist/`, serves it from a small static server on a free localhost port (no dev server or network needed) and plays two full games in headless Chromium: a 40 LINES run to `40 LINES CLEARED` and a 2-minute BLITZ run to `TIME'S UP`. Each run opens the game with `?seed=7` (a `?seed=<positive integer>` URL parameter fixes the piece sequence) and presses keys from a plan the game's own bot computes in Node (`e2e/plan.ts`). Playwright's fake clock drives time, so the runs are identical every time and take about 1.5 minutes of real time. The BLITZ score in the browser must equal the score of the same inputs replayed in Node, the 40 LINES run's stored PB replay (see PB ghost) must replay in Node to the same clear, frame count and pieces, and any page error or `console.error` fails the run. The e2e files (`e2e/*.e2e.ts`) are not part of `npm test` or `npm run check`.
+`npm run e2e` builds `dist/`, serves it from a small static server on a free localhost port (no dev server or network needed) and plays two full games in headless Chromium, once in each interface theme (Classic opens on the menu, Poster Slab on its title screen, which the run skips with a key): a 40 LINES run to `40 LINES CLEARED` and a 2-minute BLITZ run to `TIME'S UP`. Each run opens the game with `?seed=7` (a `?seed=<positive integer>` URL parameter fixes the piece sequence) and presses keys from a plan the game's own bot computes in Node (`e2e/plan.ts`). Playwright's fake clock drives time, so the runs are identical every time and take about 4 minutes of real time. The BLITZ score in the browser must equal the score of the same inputs replayed in Node, the 40 LINES run's stored PB replay (see PB ghost) must replay in Node to the same clear, frame count and pieces, and any page error or `console.error` fails the run. `e2e/themes.e2e.ts` checks the themes: the theme set before first paint, each theme's first screen, switching in CONFIG (live, after a reload, and RESET), and Classic's Z drop with and without reduced motion. The e2e files (`e2e/*.e2e.ts`) are not part of `npm test` or `npm run check`.
 
 ## Deploy
 
@@ -183,13 +183,22 @@ Each kick ducks the rest of the music (sidechain). Combos (from 1 COMBO) add a m
 
 ## Brand
 
-The "Poster Slab" identity. The game opens on a title screen where T, E, Z and A drop into a red slab like pieces, lock with a one-frame squash, and the CHEZA row clears and wipes away to the menu. Any key, click or tap skips it. Clicking the wordmark on the menu replays it. With reduced motion (the OS setting or CONFIG › Reduce motion) it shows its last frame and waits for a key.
+Two interface themes, picked in CONFIG › STYLE › Interface theme and saved per device in `teza:settings` (`theme`). RESET TO DEFAULTS returns to Classic.
 
-- **Wordmark**: TEZA in Big Shoulders Display 900, tight tracking. The Z is drawn in SVG (`src/ui/brand.ts`, `Z_PIECES`): a heavy Z cut into four pieces laid out like a Z-tetromino's cells. One `wordmark()` is used on the title screen, the menu slab and the ACCOUNT, VERSUS and CONFIG headers.
-- **Palette**: ink black `#0B0B0C` (background, `theme_color`), paper white `#F3EFE6` (text), signal red `#E0301E` (the slab), field green `#0F6B3E` (the 12px stripe). These are the `:root` tokens in `style.css`. Piece colours, mode accents and the board are unchanged.
-- **Type**: Big Shoulders Display (800 to 900) for display, Archivo Narrow (500 to 700) for body text. Both are variable latin subsets, one woff2 each in `fonts/`. Russo One and Saira Semi Condensed stay for the in-game canvas text.
-- **Icons**: the Z-tetromino as four paper cells on a red square, with one cell green. `icons/favicon.svg` is the same cells with no side padding. The maskable icon keeps the cells inside the central 80% safe circle.
-- **Share image**: `og/og-image.png`, 1200x630. It shows the title screen's last frame: wordmark, "Tetris + cheza / Swahili for play" and "Built in Kenya". `index.html` points Open Graph and Twitter cards at `https://teza.comonhq.com/og/og-image.png`.
+- **Classic** (the default): the original look. Dark background, the stacked TE over ZA wordmark on the left with the signed-in stats under it, and the coloured stepped mode bars. It opens straight on the menu. Russo One for display, Saira Semi Condensed for body text, ZA in blue `#3F6BFF` on `#08080F`.
+- **Poster Slab**: ink, paper, a red slab and a green stripe, in Big Shoulders Display and Archivo Narrow. It opens on a title screen where T, E, Z and A drop into the slab like pieces, lock with a one-frame squash, and the CHEZA row clears and wipes away to the menu. Any key, click or tap skips it. Clicking the wordmark on the menu replays it. With reduced motion (the OS setting or CONFIG › Reduce motion) it shows its last frame and waits for a key. Palette: ink black `#0B0B0C`, paper white `#F3EFE6`, signal red `#E0301E`, field green `#0F6B3E`.
+
+How themes work:
+
+- **Registry**: `src/ui/themes.ts` lists each theme's id, name, tagline and `theme-color`. The CONFIG select, the setting's validation and `App` all read it. `App` sets `<html data-theme="<id>">` and the `theme-color` meta, and builds each screen's markup for the theme (Classic's stacked brand, or Poster's slab and title screen).
+- **Before first paint**: a small inline script in `index.html`'s `<head>`, ahead of the stylesheet, reads the saved theme and sets `data-theme` and `theme-color`, so the wrong theme never flashes. It knows the same ids and colours as the registry (`test/themes.test.ts` checks that) and falls back to Classic.
+- **CSS**: `style.css` scopes Classic's rules to `html:not([data-theme="poster"])` and Poster Slab's to `html[data-theme="poster"]`, each inside `:where()` so specificity is as before. Classic is therefore the look when the attribute is missing or unknown. A new theme is a registry entry, its CSS scope (added to Classic's `:not()` if it replaces Classic entirely) and its entry in the inline script.
+
+The marks:
+
+- **Wordmarks**: the Z is drawn in SVG (`src/ui/brand.ts`, `Z_PIECES`): a heavy Z cut into four pieces laid out like a Z-tetromino's cells. Classic's `classicWordmark()` is the original TE over ZA heading in Russo One with that Z in place of the letter, stretched to Russo One's Z so ZA sets exactly as before. Each time the menu opens, its four pieces drop in and lock, bottom row first (about 0.6 s, not with reduced motion). Poster's `wordmark()` is TEZA in Big Shoulders Display 900, used on the title screen, the menu slab and the ACCOUNT, VERSUS and CONFIG headers.
+- **Icons**: Classic's. The Z-tetromino as four cells on `#08080F`, three blue and the last one white. `icons/favicon.svg` is the same cells with no side padding. The maskable icon keeps the cells inside the central 80% safe circle. `manifest.webmanifest` uses `#08080F` for `theme_color` and `background_color`. The icons do not change with the theme.
+- **Share image**: `og/og-image.png`, 1200x630, in Classic: the stacked TE/ZA wordmark with the blue cut Z, "Tetris + cheza / Swahili for play" and "Built in Kenya" on dark. `index.html` points Open Graph and Twitter cards at `https://teza.comonhq.com/og/og-image.png`.
 - **Regenerating**: `npm run brand` (`scripts/brand.mjs`) rewrites `icons/favicon.svg`, the four PNG icons and `og/og-image.png`. It draws them in SVG/HTML from the same `Z_PIECES` and fonts, and screenshots them with Playwright's Chromium (the `@playwright/test` devDependency; run `npx playwright install chromium` once). It is not part of `npm run build`, so commit the outputs after running it.
 
 ## Layout
@@ -200,7 +209,7 @@ The "Poster Slab" identity. The game opens on a title screen where T, E, Z and A
 - `src/ai/bot.ts` — VS opponent: searches every placement, including soft-drop + spin finishes
 - `src/render/` — canvas renderer (board spring physics, particles, action text)
 - `src/audio/` — synthesized WebAudio SFX, sound packs and generative music
-- `src/ui/` — title screen, wordmark, menus, config, results, session orchestration
+- `src/ui/` — themes, title screen, wordmarks, menus, config, results, session orchestration
 - `scripts/brand.mjs` — regenerates the icons, favicon and share image (`npm run brand`)
 - `test/` — engine, bot, match server and accounts tests (vitest)
 - `e2e/` — browser runs of 40 LINES and BLITZ (Playwright, `npm run e2e`)

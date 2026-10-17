@@ -14,7 +14,8 @@ import {
   saveRecords, saveSettings,
 } from "../settings";
 import { Profile, fetchMe, finishSession, putRecords, signIn } from "./account";
-import { wordmark } from "./brand";
+import { classicWordmark, wordmark } from "./brand";
+import { THEMES, themeById } from "./themes";
 
 type Screen = "title" | "menu" | "bots" | "config" | "account" | "play" | "results";
 
@@ -25,6 +26,7 @@ const COUNTDOWN = [
   { at: 1.5, text: "GO!" },
 ];
 const START_AT = 1.5;
+const LEDE = "Tetris + cheza — Swahili for play. SRS+, 180 kicks, 7-bag, B2B chaining, with mechanics matched to the modern online stacker.";
 
 function el<K extends keyof HTMLElementTagNameMap>(tag: K, attrs: Record<string, string> = {}, ...children: (Node | string)[]): HTMLElementTagNameMap[K] {
   const e = document.createElement(tag);
@@ -38,7 +40,7 @@ function el<K extends keyof HTMLElementTagNameMap>(tag: K, attrs: Record<string,
 
 const ARROW_TURN: Record<string, number> = { ArrowUp: 0, ArrowRight: 90, ArrowDown: 180, ArrowLeft: 270 };
 
-/** A binding's label on its key cap. Arrows are drawn: the UI fonts have no ← or →, and their ↑ ↓ are hairlines. */
+/** Poster Slab's label for a key cap. Arrows are drawn: its fonts have no ← or →, and their ↑ ↓ are hairlines (Classic keeps keyName's). */
 function keyLabel(code: string): Node | string {
   const turn = ARROW_TURN[code];
   if (turn === undefined) return keyName(code);
@@ -120,7 +122,9 @@ export class App {
       if (this.session) this.input(this.session, { type: "releaseAll" });
     });
     window.addEventListener("pointerdown", () => this.unlockAudio(), { once: false });
-    this.showTitle();
+    // Poster Slab opens on its title screen; Classic goes straight to the menu.
+    if (this.poster) this.showTitle();
+    else this.showMenu();
     requestAnimationFrame((t) => this.loop(t));
     void fetchMe().then((p) => p && this.adoptProfile(p));
   }
@@ -131,7 +135,17 @@ export class App {
     this.records = mergeRecords(this.records, p.records);
     saveRecords(this.records);
     void putRecords(this.records);
-    if (this.screen === "menu") this.showMenu();
+    if (this.screen === "menu") this.showMenu(false);
+  }
+
+  /** The Poster Slab theme is on (its own markup); every other theme uses Classic's. */
+  private get poster(): boolean {
+    return this.settings.theme === "poster";
+  }
+
+  /** Reduced motion, from CONFIG or the OS. */
+  private get still(): boolean {
+    return this.settings.reduceMotion || (this.motionQuery?.matches ?? false);
   }
 
   /** From a user gesture: unlock audio, and start the menu music if nothing is playing yet. */
@@ -158,11 +172,14 @@ export class App {
     sfx.pack = packById(this.settings.soundPack);
     this.renderer.gridOpacity = this.settings.gridOpacity;
     this.renderer.shadowOpacity = this.settings.shadowOpacity;
-    const reduceMotion = this.settings.reduceMotion || (this.motionQuery?.matches ?? false);
     for (const v of this.renderer.views) {
       v.bounciness = this.settings.bounciness;
-      v.reduceMotion = reduceMotion;
+      v.reduceMotion = this.still;
     }
+    // index.html set these before the first paint, from the same saved setting
+    const theme = themeById(this.settings.theme);
+    document.documentElement.dataset.theme = theme.id;
+    document.querySelector('meta[name="theme-color"]')?.setAttribute("content", theme.themeColor);
   }
 
   // ------------------------------------------------------------------ loop
@@ -508,7 +525,8 @@ export class App {
     return b;
   }
 
-  private showMenu(): void {
+  /** The menu in the current theme. In Classic the wordmark's Z drops in as it opens, unless `drop` is false (a redraw). */
+  private showMenu(drop = true): void {
     const r = this.records;
     const w = Object.values(r.vs).reduce((a, b) => a + b.wins, 0);
     const l = Object.values(r.vs).reduce((a, b) => a + b.losses, 0);
@@ -527,13 +545,22 @@ export class App {
       }),
     );
     bars.push(this.bar({
-      accent: "#0f6b3e", title: "CONFIG", tagline: "Handling, controls, audio, visuals.", glyph: "⚙", index: MODES.length,
+      accent: this.poster ? "#0f6b3e" : "#3b3b4a", title: "CONFIG", tagline: "Handling, controls, audio, visuals.", glyph: "⚙", index: MODES.length,
       onClick: () => this.showConfig(),
     }));
+    if (!this.poster) {
+      const page = el("div", { class: "menu" },
+        el("header", { class: "brand" }, classicWordmark(drop && !this.still), el("p", {}, LEDE)),
+        el("nav", { class: "bars" }, ...bars),
+        this.accountBlock(sprint ?? "—", blitz ?? "—", `${w}W – ${l}L`),
+        el("footer", { class: "hint" }, "↑ ↓ to choose · ENTER to play · ESC to go back"),
+      );
+      return this.setScreen("menu", page);
+    }
     const replay = el("button", { class: "wm-replay", type: "button", title: "Replay the title" }, wordmark());
     replay.addEventListener("click", () => this.showTitle());
     const page = this.splitPage(el("header", { class: "brand" }, el("h1", {}, replay)),
-      el("p", { class: "lede" }, "Tetris + cheza — Swahili for play. SRS+, 180 kicks, 7-bag, B2B chaining, with mechanics matched to the modern online stacker."),
+      el("p", { class: "lede" }, LEDE),
       el("nav", { class: "bars" }, ...bars),
       el("div", { class: "menu-foot" },
         this.accountBlock(sprint ?? "—", blitz ?? "—", `${w}W – ${l}L`),
@@ -552,8 +579,7 @@ export class App {
     this.showMenu();
     const menu = this.root.firstElementChild as HTMLElement;
     menu.inert = true;
-    const still = this.settings.reduceMotion || (this.motionQuery?.matches ?? false);
-    const title = el("section", { class: still ? "title still" : "title", "aria-label": "TEZA" },
+    const title = el("section", { class: this.still ? "title still" : "title", "aria-label": "TEZA" },
       el("div", { class: "title-stage" }, wordmark("ghost"), el("h1", {}, wordmark())),
       el("div", { class: "title-row" },
         el("span", { class: "title-cheza", "aria-hidden": "true" }, "CHEZA"),
@@ -578,6 +604,12 @@ export class App {
   /** The slab for a sub-screen: its title set like the wordmark, with the wordmark small above it. */
   private titleSlab(title: string): HTMLElement {
     return el("header", { class: "brand small" }, wordmark(), el("h1", { style: `--len:${title.length}` }, title));
+  }
+
+  /** A sub-screen (VERSUS, ACCOUNT): Poster's title slab beside the column, or Classic's small header above it. */
+  private subPage(title: string, lede: string, ...main: HTMLElement[]): HTMLElement {
+    if (this.poster) return this.splitPage(this.titleSlab(title), el("p", { class: "lede" }, lede), ...main);
+    return el("div", { class: "menu" }, el("header", { class: "brand small" }, el("h1", {}, el("span", {}, title)), el("p", {}, lede)), ...main);
   }
 
   /** Menu corner: SIGN IN when anonymous; username, profile stats and SIGN OUT when signed in. */
@@ -608,7 +640,7 @@ export class App {
       this.account = null;
       this.records = { vs: {} };
       saveRecords(this.records);
-      if (this.screen === "menu") this.showMenu();
+      if (this.screen === "menu") this.showMenu(false);
     });
     block.append(
       el("p", { class: "account-label" }, "SIGNED IN AS"),
@@ -671,8 +703,7 @@ export class App {
       this.adoptProfile(result);
       this.showMenu();
     });
-    const page = this.splitPage(this.titleSlab("ACCOUNT"),
-      el("p", { class: "lede" }, "Sign in to keep your personal bests and bot record with you. Playing without an account works the same."),
+    const page = this.subPage("ACCOUNT", "Sign in to keep your personal bests and bot record with you. Playing without an account works the same.",
       form,
       el("footer", { class: "hint" }, "ENTER to submit · ESC to go back"),
     );
@@ -690,8 +721,7 @@ export class App {
         onClick: () => this.startSession("vs", p),
       });
     });
-    const page = this.splitPage(this.titleSlab("VERSUS"),
-      el("p", { class: "lede" }, "Pick an opponent. First to top out loses."),
+    const page = this.subPage("VERSUS", "Pick an opponent. First to top out loses.",
       el("nav", { class: "bars" }, ...bars),
       el("footer", { class: "hint" }, "ESC to go back"),
     );
@@ -755,6 +785,20 @@ export class App {
       save();
     });
     const trackSelect = el("label", { class: "row" }, el("span", {}, "Music track"), track, trackNote);
+    const theme = el("select", { name: "theme" });
+    for (const t of THEMES) theme.append(el("option", { value: t.id }, t.name));
+    theme.value = s.theme;
+    theme.addEventListener("change", () => {
+      s.theme = theme.value;
+      save();
+      // redraw in the new theme where it was, the select still focused
+      this.showConfig(this.root.querySelector(".config")?.scrollTop ?? 0);
+      this.root.querySelector<HTMLElement>('select[name="theme"]')?.focus({ preventScroll: true });
+    });
+    const style = el("section", { class: "panel" },
+      el("h2", {}, "STYLE"),
+      el("label", { class: "row" }, el("span", {}, "Interface theme"), theme, el("output", {}, themeById(s.theme).tagline)),
+    );
     const f = (v: number) => `${v.toFixed(1)}F · ${Math.round((v * 1000) / 60)}ms`;
     const handling = el("section", { class: "panel" },
       el("h2", {}, "HANDLING"),
@@ -781,7 +825,7 @@ export class App {
       const row = el("div", { class: "row" }, el("span", {}, BIND_LABELS[bind]));
       for (let slot = 0; slot < 2; slot++) {
         const code = s.keys[bind][slot];
-        const btn = el("button", { class: "key" }, code ? keyLabel(code) : "—");
+        const btn = el("button", { class: "key" }, code ? (this.poster ? keyLabel(code) : keyName(code)) : "—");
         btn.addEventListener("click", () => {
           if (this.listening) this.listening.btn.classList.remove("listening");
           this.listening = { bind, slot, btn };
@@ -803,8 +847,12 @@ export class App {
     });
     const back = el("button", { class: "ghost-btn", "data-nav": "" }, "← BACK");
     back.addEventListener("click", () => this.showMenu());
+    const header = this.poster
+      ? el("header", { class: "brand small" }, wordmark(), el("h1", {}, "CONFIG"))
+      : el("header", { class: "brand small" }, el("h1", {}, el("span", {}, "CONFIG")));
     const page = el("div", { class: "config" },
-      el("header", { class: "brand small" }, wordmark(), el("h1", {}, "CONFIG")),
+      header,
+      el("div", { class: "panels style" }, style), // its own row, so the three panels below keep their layout
       el("div", { class: "panels" }, handling, visual, keys),
       el("div", { class: "actions" }, back, reset),
     );

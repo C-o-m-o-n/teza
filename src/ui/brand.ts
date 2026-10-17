@@ -1,5 +1,6 @@
-// The TEZA wordmark: Big Shoulders Display capitals with a Z cut like a Z-tetromino (README "Brand").
-// scripts/brand.mjs draws the share image from the same Z_PIECES.
+// The TEZA wordmarks (README "Brand"): Poster Slab's Big Shoulders Display capitals, and Classic's stacked
+// TE over ZA in Russo One, both with the Z cut like a Z-tetromino. scripts/brand.mjs draws the share image
+// from the same Z_PIECES.
 
 const SVG_NS = "http://www.w3.org/2000/svg";
 
@@ -43,4 +44,23 @@ export function wordmark(extraClass = ""): HTMLElement {
     mark.append(letter);
   });
   return mark;
+}
+
+/**
+ * Classic's wordmark: the original stacked heading, TE over ZA (styled by `.brand h1` and `.slash`), with the
+ * cut Z in place of the letter. With `drop` its four pieces fall in and lock (style.css), as the menu opens.
+ */
+export function classicWordmark(drop: boolean): HTMLHeadingElement {
+  const h1 = document.createElement("h1");
+  h1.setAttribute("aria-label", "TEZA");
+  const te = document.createElement("span");
+  te.textContent = "TE";
+  const za = document.createElement("span");
+  za.className = "slash";
+  const z = zGlyph();
+  z.setAttribute("preserveAspectRatio", "none"); // stretched to the font's Z (style.css)
+  if (drop) z.classList.add("drop");
+  za.append(z, "A");
+  h1.append(te, za);
+  return h1;
 }

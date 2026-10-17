@@ -3,6 +3,7 @@ import { songById } from "./audio/songs";
 import { Action, DEFAULT_HANDLING, Handling } from "./engine/game";
 import { Replay, parseReplay } from "./engine/replay";
 import { Records } from "./profile";
+import { THEMES } from "./ui/themes";
 
 export type { Records, RunRecord } from "./profile";
 
@@ -19,6 +20,7 @@ export interface Settings {
   gridOpacity: number;
   shadowOpacity: number;
   reduceMotion: boolean; // also on when the OS asks for reduced motion
+  theme: string; // a THEMES id (src/ui/themes.ts), the interface look
 }
 
 export const BIND_LABELS: Record<Bind, string> = {
@@ -60,6 +62,7 @@ export function defaultSettings(): Settings {
     gridOpacity: 0.1,
     shadowOpacity: 0.3,
     reduceMotion: false,
+    theme: THEMES[0].id,
   };
 }
 
@@ -96,6 +99,7 @@ export function loadSettings(): Settings {
   };
   if (!SOUND_PACKS.some((p) => p.id === merged.soundPack)) merged.soundPack = d.soundPack;
   if (merged.musicTrack !== "auto" && merged.musicTrack !== "off" && !songById(merged.musicTrack)) merged.musicTrack = d.musicTrack;
+  if (!THEMES.some((t) => t.id === merged.theme)) merged.theme = d.theme;
   if (typeof merged.musicVolume !== "number" || !(merged.musicVolume >= 0 && merged.musicVolume <= 1)) merged.musicVolume = d.musicVolume;
   return merged;
 }
