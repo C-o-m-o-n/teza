@@ -852,7 +852,8 @@ export class App {
       : el("header", { class: "brand small" }, el("h1", {}, el("span", {}, "CONFIG")));
     const page = el("div", { class: "config" },
       header,
-      el("div", { class: "panels" }, style, handling, visual, keys),
+      el("div", { class: "panels style" }, style), // its own row, so the three panels below keep their layout
+      el("div", { class: "panels" }, handling, visual, keys),
       el("div", { class: "actions" }, back, reset),
     );
     this.setScreen("config", page);

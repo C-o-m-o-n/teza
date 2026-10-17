@@ -90,6 +90,10 @@ canvas#game { position: fixed; inset: 0; display: block; }
 
 button { font: inherit; color: inherit; }
 
+/* CONFIG's STYLE strip, in every theme: one panel on the panels' column grid (auto-fill keeps the empty
+   tracks, so it is one column wide), in a row of its own above them */
+.panels.style { grid-template-columns: repeat(auto-fill, minmax(340px, 1fr)); }
+
 /* the results screen's entrance, in every theme */
 @keyframes slide-in {
   from { transform: translateX(-60px); opacity: 0; }
@@ -124,6 +128,7 @@ button { font: inherit; color: inherit; }
 :where(html:not([data-theme="poster"])) .brand h1 .slash { color: #3f6bff; padding-left: 0.42em; }
 /* The Z is the cut Z (src/ui/brand.ts), stretched to Russo One's Z (0.61em advance, 0.704em caps) so ZA
    sets exactly as the letters did. Opening the menu, its pieces drop in and lock, bottom row first. */
+:where(html:not([data-theme="poster"])) .brand h1 > span:first-child { position: relative; z-index: 1; } /* TE stays in front of the falling pieces */
 :where(html:not([data-theme="poster"])) .brand h1 .wm-z {
   display: inline-block;
   width: 0.579em;

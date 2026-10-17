@@ -259,3 +259,7 @@
 **Still open**
 - The inline pre-paint script lists the theme ids and colours again. `test/themes.test.ts` fails if it drifts from the registry.
 - If the sign-in check answers while the Z is still dropping, the redraw snaps the pieces into place.
+
+**Round 2 (design review)**
+- CONFIG's STYLE panel is now a row of its own above HANDLING, AUDIO & VISUAL and CONTROLS, one column wide on the same grid. Those three panels lay out as before in both themes, with no hole under STYLE in Poster Slab at 1440. Screenshot diffs with the strip removed show 0 differing pixels against the pre-010 build (Classic) and main (Poster Slab) at 1280x800 and 390x844.
+- In Classic's drop, TE stays in front of the falling Z pieces.
