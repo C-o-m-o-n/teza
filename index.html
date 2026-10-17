@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>TEZA</title>
   <meta name="description" content="Teza: tetris + cheza, Swahili for play. A modern stacker. Built in Kenya.">
-  <meta name="theme-color" content="#0b0b0c">
+  <meta name="theme-color" content="#08080f">
   <meta property="og:type" content="website">
   <meta property="og:title" content="TEZA">
   <meta property="og:description" content="Tetris + cheza, Swahili for play. A modern stacker, built in Kenya.">
@@ -13,13 +13,28 @@
   <meta property="og:image" content="https://teza.comonhq.com/og/og-image.png">
   <meta property="og:image:width" content="1200">
   <meta property="og:image:height" content="630">
-  <meta property="og:image:alt" content="TEZA wordmark on red. Tetris + cheza, Swahili for play. Built in Kenya.">
+  <meta property="og:image:alt" content="TEZA wordmark on dark. Tetris + cheza, Swahili for play. Built in Kenya.">
   <meta name="twitter:card" content="summary_large_image">
   <meta name="twitter:image" content="https://teza.comonhq.com/og/og-image.png">
   <link rel="icon" type="image/svg+xml" href="icons/favicon.svg">
   <link rel="icon" type="image/png" sizes="192x192" href="icons/icon-192.png">
   <link rel="manifest" href="manifest.webmanifest">
   <link rel="apple-touch-icon" href="icons/apple-touch-icon-180.png">
+  <script>
+    // The interface theme before first paint (src/ui/themes.ts lists the same ids): the saved one if known,
+    // else Classic. App keeps both in sync afterwards. Never throws.
+    (function () {
+      try {
+        var themes = { classic: "#08080f", poster: "#0b0b0c" }, theme = "classic";
+        try {
+          var saved = JSON.parse(localStorage.getItem("teza:settings")).theme;
+          if (Object.prototype.hasOwnProperty.call(themes, saved)) theme = saved;
+        } catch (e) {}
+        document.documentElement.dataset.theme = theme;
+        document.querySelector('meta[name="theme-color"]').content = themes[theme];
+      } catch (e) {}
+    })();
+  </script>
   <link rel="stylesheet" href="style.css">
 </head>
 <body>
