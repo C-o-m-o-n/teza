@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { Action, Game, Handling } from "../src/engine/game";
 import {
-  IDLE_TIMEOUT_MS, LOBBY_TIMEOUT_MS, MATCH_HANDLING, MAX_LAG_FRAMES, MAX_PENDING, MatchSession,
+  IDLE_TIMEOUT_MS, INPUT_BURST, LOBBY_TIMEOUT_MS, MATCH_HANDLING, MAX_LAG_FRAMES, MAX_PENDING, MatchSession,
   RECONNECT_GRACE_MS, RESUME_TIMEOUT_MS, ROOM_ALPHABET, ROOM_CODE, SEND_BUFFER, matchOptions, newRoomCode,
 } from "../src/server/match";
 import { restFrame, stepTo } from "../src/engine/stepping";
@@ -100,23 +100,33 @@ describe("match: inputs", () => {
     expect(game.stats.inputs).toBe(2);
   });
 
-  it("rejects more than 60 inputs per second", () => {
+  it("takes a burst of 90 inputs, then 60 a second, and names the input it refuses", () => {
     const { clock, session, p0 } = setup();
     clock.advance(2000);
     const game = session.game(0)!;
-    for (let i = 0; i < 60; i++) input(session, p0, 10 + i * 0.5, i % 2 ? "cw" : "ccw");
+    for (let i = 0; i < INPUT_BURST; i++) input(session, p0, 10 + i * 0.5, i % 2 ? "cw" : "ccw");
     expect(p0.peer.of("error")).toEqual([]);
-    expect(game.stats.inputs).toBe(60);
+    expect(game.stats.inputs).toBe(90);
     const frame = game.frame;
 
-    input(session, p0, 50, "cw");
+    input(session, p0, 60, "cw");
     expect(lastError(p0)).toBe("rate-limit");
-    expect(game.stats.inputs).toBe(60);
+    const refused = p0.peer.last();
+    expect((refused.d as { s: number }).s).toBe(refused.a); // the `s` of the refused input
+    expect(game.stats.inputs).toBe(90);
     expect(game.frame).toBe(frame);
 
-    clock.advance(1000);
-    input(session, p0, 70, "cw"); // server clock frame = 180, so 60 is the lowest frame allowed
-    expect(game.stats.inputs).toBe(61);
+    clock.advance(500); // the bucket refills 30 inputs
+    for (let i = 0; i < 30; i++) input(session, p0, 60 + i * 0.5, "cw");
+    expect(game.stats.inputs).toBe(120);
+    input(session, p0, 80, "cw");
+    expect(lastError(p0)).toBe("rate-limit");
+    expect(p0.peer.of("error").length).toBe(2);
+
+    clock.advance(10_000); // never more than the burst, however long it waited
+    for (let i = 0; i < INPUT_BURST + 1; i++) input(session, p0, 700 + i * 0.5, "cw");
+    expect(game.stats.inputs).toBe(210);
+    expect(p0.peer.of("error").length).toBe(3);
   });
 
   it("drops the connection after more than 20 rejected inputs", () => {

@@ -13,11 +13,20 @@
 // `opponentGarbage`), at the frames the server's engine applied them. It rests at the last
 // relayed frame: nothing is guessed.
 //
+// Pacing: the server meters inputs with a token bucket (INPUT_BURST at once, then
+// MAX_INPUTS_PER_SECOND). The client meters what it sends with the same rate and a burst of
+// PACE_BURST. Over any span of T seconds it sends at most PACE_BURST + rate·T inputs; the socket
+// keeps their order, so if their delays differ by at most J, the ones arriving within T seconds
+// were sent within T + J, and the server sees at most PACE_BURST + rate·J + rate·T of them. That
+// fits its bucket while rate·J <= INPUT_BURST - PACE_BURST, that is for up to 1 s of jitter. If
+// the server refuses an input anyway (more jitter than that, or a clock check), its `error` names
+// the input's `s` and the client takes it back out of its board, as a rewind.
+//
 // The outcome comes only from the server's `end`; a local top-out just stops the input.
 
 import { Action, Game, Handling } from "../engine/game";
 import { restFrame, stepTo, stepToClock } from "../engine/stepping";
-import { MAX_INPUTS_PER_SECOND } from "../server/match";
+import { INPUT_BURST, MAX_INPUTS_PER_SECOND } from "../server/match";
 
 /** The part of a WebSocket the client uses. */
 export interface OnlineSocket {
@@ -45,7 +54,8 @@ export interface OnlineEvents {
 }
 
 export const PING_MS = 10_000; // keeps the server's idle timer from ending a quiet match
-export const PACE_WINDOW_MS = 1100; // no more than MAX_INPUTS_PER_SECOND inputs leave in this window
+export const PACE_BURST = 30; // inputs that may leave at once; after that MAX_INPUTS_PER_SECOND
+export const JITTER_MS = ((INPUT_BURST - PACE_BURST) * 1000) / MAX_INPUTS_PER_SECOND; // the server still takes them all
 export const SNAPSHOT_EVERY = 15; // frames between snapshots of the own game
 export const SNAPSHOTS = 120; // kept (30 s): garbage lands no further back than the server's lag limit
 
@@ -79,6 +89,7 @@ export class OnlineClient {
   result: OnlineResult | null = null;
   lastError: { code: string; message: string } | null = null;
   rewinds = 0; // garbage that landed behind the own game's frame (for the tests)
+  refused = 0; // inputs the server rejected, taken back out of the own game (for the tests)
   events: Partial<OnlineEvents> = {};
 
   private seq = 0; // last `s` sent
@@ -88,7 +99,8 @@ export class OnlineClient {
   private lastSend = 0;
   private held = new Set<Action>(); // pressed and not released, as sent
   private queue: { action: Action; kind: Kind }[] = []; // waiting for the input budget
-  private sent: number[] = []; // now() of inputs sent in the pacing window
+  private budget = PACE_BURST; // inputs that may leave now (the pacing bucket)
+  private budgetAt = 0; // now() `budget` was last brought up to date
   private log: Logged[] = [];
   private base = 0; // absolute index of log[0]
   private applied = 0; // absolute index of the next log entry to apply (the log's end, except in a replay)
@@ -206,6 +218,7 @@ export class OnlineClient {
         return;
       }
       case "error":
+        if (this.phase === "playing" && Number.isSafeInteger(d.s)) this.refuse(d.s as number);
         this.lastError = { code: String(d.code ?? ""), message: String(d.message ?? "") };
         this.events.error?.(this.lastError.code, this.lastError.message);
         return;
@@ -254,14 +267,15 @@ export class OnlineClient {
     const g = this.player;
     if (!g || this.phase !== "playing") return;
     const now = this.now();
-    this.sent = this.sent.filter((t) => t > now - PACE_WINDOW_MS);
-    while (this.queue.length && this.sent.length < MAX_INPUTS_PER_SECOND) {
+    this.budget = Math.min(PACE_BURST, this.budget + ((now - this.budgetAt) * MAX_INPUTS_PER_SECOND) / 1000);
+    this.budgetAt = now;
+    while (this.queue.length && this.budget >= 1) {
+      this.budget--;
       const { action, kind } = this.queue.shift()!;
       const frame = Math.max(this.clock, this.lastFrame);
       this.lastFrame = frame;
       this.stepPlayer(frame, true);
       const s = this.send("input", { frame, action, kind });
-      this.sent.push(now);
       this.log.push({ type: "input", frame: g.frame, s, action, kind });
       this.applied++;
       if (kind === "press") g.press(action);
@@ -314,22 +328,50 @@ export class OnlineClient {
       this.events.garbage?.(amount);
       return;
     }
-    let i = this.snapshots.length - 1;
-    while (i >= 0 && (this.snapshots[i].at > at || this.snapshots[i].game.frame > frame)) i--;
-    if (i < 0) {
+    if (!this.replay(at, frame, () => this.log.splice(at - this.base, 0, entry), entry)) {
       // older than every snapshot: cannot happen within the server's lag limit; take it now
       this.log.push(entry);
       this.applied++;
       g.receive(amount);
-      this.events.garbage?.(amount);
-      return;
+    } else this.rewinds++;
+    this.events.garbage?.(amount);
+  }
+
+  /**
+   * The server refused our input `s`: its engine never applied it, so take it out of ours. A
+   * refused press no longer counts as held (its keyup sends nothing); a refused release is sent
+   * again, so the key doesn't stay down on the server. A later input of the same action wins.
+   */
+  private refuse(s: number): void {
+    const idx = this.log.findIndex((e) => e.type === "input" && e.s === s);
+    if (idx < 0) return;
+    const e = this.log[idx] as Extract<Logged, { type: "input" }>;
+    const at = this.base + idx;
+    if (!this.replay(at, e.frame, () => this.log.splice(idx, 1))) return;
+    this.refused++;
+    const later = this.log.slice(idx).some((l) => l.type === "input" && l.action === e.action);
+    if (later || this.queue.some((q) => q.action === e.action)) return;
+    if (e.kind === "press") this.held.delete(e.action);
+    else {
+      this.queue.push({ action: e.action, kind: "release" });
+      this.flush();
     }
-    this.rewinds++;
+  }
+
+  /**
+   * Rewind the own game to the newest snapshot taken before log index `at` and at or before
+   * `frame`, let `edit` change the log from there, and replay it silently back to the frame the
+   * game was at (only the `loud` entry plays its effects). False if no snapshot is that old.
+   */
+  private replay(at: number, frame: number, edit: () => void, loud?: Logged): boolean {
+    const g = this.player!;
+    let i = this.snapshots.length - 1;
+    while (i >= 0 && (this.snapshots[i].at > at || this.snapshots[i].game.frame > frame)) i--;
+    if (i < 0) return false;
     const snap = this.snapshots[i];
     this.snapshots.length = i + 1;
     const end = g.frame;
-    this.log.splice(at - this.base, 0, entry);
-    // replay silently (sounds and board effects already played), except the garbage itself
+    edit();
     const raw = g as unknown as Listeners;
     const listeners = raw.listeners;
     const onAttack = g.onAttack;
@@ -343,7 +385,7 @@ export class OnlineClient {
       if (e.type === "input") {
         if (e.kind === "press") g.press(e.action);
         else g.release(e.action);
-      } else if (e === entry) {
+      } else if (e === loud) {
         raw.listeners = listeners;
         g.receive(e.amount);
         raw.listeners = [];
@@ -354,6 +396,6 @@ export class OnlineClient {
     this.run(end);
     raw.listeners = listeners;
     g.onAttack = onAttack;
-    this.events.garbage?.(amount);
+    return true;
   }
 }

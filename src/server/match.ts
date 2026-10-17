@@ -16,7 +16,11 @@ import { modeById } from "../modes";
 export const MAX_MESSAGE_BYTES = 1024;
 export const SEND_BUFFER = 100;
 export const FRAME_TOLERANCE = 30; // frames an input may be ahead of the server's clock
+// Inputs are metered by a token bucket: INPUT_BURST may arrive at once, then MAX_INPUTS_PER_SECOND
+// on average. The client paces itself with a smaller burst at the same rate (online.ts), so packets
+// network jitter bunches together still fit (README "Game server").
 export const MAX_INPUTS_PER_SECOND = 60;
+export const INPUT_BURST = 90;
 export const MAX_REJECTED = 20; // rejected messages before the connection is dropped
 export const RECONNECT_GRACE_MS = 15000;
 export const MAX_LAG_FRAMES = 120; // frames an input (or an engine) may trail the server's clock
@@ -95,7 +99,8 @@ interface Slot {
   buffer: Envelope[];
   game: Game | null;
   lastFrame: number;
-  recent: number[]; // clock times of inputs accepted in the last second
+  budget: number; // inputs the slot may still send now (the token bucket)
+  budgetAt: number; // clock time `budget` was last brought up to date
   grace: unknown; // forfeit timer while disconnected mid-match
 }
 
@@ -161,7 +166,7 @@ export class MatchSession {
     } else if (this.slots.length < 2) {
       const slot: Slot = {
         index: this.slots.length as SlotIndex, token: this.random.token(), conn, seq: 0, ack: 0,
-        buffer: [], game: null, lastFrame: 0, recent: [], grace: null,
+        buffer: [], game: null, lastFrame: 0, budget: INPUT_BURST, budgetAt: 0, grace: null,
       };
       this.slots.push(slot);
       conn.slot = slot;
@@ -201,7 +206,7 @@ export class MatchSession {
       case "resume":
         return this.resume(conn, msg.d);
       case "input":
-        return this.input(conn, msg.d);
+        return this.input(conn, msg.d, Number.isSafeInteger(msg.s) ? (msg.s as number) : undefined);
       default:
         return this.reject(conn, "bad-type", "unknown message type");
     }
@@ -311,10 +316,13 @@ export class MatchSession {
     slot.conn?.peer.send(JSON.stringify(pkt));
   }
 
-  /** Send an `error`. Unbound sockets are closed at once; bound ones after too many. */
-  private reject(conn: Conn, code: string, message: string): void {
+  /**
+   * Send an `error`. Unbound sockets are closed at once; bound ones after too many. A refused
+   * input names its `s`, so the client can take it back out of its predicted board.
+   */
+  private reject(conn: Conn, code: string, message: string, s?: number): void {
     if (conn.closed) return;
-    if (conn.slot) this.send(conn.slot, "error", { code, message });
+    if (conn.slot) this.send(conn.slot, "error", s === undefined ? { code, message } : { code, message, s });
     else conn.peer.send(JSON.stringify({ t: "error", s: 0, a: 0, d: { code, message } }));
     if (!conn.slot || ++conn.rejected > MAX_REJECTED) this.drop(conn, 1008, code);
   }
@@ -386,28 +394,30 @@ export class MatchSession {
     this.maybeStart();
   }
 
-  private input(conn: Conn, d: unknown): void {
+  private input(conn: Conn, d: unknown, s: number | undefined): void {
+    const reject = (code: string, message: string) => this.reject(conn, code, message, s);
     const slot = conn.slot;
-    if (!slot) return this.reject(conn, "not-joined", "send resume first");
+    if (!slot) return reject("not-joined", "send resume first");
     if (this.ended) return;
     const game = slot.game;
-    if (!game) return this.reject(conn, "not-started", "the match has not started");
+    if (!game) return reject("not-started", "the match has not started");
     if (
       !isObject(d) || typeof d.action !== "string" || !ACTIONS.includes(d.action) ||
       (d.kind !== "press" && d.kind !== "release") || typeof d.frame !== "number" || !Number.isFinite(d.frame)
     ) {
-      return this.reject(conn, "bad-input", "input needs {frame, action, kind}");
+      return reject("bad-input", "input needs {frame, action, kind}");
     }
     const frame = d.frame;
-    if (frame < slot.lastFrame) return this.reject(conn, "frame-behind", "frame is before the last accepted input");
+    if (frame < slot.lastFrame) return reject("frame-behind", "frame is before the last accepted input");
     const now = this.clock.now();
     const wall = this.wallFrame();
-    if (frame > wall + FRAME_TOLERANCE) return this.reject(conn, "frame-ahead", "frame is ahead of the server clock");
-    if (frame < wall - MAX_LAG_FRAMES) return this.reject(conn, "frame-late", "frame is too far behind the server clock");
-    slot.recent = slot.recent.filter((t) => t > now - 1000);
-    if (slot.recent.length >= MAX_INPUTS_PER_SECOND) return this.reject(conn, "rate-limit", "too many inputs");
+    if (frame > wall + FRAME_TOLERANCE) return reject("frame-ahead", "frame is ahead of the server clock");
+    if (frame < wall - MAX_LAG_FRAMES) return reject("frame-late", "frame is too far behind the server clock");
+    slot.budget = Math.min(INPUT_BURST, slot.budget + ((now - slot.budgetAt) * MAX_INPUTS_PER_SECOND) / 1000);
+    slot.budgetAt = now;
+    if (slot.budget < 1) return reject("rate-limit", "too many inputs");
 
-    slot.recent.push(now);
+    slot.budget--;
     this.lastActive = now;
     slot.lastFrame = frame;
     const action = d.action as Action;

@@ -4,8 +4,8 @@ import { afterEach, describe, expect, it } from "vitest";
 import { BOARD_W } from "../src/engine/constants";
 import { Action, DEFAULT_HANDLING, Game } from "../src/engine/game";
 import { stepTo } from "../src/engine/stepping";
-import { OnlineClient, PING_MS } from "../src/net/online";
-import { Conn, Envelope, MATCH_HANDLING, MAX_INPUTS_PER_SECOND, MatchSession, Random, RECONNECT_GRACE_MS } from "../src/server/match";
+import { JITTER_MS, OnlineClient, PACE_BURST, PING_MS } from "../src/net/online";
+import { Conn, Envelope, INPUT_BURST, MATCH_HANDLING, MAX_INPUTS_PER_SECOND, MAX_REJECTED, MatchSession, Random, RECONNECT_GRACE_MS } from "../src/server/match";
 import { FakeClock } from "./match-harness";
 
 /** Packets in flight, delivered in time order (and send order at equal times). */
@@ -30,33 +30,51 @@ interface Link {
   client: OnlineClient;
   conn: () => Conn;
   sent: Envelope[]; // what the client sent, as the server will read it
+  arrived: number[]; // clock times the client's inputs reached the server
+  heard: Envelope[]; // what the server sent the client
 }
 
+/** Uplink delay in ms: fixed, or asked per packet (the socket still keeps the order). */
+type Delay = number | (() => number);
+
 /** A client whose socket reaches `session` after `up` ms, and hears back after `down` ms. */
-function link(session: MatchSession, net: Net, clock: FakeClock, up: number, down: number): Link {
+function link(session: MatchSession, net: Net, clock: FakeClock, up: Delay, down: number): Link {
   let conn: Conn | null = null;
   const sent: Envelope[] = [];
+  const arrived: number[] = [];
+  const heard: Envelope[] = [];
+  let last = 0; // arrival time of the previous packet: a later one never overtakes it
+  const upMs = () => {
+    last = Math.max(last, clock.t + (typeof up === "number" ? up : up()));
+    return last - clock.t;
+  };
   const client = new OnlineClient({
     send: (data) => {
-      sent.push(JSON.parse(data));
-      net.later(up, () => session.message(conn!, data));
+      const env: Envelope = JSON.parse(data);
+      sent.push(env);
+      net.later(upMs(), () => {
+        if (env.t === "input") arrived.push(clock.t);
+        session.message(conn!, data);
+      });
     },
-    close: () => net.later(up, () => session.disconnect(conn!)),
+    close: () => net.later(upMs(), () => session.disconnect(conn!)),
   }, () => clock.now());
-  net.later(up, () => {
+  net.later(upMs(), () => {
     conn = session.connect({
-      send: (data) => net.later(down, () => client.receive(data)),
+      send: (data) => net.later(down, () => {
+        heard.push(JSON.parse(data));
+        client.receive(data);
+      }),
       close: () => net.later(down, () => client.closed()),
     });
   });
-  return { client, conn: () => conn!, sent };
+  return { client, conn: () => conn!, sent, arrived, heard };
 }
 
 let tokens = 0;
 const fixed = (seed: number): Random => ({ seed: () => seed, token: () => (++tokens).toString(16).padStart(32, "0") });
 
-function world(latency: [number, number, number, number] = [80, 80, 50, 130], seed = 4242) {
-  const clock = new FakeClock();
+function world(latency: [Delay, number, Delay, number] = [80, 80, 50, 130], seed = 4242, clock = new FakeClock()) {
   const session = new MatchSession(clock, fixed(seed));
   const net = new Net(clock);
   const a = link(session, net, clock, latency[0], latency[1]);
@@ -107,20 +125,23 @@ function keys(rot: number, dx: number): Step[] {
   return out;
 }
 
-/** A small greedy player driving the client through real key presses, a step every third frame. */
+/** A small greedy player driving the client through real key presses, a step every `every`-th frame. */
 class Driver {
   plan: Step[] = [];
   ticks = 0;
   blurAt: number;
   blurred = false;
-  constructor(private client: OnlineClient, blurAt: number) {
+  planned = -1; // pieces placed when the last plan was made
+  constructor(private client: OnlineClient, blurAt: number, private every = 3) {
     this.blurAt = blurAt;
   }
   tick(): void {
     const c = this.client;
     const g = c.player;
-    if (!g || g.over || c.phase !== "playing" || this.ticks++ % 3) return;
+    if (!g || g.over || c.phase !== "playing" || this.ticks++ % this.every) return;
     if (!this.plan.length) {
+      if (g.stats.pieces === this.planned) return; // the last plan's inputs still wait for the budget
+      this.planned = g.stats.pieces;
       if (!this.blurred && g.stats.pieces >= this.blurAt) {
         // hold left (DAS charges) and soft drop, then lose focus with both held
         this.blurred = true;
@@ -260,9 +281,13 @@ describe("online: inputs", () => {
     const inputs = a.sent.filter((m) => m.t === "input");
     const frames = inputs.map((m) => (m.d as { frame: number }).frame);
     expect(frames).toEqual([...frames].sort((x, y) => x - y));
-    for (let i = MAX_INPUTS_PER_SECOND; i < frames.length; i++) {
-      expect(frames[i] - frames[i - MAX_INPUTS_PER_SECOND]).toBeGreaterThanOrEqual(60); // 60 per second of clock at most
+    // a burst of PACE_BURST, then 60 a second (one a frame of clock): j - i + 1 inputs span frames[i]..frames[j]
+    let worst = -Infinity;
+    for (let i = 0; i < frames.length; i++) {
+      for (let j = i; j < frames.length; j++) worst = Math.max(worst, j - i + 1 - (frames[j] - frames[i]));
     }
+    expect(worst).toBeLessThanOrEqual(PACE_BURST + 1e-9);
+    expect(worst).toBeGreaterThan(PACE_BURST - 1); // and it does use the burst
     expect(a.client.lastError).toBeNull(); // the server rejected none
   });
 
@@ -281,6 +306,74 @@ describe("online: inputs", () => {
     const { a, run } = world();
     run(PING_MS * 3);
     expect(a.sent.filter((m) => m.t === "ping").length).toBe(3);
+  });
+});
+
+describe("online: jitter at the input cap", () => {
+  /** An uplink that holds every packet sent in the first `stall` ms of each `period`, then lets them all through. */
+  const stalls = (clock: FakeClock, period: number, stall: number, base: number, times = Infinity) => {
+    const t0 = clock.t + 400; // the world's start-up isn't stalled
+    return () => {
+      const since = clock.t - t0;
+      const phase = since % period;
+      return since >= 0 && since < period * times && phase < stall ? base + stall - phase : base;
+    };
+  };
+
+  /** The greedy driver taking a step every frame: about 62 inputs a second, just over the cap. */
+  const drive = (w: ReturnType<typeof world>, ms: number) => {
+    const da = new Driver(w.a.client, Infinity, 1);
+    const db = new Driver(w.b.client, Infinity, 1);
+    w.run(ms, () => {
+      da.tick();
+      db.tick();
+    });
+    w.run(3000); // hands off: the queues drain and the last packets land
+  };
+
+  const boardsMatch = ({ session, a, b }: ReturnType<typeof world>) => {
+    for (const c of [a.client, b.client]) {
+      expect(c.result).toBeNull();
+      expectOwnBoardMatches(c, session.game(c.slot!)!);
+      expectOpponentMatches(c, session.game(c.slot === 0 ? 1 : 0)!);
+    }
+  };
+
+  /** The most inputs that reached the server at one instant, and within any `ms`. */
+  const bunch = (arrived: number[], ms = 0) => Math.max(...arrived.map((t) => arrived.filter((x) => x <= t && x > t - ms - 0.5).length));
+
+  it("bunched by 900 ms stalls, every input still fits the server's bucket and the boards match", () => {
+    expect(JITTER_MS).toBe(1000);
+    const clock = new FakeClock();
+    const w = world([stalls(clock, 2000, 900, 40), 60, stalls(clock, 2000, 900, 70), 90], undefined, clock);
+    drive(w, 20_000);
+    for (const l of [w.a, w.b]) {
+      const inputs = l.sent.filter((m) => m.t === "input").length;
+      expect(inputs).toBeGreaterThan(20 * 58); // at the cap, about 60 a second
+      expect(bunch(l.arrived)).toBeGreaterThan(50); // a stall's worth at once
+      expect(bunch(l.arrived)).toBeLessThanOrEqual(INPUT_BURST);
+      expect(bunch(l.arrived, 1000)).toBeGreaterThan(MAX_INPUTS_PER_SECOND); // more in a second than a 60-a-second window takes
+      expect(l.client.lastError).toBeNull(); // the server refused none
+      expect(l.client.refused).toBe(0);
+    }
+    boardsMatch(w);
+  });
+
+  it("takes back the inputs the server refuses when a stall outlasts the jitter budget, and still matches", () => {
+    const clock = new FakeClock();
+    const w = world([stalls(clock, 6000, 1250, 40, 2), 60, 50, 130], undefined, clock);
+    drive(w, 10_000);
+    const a = w.a.client;
+    expect(a.lastError?.code).toBe("rate-limit");
+    expect(a.refused).toBeGreaterThan(0);
+    expect(a.refused).toBeLessThanOrEqual(MAX_REJECTED); // the socket stays open
+    expect(w.b.client.refused).toBe(0);
+    // both kinds were refused: presses were dropped, releases sent again (the server holds no key the client doesn't)
+    const refusedS = new Set(w.a.heard.filter((m) => m.t === "error").map((m) => (m.d as { s: number }).s));
+    const kinds = w.a.sent.filter((m) => m.t === "input" && refusedS.has(m.s)).map((m) => (m.d as { kind: string }).kind);
+    expect(kinds.length).toBe(a.refused);
+    expect(new Set(kinds)).toEqual(new Set(["press", "release"]));
+    boardsMatch(w);
   });
 });
 
