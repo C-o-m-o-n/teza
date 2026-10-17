@@ -10,6 +10,8 @@ const PRECACHE = [
   "style.css",
   "game.js",
   "manifest.webmanifest",
+  "fonts/big-shoulders-display-latin.woff2",
+  "fonts/archivo-narrow-latin.woff2",
   "fonts/russo-one-400.woff2",
   "fonts/saira-semi-condensed-400.woff2",
   "fonts/saira-semi-condensed-600.woff2",
@@ -18,6 +20,8 @@ const PRECACHE = [
   "icons/icon-512.png",
   "icons/icon-maskable-512.png",
   "icons/apple-touch-icon-180.png",
+  "icons/favicon.svg",
+  // og/og-image.png is left out: only link previews fetch it, never the page.
 ];
 
 /** Only same-origin GETs outside /api/ that aren't WebSocket upgrades. Everything else is not intercepted. */

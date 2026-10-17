@@ -10,7 +10,8 @@
     "build": "node build.mjs",
     "test": "vitest run",
     "check": "npm run typecheck && npm test && npm run build",
-    "e2e": "node build.mjs && playwright test"
+    "e2e": "node build.mjs && playwright test",
+    "brand": "node scripts/brand.mjs"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^5.20261013.1",
