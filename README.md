@@ -67,7 +67,7 @@ Messages are JSON envelopes `{t, s, a, d}` in both directions: type, sequence nu
 |---|---|
 | `welcome` | `{slot, token}`: slot 0 or 1 and the resume token |
 | `start` | `{seed, options, handling}`: both players get the same seed, the VS rules and the handling the server replays inputs with (DAS/ARR/DCD/SDF and IRS/IHS; a client must use it, not its own settings, to stay in sync) |
-| `opponentInput` | `{frame, action, kind}`: an input the server accepted from the opponent |
+| `opponentInput` | `{frame, action, kind}`: an input the server accepted from the opponent, at the grid frame it was applied on |
 | `garbage` | `{amount, frame}`: attack received, applied at your current server frame |
 | `opponentDisconnected` | `{grace}`: ms the opponent has to come back (15000) |
 | `opponentReconnected` | none |
@@ -83,7 +83,7 @@ Messages are JSON envelopes `{t, s, a, d}` in both directions: type, sequence nu
 
 The first two sockets take slots 0 and 1, and the match starts when both are connected. A third socket gets `error` (`full`) and is closed. If no second player joins within 2 minutes, the first gets `error` (`no-opponent`), its socket is closed and the match id starts fresh.
 
-There is no server tick. Engines advance when a message arrives: a player's engine moves to the frame of each input it accepts, and any engine more than 120 frames behind the server clock (ms since `start` × 60 / 1000) is first moved up to that limit, as if the player pressed nothing. A player who goes quiet therefore keeps falling and can still top out. Lagging engines are caught up together, frame by frame, so whoever tops out first loses; both on the same frame is a draw. An input is rejected with `error` and leaves the engine alone when:
+There is no server tick. Engines advance when a message arrives: a player's engine moves to the frame of each input it accepts, floored to the 1/256-frame grid and stepped through whole frames as a client steps (`src/engine/stepping.ts`), and any engine more than 120 frames behind the server clock (ms since `start` × 60 / 1000) is first moved up to that limit, as if the player pressed nothing. A player who goes quiet therefore keeps falling and can still top out. Lagging engines are caught up together, frame by frame, so whoever tops out first loses; both on the same frame is a draw. An input is rejected with `error` and leaves the engine alone when:
 
 - the action or kind is unknown, or `frame` is not a number;
 - `frame` is lower than that player's last accepted frame;
@@ -122,7 +122,7 @@ Every 40 LINES run records the player's inputs (`src/engine/replay.ts`). When a 
 
 Starting 40 LINES loads it when it parses and its `frames` equals the stored PB. The PB run then plays as a translucent PB GHOST board to the right of the player, with its own seed and its saved handling (not the current settings), in lockstep from GO. It freezes at 40 lines. A marker above its spawn rows shows the lines difference (`GHOST +3`, `YOU +2` or `EVEN`). The ghost shows no clear names (SINGLE, COMBO…). When the window is too narrow for a readable ghost (a cell under 8 px), the ghost is not drawn. A PB from another device or an older build has no matching replay, so no ghost appears.
 
-To make a replay exact, the 40 LINES player's game rests only on whole frames between inputs, and inputs land on a 1/256-frame grid (`restFrame`). The display is at most one frame behind the clock between inputs; inputs still apply at their own time.
+To make a replay exact, every game (the player in any mode, the VS bot, a replay and the match server's engines) rests only on whole frames between inputs, and inputs land on a 1/256-frame grid (`src/engine/stepping.ts`). The display is at most one frame behind the clock between inputs; inputs still apply at their own time.
 
 ## Controls (TETR.IO defaults, rebindable in CONFIG)
 
@@ -203,7 +203,7 @@ The marks:
 
 ## Layout
 
-- `src/engine/` — deterministic, headless engine (sub-frame input timing, same as the original), and 40L replays
+- `src/engine/` — deterministic, headless engine (sub-frame input timing, same as the original), canonical stepping (`stepping.ts`) and 40L replays
 - `src/server/` — online match and accounts logic (runtime-independent; the Worker in `worker/` wraps each in a Durable Object)
 - `src/profile.ts` — records type, validator and merge, shared by the client and the accounts server
 - `src/ai/bot.ts` — VS opponent: searches every placement, including soft-drop + spin finishes

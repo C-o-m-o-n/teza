@@ -263,3 +263,16 @@
 **Round 2 (design review)**
 - CONFIG's STYLE panel is now a row of its own above HANDLING, AUDIO & VISUAL and CONTROLS, one column wide on the same grid. Those three panels lay out as before in both themes, with no hole under STYLE in Poster Slab at 1440. Screenshot diffs with the strip removed show 0 differing pixels against the pre-010 build (Classic) and main (Poster Slab) at 1280x800 and 390x844.
 - In Classic's drop, TE stays in front of the falling Z pieces.
+
+## 2026-10-17 — Deterministic stepping everywhere (factory job 012)
+
+**What changed**
+- `src/engine/stepping.ts` holds the canonical stepping that used to live in `replay.ts`: `restFrame` (whole frame between inputs, 1/256-frame grid at an input), `stepTo` and `stepToClock` (rest on the whole frame before the clock, then for an input on its grid point).
+- `App.advanceTo` keeps the session clock in every mode and steps the player and the VS bot with `stepToClock`; no raw fractional `advance` is left. 40 LINES recording and the ghost are unchanged.
+- `src/server/match.ts`: an accepted input lands on its frame floored to the 1/256 grid, and `opponentInput` carries that frame. `catchUp` uses `stepTo`. Rejection rules and limits are unchanged.
+- `e2e/plan.ts` and the mirror in `test/replay.test.ts` use the shared functions. The match test harness moved to `test/match-harness.ts`; `test/stepping.test.ts` checks that a client stepped like App and the server reach the same game.
+- Replays recorded on main (two in Chromium, two in Node) replay to byte-identical states on this branch.
+- BLITZ seed 7 in the e2e now scores 210376 (was 210372) and ends on frame 7200 (was 7201): the player now rests on whole frames instead of the 16 ms tick ends, so at placement 218 the bot saw a slightly different piece position and chose a different placement; and the old fractional sums drifted (frames like 4187.039999999999), which made the timed objective trip a frame late. Browser and Node agree, and the e2e has no hard-coded score.
+
+**Still open**
+- No online client exists yet; one must step with `stepToClock` and send the grid frame for its inputs.
