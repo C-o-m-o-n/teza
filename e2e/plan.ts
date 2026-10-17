@@ -3,7 +3,7 @@
 // Node run make identical moves and reach identical results.
 import { Bot, BotProfile } from "../src/ai/bot";
 import { Action, Game } from "../src/engine/game";
-import { restFrame, stepTo } from "../src/engine/replay";
+import { stepToClock } from "../src/engine/stepping";
 import { ModeId, modeById } from "../src/modes";
 import { defaultSettings } from "../src/settings";
 
@@ -42,12 +42,10 @@ class Session {
   private started = false;
   private last: number;
   private nextFrame: number;
-  private recorded: boolean; // 40 LINES: the player rests on whole frames between inputs
-  private clock = 0;
+  private clock = 0; // the player rests on whole frames between inputs (stepping.ts)
 
   constructor(modeId: ModeId, seed: number, startedAt: number) {
     this.game = new Game(modeById(modeId).options(seed), defaultSettings().handling);
-    this.recorded = modeId === "40l";
     this.last = startedAt;
     this.nextFrame = (Math.floor(startedAt / FRAME_MS) + 1) * FRAME_MS;
   }
@@ -73,12 +71,8 @@ class Session {
     const dt = Math.min(0.25, Math.max(0, (now - this.last) / 1000));
     this.last = now;
     if (this.game.over) return;
-    if (this.recorded) {
-      this.clock += dt * 60;
-      stepTo(this.game, restFrame(this.clock, input));
-    } else {
-      this.game.advance(dt * 60);
-    }
+    this.clock += dt * 60;
+    stepToClock(this.game, this.clock, input);
   }
 
   /** A key press and release at `now`, as App's keydown/keyup handlers apply them. */

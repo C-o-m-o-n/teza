@@ -1,7 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
 import { Bot, BotProfile } from "../src/ai/bot";
 import { Action, Game, Handling } from "../src/engine/game";
-import { Recorder, Replay, ReplayInput, ReplayPlayer, parseReplay, restFrame, stepTo } from "../src/engine/replay";
+import { Recorder, Replay, ReplayInput, ReplayPlayer, parseReplay } from "../src/engine/replay";
+import { stepToClock } from "../src/engine/stepping";
 import { modeById } from "../src/modes";
 
 const SEED = 4242;
@@ -23,12 +24,12 @@ class Driver {
     const end = this.clock + frames;
     while (this.clock < end && !this.game.over) {
       this.clock = Math.min(end, this.clock + TICK);
-      stepTo(this.game, restFrame(this.clock, false));
+      stepToClock(this.game, this.clock);
     }
   }
 
   input(input: ReplayInput): void {
-    stepTo(this.game, restFrame(this.clock, true));
+    stepToClock(this.game, this.clock, true);
     this.rec.apply(input);
   }
 

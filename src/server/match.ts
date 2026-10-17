@@ -1,14 +1,16 @@
 // Authoritative logic for one online VS match. Runtime-independent: the Durable Object in
 // worker/index.ts owns the WebSockets and feeds this module, and the tests drive it with
 // fake connections and a fake clock. There is no tick: engines advance when a message
-// arrives, either to an accepted input's frame or, for a player who has fallen behind the
-// server clock, up to the lag limit (so nobody can stall a match by going quiet).
+// arrives, either to an accepted input's frame (snapped to the 1/256-frame grid, stepping.ts)
+// or, for a player who has fallen behind the server clock, up to the lag limit (so nobody can
+// stall a match by going quiet).
 //
 // Wire format is the Ribbon envelope from the old server, {t, s, a, d}: type, sequence id
 // (per slot, increments per packet sent), ack (last `s` received from the other side) and
 // payload. The last 100 packets per slot are kept so a reconnecting client can catch up.
 
 import { Action, DEFAULT_HANDLING, Game, Handling } from "../engine/game";
+import { restFrame, stepTo, stepToClock } from "../engine/stepping";
 import { modeById } from "../modes";
 
 export const MAX_MESSAGE_BYTES = 1024;
@@ -256,7 +258,7 @@ export class MatchSession {
     const games = this.slots.map((s) => s.game!).filter((g) => g.frame < target);
     if (games.length === 0) return;
     for (let f = Math.floor(Math.min(...games.map((g) => g.frame))) + 1; f <= target; f++) {
-      for (const g of games) if (g.frame < f) g.advance(f - g.frame);
+      for (const g of games) stepTo(g, f);
       if (games.some((g) => g.over)) break;
     }
     this.settle();
@@ -384,11 +386,12 @@ export class MatchSession {
     this.lastActive = now;
     slot.lastFrame = frame;
     const action = d.action as Action;
-    game.advance(frame - game.frame);
+    // the input lands on the 1/256-frame grid, after whole-frame steps, as on a client (stepping.ts)
+    stepToClock(game, frame, true);
     if (d.kind === "press") game.press(action);
     else game.release(action);
 
-    this.send(this.other(slot), "opponentInput", { frame, action, kind: d.kind });
+    this.send(this.other(slot), "opponentInput", { frame: restFrame(frame, true), action, kind: d.kind });
     this.settle();
   }
 
