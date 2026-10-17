@@ -3,6 +3,7 @@
 // game's own engine and bot. Playwright's fake clock drives time, so every run is identical.
 import { expect, Page, test } from "@playwright/test";
 import { resolve } from "node:path";
+import { ReplayPlayer, parseReplay } from "../src/engine/replay";
 import { ModeId, modeById } from "../src/modes";
 import { FRAME_MS, Plan, planRun } from "./plan";
 import { serveDist } from "./server";
@@ -72,6 +73,15 @@ test("40 LINES: full run to 40 LINES CLEARED", async ({ page }) => {
   await expect(page.locator(".results .headline")).toHaveText("40 LINES CLEARED");
   await expect(stat(page, "LINES")).toHaveText("40");
   await expect(stat(page, "PIECES")).toHaveText(`${plan.pieces}`);
+  // The first clear is the PB, so its replay is stored; replayed in Node it is the same run.
+  const [ghost, records] = await page.evaluate(() => [localStorage.getItem("teza:ghost40l"), localStorage.getItem("teza:records")]);
+  expect(JSON.parse(records!)["40l"].value, "PB frames").toBe(plan.frames);
+  expect(records, "records hold no replay").not.toContain("events");
+  const replay = parseReplay(ghost, plan.frames);
+  expect(replay, "stored replay of the PB").not.toBeNull();
+  const replayed = new ReplayPlayer(replay!);
+  replayed.advanceTo(replay!.frames);
+  expect([replayed.game.result, replayed.game.frame, replayed.game.stats.pieces]).toEqual(["clear", plan.frames, plan.pieces]);
   console.log(`40 LINES seed ${SEED}: lines 40, pieces ${plan.pieces}, time ${await page.locator(".results .big").textContent()}`);
 });
 
