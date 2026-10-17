@@ -276,3 +276,18 @@
 
 **Still open**
 - No online client exists yet; one must step with `stepToClock` and send the grid frame for its inputs.
+
+## 2026-10-17 — Online 1v1 rooms with client-side prediction (factory job 013)
+
+**What changed**
+- Server: `opponentInput.frame` is now the frame the server's engine applied the input at (job 012's security note); it equals the snapped frame unless the engine was already past it. New `opponentGarbage {amount, frame}` goes to the attacker with every `garbage`. `MatchSession.hasPlayers` lets the Durable Object refuse `create` on a held room (409) and `join` on an empty one (404).
+- Worker: `POST /api/room` issues 6-symbol room codes (`newRoomCode`, `ROOM_CODE` in `src/server/match.ts`); the match route takes only codes (400 otherwise) and new sockets must say `?mode=create` or `?mode=join`. The deploy check probes `/api/match/CHECK2`, since `ci-check` is no longer a valid code.
+- Client: `src/net/online.ts` holds the protocol and prediction (own board predicted, rewound on server garbage from snapshots plus an input log ordered by the envelope ack; opponent board stepped only from the relay). `test/online.test.ts` drives two clients through `MatchSession` over a simulated network with different latencies and checks both boards against the server's engines, also with a non-default `MATCH_HANDLING`.
+- UI: VERSUS has CREATE ROOM and JOIN ROOM bars (the six bars use a denser stack so they fit 1280x720 in both themes), an ONLINE lobby with the code, a JOIN field, the online match on the bot game's two-board layout, and online results with one MENU action. Board markers are now drawn on regular views too (they were drawn only on the 40 LINES ghost); the online match uses them for `OPPONENT DISCONNECTED · 12s` and `TOPPED OUT · WAITING`.
+- Checked with `wrangler dev --local-upstream` and two headless Chromium pages: create, join, a top-out giving WIN and LOSE, garbage from a Node client's line clears landing on the browser's board, closing a tab giving OPPONENT DISCONNECTED then a win after 15 s, `No such room` and `Room is full`.
+
+**Still open**
+- No auto-reconnect or resume UI; a dropped socket ends the session as CONNECTION LOST.
+- The opponent's board rests at the last relayed frame, so between their inputs it doesn't fall.
+- If the server's catch-up ever moves a player's engine past one of their inputs (more than 2 s of lag), that player's predicted board drifts from the server until the match ends; only garbage is rewound.
+- Hardening still to do: Origin check on the upgrade, resume token out of the URL, constant-time token compare, CSP.
