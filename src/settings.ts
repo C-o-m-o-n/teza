@@ -1,6 +1,7 @@
 import { SOUND_PACKS } from "./audio/packs";
 import { songById } from "./audio/songs";
 import { Action, DEFAULT_HANDLING, Handling } from "./engine/game";
+import { Replay, parseReplay } from "./engine/replay";
 import { Records } from "./profile";
 
 export type { Records, RunRecord } from "./profile";
@@ -64,6 +65,7 @@ export function defaultSettings(): Settings {
 
 const KEY = "teza:settings";
 const PB_KEY = "teza:records";
+const GHOST_KEY = "teza:ghost40l"; // the 40 LINES PB run, kept apart from the synced Records
 
 function read<T>(key: string): T | null {
   try {
@@ -108,4 +110,17 @@ export function loadRecords(): Records {
 
 export function saveRecords(r: Records): void {
   write(PB_KEY, r);
+}
+
+/** The recorded run of the 40 LINES PB, if it is stored and matches `pbFrames`. */
+export function loadGhost(pbFrames: number | undefined): Replay | null {
+  try {
+    return parseReplay(localStorage.getItem(GHOST_KEY), pbFrames);
+  } catch {
+    return null;
+  }
+}
+
+export function saveGhost(r: Replay): void {
+  write(GHOST_KEY, r);
 }

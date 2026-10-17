@@ -3,6 +3,7 @@
 // Node run make identical moves and reach identical results.
 import { Bot, BotProfile } from "../src/ai/bot";
 import { Action, Game } from "../src/engine/game";
+import { restFrame, stepTo } from "../src/engine/replay";
 import { ModeId, modeById } from "../src/modes";
 import { defaultSettings } from "../src/settings";
 
@@ -28,6 +29,7 @@ export interface Plan {
   lines: number;
   pieces: number;
   score: number;
+  frames: number;
 }
 
 /**
@@ -40,9 +42,12 @@ class Session {
   private started = false;
   private last: number;
   private nextFrame: number;
+  private recorded: boolean; // 40 LINES: the player rests on whole frames between inputs
+  private clock = 0;
 
   constructor(modeId: ModeId, seed: number, startedAt: number) {
     this.game = new Game(modeById(modeId).options(seed), defaultSettings().handling);
+    this.recorded = modeId === "40l";
     this.last = startedAt;
     this.nextFrame = (Math.floor(startedAt / FRAME_MS) + 1) * FRAME_MS;
   }
@@ -50,7 +55,7 @@ class Session {
   /** Run every animation frame before `at`, then catch up to `at` as the first keydown there does. */
   runTo(at: number): void {
     for (; this.nextFrame < at; this.nextFrame += FRAME_MS) this.tick(this.nextFrame);
-    if (this.started) this.advanceTo(at);
+    if (this.started) this.advanceTo(at, true);
   }
 
   private tick(now: number): void {
@@ -64,20 +69,26 @@ class Session {
     this.advanceTo(now);
   }
 
-  private advanceTo(now: number): void {
+  private advanceTo(now: number, input = false): void {
     const dt = Math.min(0.25, Math.max(0, (now - this.last) / 1000));
     this.last = now;
-    if (!this.game.over) this.game.advance(dt * 60);
+    if (this.game.over) return;
+    if (this.recorded) {
+      this.clock += dt * 60;
+      stepTo(this.game, restFrame(this.clock, input));
+    } else {
+      this.game.advance(dt * 60);
+    }
   }
 
   /** A key press and release at `now`, as App's keydown/keyup handlers apply them. */
   key(now: number, action: Action): void {
     if (!this.started) throw new Error("key before the countdown ended");
     if (!this.game.over) {
-      this.advanceTo(now);
+      this.advanceTo(now, true);
       this.game.press(action);
     }
-    this.advanceTo(now);
+    this.advanceTo(now, true);
     this.game.release(action);
   }
 }
@@ -124,6 +135,6 @@ export function planRun(modeId: ModeId, seed: number, startedAt: number, gapMs: 
   }
   return {
     steps, over: game.over, result: game.result,
-    lines: game.stats.lines, pieces: game.stats.pieces, score: game.stats.score,
+    lines: game.stats.lines, pieces: game.stats.pieces, score: game.stats.score, frames: game.frame,
   };
 }
