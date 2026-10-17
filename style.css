@@ -1,4 +1,20 @@
-/* Self-hosted latin subsets (fonts/, SIL Open Font License: see fonts/OFL-*.txt) */
+/* Self-hosted latin subsets (fonts/, SIL Open Font License: see fonts/OFL-*.txt).
+   Big Shoulders Display and Archivo Narrow are the brand faces (variable, one file each);
+   Russo One and Saira Semi Condensed are the in-game faces drawn by the canvas renderer. */
+@font-face {
+  font-family: "Big Shoulders Display";
+  font-style: normal;
+  font-weight: 800 900;
+  font-display: swap;
+  src: url(fonts/big-shoulders-display-latin.woff2) format("woff2");
+}
+@font-face {
+  font-family: "Archivo Narrow";
+  font-style: normal;
+  font-weight: 500 700;
+  font-display: swap;
+  src: url(fonts/archivo-narrow-latin.woff2) format("woff2");
+}
 @font-face {
   font-family: "Russo One";
   font-style: normal;
@@ -29,12 +45,15 @@
 }
 
 :root {
-  --bg: #08080f;
-  --ink: #f4f4fa;
-  --muted: #9a9ab0;
-  --line: rgba(255, 255, 255, 0.14);
-  --display: "Russo One", "Saira", system-ui, sans-serif;
-  --body: "Saira Semi Condensed", "Saira", system-ui, sans-serif;
+  /* Poster Slab palette: ink black, paper white, signal red, field green */
+  --bg: #0b0b0c;
+  --ink: #f3efe6;
+  --muted: #a29d93;
+  --line: rgba(243, 239, 230, 0.16);
+  --red: #e0301e;
+  --green: #0f6b3e;
+  --display: "Big Shoulders Display", "Russo One", system-ui, sans-serif;
+  --body: "Archivo Narrow", "Saira Semi Condensed", system-ui, sans-serif;
 }
 
 * { box-sizing: border-box; }
@@ -56,43 +75,105 @@ canvas#game { position: fixed; inset: 0; display: block; }
 
 button { font: inherit; color: inherit; }
 
+/* ------------------------------------------------------------------ wordmark */
+
+/* TEZA: Big Shoulders capitals, the Z drawn as a Z-tetromino (src/ui/brand.ts). Sized by font-size. */
+.wordmark {
+  --wm-z: currentColor;
+  --wm-accent: currentColor;
+  display: inline-flex;
+  align-items: baseline;
+  font-family: var(--display);
+  font-weight: 900;
+  line-height: 0.8;
+  letter-spacing: -0.02em;
+  white-space: nowrap;
+}
+.wm-letter { display: inline-block; }
+.wm-z { display: block; width: 0.56em; height: 0.8em; margin: 0 0.03em 0 0.01em; }
+.wm-cell { fill: var(--wm-z); }
+.wm-accent { fill: var(--wm-accent); }
+
 /* ------------------------------------------------------------------ menu */
 
+/* A red slab (40%) with the wordmark set bottom to top, a green stripe, then the main column on ink. */
 .menu {
   position: absolute;
   inset: 0;
   display: grid;
-  grid-template-columns: minmax(280px, 0.9fr) 1.3fr;
-  grid-template-rows: auto 1fr auto;
-  column-gap: 4vw;
-  padding: 7vh 0 4vh 5vw;
-  background: linear-gradient(90deg, rgba(8, 8, 15, 0.92) 0 45%, rgba(8, 8, 15, 0.55));
+  grid-template-columns: 40% 1fr;
+  background: var(--bg);
 }
 
-.brand { align-self: start; }
-.brand h1 {
+.menu > .brand {
+  position: relative;
+  overflow: hidden;
+  background: var(--red);
+  border-right: 12px solid var(--green);
+}
+.menu > .brand h1 {
+  position: absolute;
+  left: -0.03em;
+  bottom: 0;
   margin: 0;
   font-family: var(--display);
-  font-weight: 400;
-  font-size: clamp(64px, 11vw, 180px);
-  line-height: 0.82;
-  letter-spacing: -0.02em;
+  font-weight: 900;
+  font-size: min(44vw, 100vh / 1.66);
+  line-height: 0.8;
+  color: var(--ink);
+  white-space: nowrap;
+  transform-origin: 0 100%;
+  transform: rotate(-90deg) translateY(100%);
+}
+.menu > .brand .wordmark { --wm-z: var(--bg); --wm-accent: var(--bg); vertical-align: top; }
+.wm-replay {
+  display: block;
+  border: 0;
+  padding: 0;
+  background: none;
+  font: inherit;
+  line-height: inherit;
+  cursor: pointer;
+  outline: none;
+}
+.wm-replay:focus-visible .wordmark { outline: 6px solid var(--ink); outline-offset: -6px; }
+
+/* Sub-screens: the screen title fills the slab the same way (sized to its --len letters, uncropped),
+   the wordmark sits small beside it */
+.menu > .brand.small h1 { font-size: min(32vw, 94vh / (var(--len) * 0.5)); }
+.menu > .brand.small > .wordmark {
+  position: absolute;
+  top: 5vh;
+  right: 2.4vw;
+  font-size: 64px;
+  color: var(--ink);
+  --wm-z: var(--bg);
+  --wm-accent: var(--bg);
+}
+
+.menu-main {
+  --col: calc(60vw / 24); /* the main column's grid unit; the bars step in by two per row */
   display: flex;
   flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  overflow: auto;
+  padding: 5.5vh 0 3.5vh calc(2 * var(--col));
 }
-.brand h1 .slash { color: #3f6bff; padding-left: 0.42em; }
-.brand p { max-width: 30ch; margin: 2.2em 0 0; color: var(--muted); font-size: 17px; line-height: 1.45; }
-.brand.small h1 { font-size: clamp(56px, 8vw, 120px); }
 
-.bars, .account-form {
-  grid-column: 2;
-  grid-row: 1 / span 2;
-  align-self: center;
+.lede {
+  max-width: 46ch;
+  margin: 0 0 4vh;
+  color: var(--muted);
+  font-size: 17px;
+  line-height: 1.4;
 }
+
+.bars, .account-form { margin: auto 0; }
 .bars {
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  border-bottom: 6px solid var(--ink);
 }
 
 .bar {
@@ -104,74 +185,223 @@ button { font: inherit; color: inherit; }
   align-items: end;
   text-align: left;
   border: 0;
-  margin-left: calc(var(--i) * 2.2vw);
-  padding: 20px 34px 18px 30px;
-  min-height: 108px;
-  background: var(--accent);
+  border-top: 6px solid var(--ink);
+  margin-left: calc(var(--i) * 2 * var(--col));
+  padding: 12px 34px 13px 34px;
+  background: var(--bg);
   overflow: hidden;
   cursor: pointer;
-  clip-path: polygon(0 0, 100% 0, 100% 100%, 22px 100%, 0 calc(100% - 22px));
-  transition: transform 160ms cubic-bezier(.2, .9, .3, 1.3), filter 160ms;
+  transition: background-color 90ms, transform 160ms cubic-bezier(.2, .9, .3, 1.3);
   outline: none;
 }
+/* the mode's colour as a cell at the left edge; the whole band floods with it on focus */
 .bar::before {
   content: "";
   position: absolute;
-  inset: 0;
-  background: linear-gradient(180deg, rgba(255, 255, 255, 0.14), rgba(0, 0, 0, 0.18));
-  pointer-events: none;
+  left: 0; top: 0; bottom: 0;
+  width: 14px;
+  background: var(--accent);
 }
 .bar:hover, .bar:focus-visible, .bar:focus {
-  transform: translateX(-28px);
-  filter: brightness(1.15) saturate(1.1);
+  background: var(--accent);
+  transform: translateX(calc(-1 * var(--col)));
 }
-.bar:focus::after {
-  content: "";
-  position: absolute;
-  left: 0; top: 0; bottom: 0;
-  width: 8px;
-  background: #fff;
-}
+.bar:focus::before { background: var(--ink); }
 .bar-glyph {
   position: absolute;
-  right: -0.06em;
-  bottom: -0.28em;
+  right: -0.04em;
+  bottom: -0.2em;
   font-family: var(--display);
+  font-weight: 900;
   font-size: 150px;
   line-height: 1;
-  color: rgba(0, 0, 0, 0.22);
+  color: transparent;
+  -webkit-text-stroke: 2px rgba(243, 239, 230, 0.16);
   pointer-events: none;
   transition: transform 300ms cubic-bezier(.2, .9, .3, 1);
 }
-.bar:hover .bar-glyph, .bar:focus .bar-glyph { transform: translateX(-24px); }
-.bar-title { position: relative; font-family: var(--display); font-size: 44px; line-height: 1; letter-spacing: 0.01em; }
-.bar-tagline { position: relative; grid-column: 1; font-size: 16px; opacity: 0.85; margin-top: 6px; }
+.bar:hover .bar-glyph, .bar:focus .bar-glyph { transform: translateX(-24px); color: rgba(0, 0, 0, 0.2); -webkit-text-stroke-color: transparent; }
+.bar-title {
+  position: relative;
+  font-family: var(--display);
+  font-weight: 900;
+  font-size: 54px;
+  line-height: 0.9;
+  letter-spacing: 0.005em;
+}
+.bar-tagline { position: relative; grid-column: 1; font-size: 15px; color: var(--muted); margin-top: 4px; }
+.bar:hover .bar-tagline, .bar:focus .bar-tagline { color: var(--ink); }
 .bar-meta {
   position: relative;
   grid-column: 2;
   grid-row: 1 / span 2;
   align-self: center;
-  font-family: var(--display);
-  font-size: 18px;
-  background: rgba(0, 0, 0, 0.35);
-  padding: 6px 12px;
+  font-weight: 700;
+  font-size: 13px;
+  letter-spacing: 0.16em;
+  border: 2px solid currentColor;
+  padding: 5px 10px;
   margin-right: 90px;
 }
 
+.menu-foot {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 24px;
+  margin-top: 4vh;
+  padding-right: 4vw;
+}
+
 .hint {
-  grid-column: 1 / -1;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
   color: var(--muted);
-  font-size: 14px;
-  letter-spacing: 0.12em;
+  font-size: 12px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+.origin { color: var(--ink); font-weight: 700; letter-spacing: 0.22em; text-transform: uppercase; }
+
+/* ------------------------------------------------------------------ title */
+
+/* The red slab at full size. T, E, Z, A drop in as pieces over their ghosts, lock with a one-frame
+   squash, the CHEZA row clears, then the whole screen wipes off to the menu built underneath.
+   Every element's resting style is the final frame, so .still (reduced motion) just drops the animations. */
+.title {
+  --t0: 150ms;    /* first drop */
+  --gap: 260ms;   /* between drops */
+  --fall: 440ms;  /* one drop, squash included */
+  --clear: 1450ms;
+  --out: 3500ms;
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  display: grid;
+  grid-template-rows: 1fr auto auto;
+  overflow: hidden;
+  background: var(--red);
+  cursor: pointer;
+  animation: title-out 520ms cubic-bezier(.75, 0, .25, 1) var(--out) both;
+}
+@keyframes title-out {
+  to { clip-path: inset(0 0 0 100%); }
+}
+
+.title-stage {
+  position: relative;
+  display: flex;
+  align-items: flex-end;
+  min-height: 0;
+  padding-left: 3vw;
+  border-bottom: 12px solid var(--green);
+}
+.title-stage h1 { margin: 0; color: var(--ink); line-height: 0; }
+.title-stage .wordmark {
+  --wm-z: var(--bg);
+  --wm-accent: var(--bg);
+  font-size: min(54vw, (100vh - 290px) / 0.8);
+  margin-bottom: -0.012em;
+}
+.title-stage .wordmark.ghost {
+  position: absolute;
+  left: 3vw;
+  bottom: 0;
+  color: transparent;
+  -webkit-text-stroke: 3px rgba(243, 239, 230, 0.55);
+  --wm-z: transparent;
+  --wm-accent: transparent;
+}
+.ghost .wm-cell { stroke: rgba(243, 239, 230, 0.55); stroke-width: 0.6; }
+.ghost .wm-letter { opacity: 0; animation: ghost-out 1ms calc(var(--t0) + var(--n) * var(--gap) + var(--fall) * 0.9) both; }
+@keyframes ghost-out {
+  from { opacity: 1; }
+  to { opacity: 0; }
+}
+.title-stage h1 .wm-letter {
+  transform-origin: 50% 100%;
+  animation: drop var(--fall) calc(var(--t0) + var(--n) * var(--gap)) both;
+}
+@keyframes drop {
+  0% { transform: translateY(-110vh); animation-timing-function: cubic-bezier(.55, 0, 1, .45); }
+  90% { transform: translateY(0); animation-timing-function: steps(1, end); }
+  92% { transform: translateY(0.02em) scale(1.08, 0.86); animation-timing-function: linear; }
+  100% { transform: none; }
+}
+
+.title-row {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 3vw;
+  padding: 2.2vh 3vw;
+  background: var(--bg);
+  animation: row-fill 240ms cubic-bezier(.3, 0, .2, 1) var(--clear) both;
+}
+@keyframes row-fill {
+  from { clip-path: inset(0 100% 0 0); }
+  to { clip-path: inset(0); }
+}
+/* the line-clear flash */
+.title-row::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: var(--ink);
+  opacity: 0;
+  pointer-events: none;
+  animation: row-flash 420ms steps(6, end) calc(var(--clear) + 240ms) both;
+}
+@keyframes row-flash {
+  0%, 33% { opacity: 1; }
+  17%, 50% { opacity: 0; }
+  66% { opacity: 0.6; }
+  100% { opacity: 0; }
+}
+.title-cheza {
+  font-family: var(--display);
+  font-weight: 900;
+  font-size: clamp(64px, 11vw, 150px);
+  line-height: 0.8;
+  color: var(--ink);
+}
+.title-gloss {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 0;
+  color: var(--ink);
+  font-weight: 700;
+  font-size: clamp(16px, 1.6vw, 22px);
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+}
+.title-gloss span + span { color: var(--red); }
+
+.title-foot {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 0 3vw 2.6vh;
+  background: var(--bg);
+  color: var(--muted);
+  font-size: 13px;
+  letter-spacing: 0.22em;
+  text-transform: uppercase;
+}
+
+.title.still, .title.still *, .title.still ::after { animation: none !important; }
+
+@media (prefers-reduced-motion: reduce) {
+  .title, .title *, .title ::after { animation: none !important; }
 }
 
 /* ------------------------------------------------------------------ account */
 
 .account {
-  grid-column: 1;
-  align-self: end;
-  max-width: 420px;
-  margin-bottom: 3vh;
+  flex: 0 1 400px;
   border-top: 3px solid var(--ink);
   padding-top: 12px;
 }
@@ -198,7 +428,7 @@ button { font: inherit; color: inherit; }
   color: var(--ink);
   outline: none;
 }
-.field input:focus { border-color: #3f6bff; background: rgba(63, 107, 255, 0.12); outline: 2px solid #3f6bff; outline-offset: 2px; }
+.field input:focus { border-color: var(--red); background: rgba(224, 48, 30, 0.14); outline: 2px solid var(--red); outline-offset: 2px; }
 .form-error { min-height: 1.4em; margin: 0; color: #ff5f7a; font-size: 15px; }
 .account-form .actions { margin-top: 18px; }
 .account .form-error { margin-top: 10px; }
@@ -210,8 +440,27 @@ button { font: inherit; color: inherit; }
   position: absolute;
   inset: 0;
   overflow: auto;
-  padding: 6vh 5vw;
-  background: rgba(8, 8, 15, 0.94);
+  padding: 0 5vw 6vh;
+  background: var(--bg);
+}
+/* the slab as a red band across the top */
+.config > .brand {
+  display: flex;
+  align-items: flex-end;
+  gap: 28px;
+  margin: 0 -5vw;
+  padding: 5vh 5vw 0;
+  overflow: hidden;
+  background: var(--red);
+  border-bottom: 12px solid var(--green);
+}
+.config > .brand .wordmark { --wm-z: var(--bg); --wm-accent: var(--bg); font-size: 56px; margin-bottom: 0.9em; }
+.config > .brand h1 {
+  margin: 0 0 -0.03em;
+  font-family: var(--display);
+  font-weight: 900;
+  font-size: clamp(88px, 13vw, 190px);
+  line-height: 0.8;
 }
 .panels {
   display: grid;
@@ -231,8 +480,8 @@ button { font: inherit; color: inherit; }
   font-size: 15px;
 }
 .panel output { font-family: var(--display); font-size: 14px; text-align: right; }
-.panel input[type="range"] { width: 100%; accent-color: #3f6bff; }
-.panel input[type="checkbox"] { justify-self: start; width: 18px; height: 18px; margin: 0; accent-color: #3f6bff; }
+.panel input[type="range"] { width: 100%; accent-color: var(--red); }
+.panel input[type="checkbox"] { justify-self: start; width: 18px; height: 18px; margin: 0; accent-color: var(--red); }
 .panel select {
   border: 1px solid var(--line);
   background: rgba(255, 255, 255, 0.05);
@@ -243,7 +492,7 @@ button { font: inherit; color: inherit; }
   cursor: pointer;
 }
 .panel select:hover, .panel select:focus { background: rgba(255, 255, 255, 0.14); outline: none; }
-.panel select:focus-visible { outline: 2px solid #3f6bff; outline-offset: 2px; }
+.panel select:focus-visible { outline: 2px solid var(--red); outline-offset: 2px; }
 .panel option { background: var(--bg); }
 .keys .row { grid-template-columns: 1fr 104px 104px; }
 .key {
@@ -255,7 +504,7 @@ button { font: inherit; color: inherit; }
   cursor: pointer;
 }
 .key:hover { background: rgba(255, 255, 255, 0.14); }
-.key.listening { background: #3f6bff; border-color: #3f6bff; }
+.key.listening { background: var(--red); border-color: var(--red); }
 .note { color: var(--muted); font-size: 14px; }
 
 .actions { display: flex; gap: 12px; margin-top: 30px; }
@@ -270,7 +519,7 @@ button { font: inherit; color: inherit; }
   outline: none;
 }
 .ghost-btn:hover, .ghost-btn:focus { background: var(--ink); color: var(--bg); }
-.ghost-btn.primary { background: var(--accent, #3f6bff); border-color: var(--accent, #3f6bff); color: #fff; }
+.ghost-btn.primary { background: var(--accent, var(--red)); border-color: var(--accent, var(--red)); color: var(--ink); }
 .ghost-btn.primary:hover, .ghost-btn.primary:focus { filter: brightness(1.2); }
 
 /* ------------------------------------------------------------------ results */
@@ -282,7 +531,7 @@ button { font: inherit; color: inherit; }
   flex-direction: column;
   justify-content: center;
   padding: 0 8vw;
-  background: linear-gradient(90deg, rgba(8, 8, 15, 0.96) 0 55%, rgba(8, 8, 15, 0.6));
+  background: linear-gradient(90deg, rgba(11, 11, 12, 0.96) 0 55%, rgba(11, 11, 12, 0.6));
   animation: slide-in 380ms cubic-bezier(.2, .9, .3, 1);
 }
 @keyframes slide-in {
@@ -324,10 +573,24 @@ button { font: inherit; color: inherit; }
 .results .stat strong { font-family: var(--display); font-weight: 400; font-size: 30px; }
 
 @media (max-width: 860px) {
-  .menu { grid-template-columns: 1fr; grid-template-rows: none; padding: 5vh 16px; row-gap: 3vh; overflow: auto; }
-  .bars, .account-form, .account { grid-column: 1; grid-row: auto; }
-  .menu > .brand { order: -2; }
-  .menu > .account { order: -1; margin-bottom: 0; }
-  .bar { margin-left: 0; }
+  .menu { grid-template-columns: 1fr; grid-template-rows: auto minmax(0, 1fr); }
+  .menu > .brand { border-right: 0; border-bottom: 12px solid var(--green); }
+  .menu > .brand h1 { position: static; transform: none; padding-top: 6vw; font-size: 54vw; margin-bottom: -0.04em; }
+  .menu > .brand.small { display: flex; flex-direction: column; }
+  .menu > .brand.small > .wordmark { position: static; align-self: flex-start; margin: 18px 16px 0; font-size: 40px; }
+  .menu > .brand.small h1 { padding-top: 10px; font-size: min(19vw, 110px); }
+  .config > .brand { flex-direction: column; align-items: flex-start; gap: 10px; padding-top: 18px; }
+  .config > .brand .wordmark { font-size: 40px; margin: 0; }
+  .menu-main { --col: calc(100vw / 48); padding: 3vh 16px; }
+  .menu-foot { flex-direction: column; align-items: stretch; padding-right: 0; }
+  .account { flex: none; }
+  .bar { padding: 10px 20px 11px 28px; }
+  .bar-title { font-size: 44px; }
+  .bar-glyph { font-size: 110px; }
   .bar-meta { display: none; }
+  .title-row { flex-direction: column; align-items: flex-start; gap: 14px; padding: 18px 16px; }
+  .title-stage { padding-left: 16px; }
+  .title-stage .wordmark { display: grid; grid-template-columns: auto auto; row-gap: 0.06em; font-size: min(78vw, (100vh - 330px) / 1.66); }
+  .title-stage .wordmark.ghost { left: 16px; }
+  .title-foot { padding: 0 16px 20px; }
 }

@@ -41,6 +41,9 @@ async function play(page: Page, mode: ModeId, plan: Plan): Promise<void> {
   const ui = page.locator("#ui");
   await page.clock.install({ time: 0 });
   await page.goto(`${server.url}/?seed=${SEED}`);
+  // The game opens on the title screen; any key skips it to the menu.
+  await expect(ui).toHaveAttribute("data-screen", "title");
+  await page.keyboard.press("Space");
   await expect(ui).toHaveAttribute("data-screen", "menu");
   await page.clock.pauseAt(CLICK_AT);
   await page.locator("button.bar", { hasText: modeById(mode).title }).click();

@@ -14,8 +14,9 @@ import {
   saveRecords, saveSettings,
 } from "../settings";
 import { Profile, fetchMe, finishSession, putRecords, signIn } from "./account";
+import { wordmark } from "./brand";
 
-type Screen = "menu" | "bots" | "config" | "account" | "play" | "results";
+type Screen = "title" | "menu" | "bots" | "config" | "account" | "play" | "results";
 
 const GAME_ACTIONS: Action[] = ["left", "right", "soft", "hard", "cw", "ccw", "180", "hold"];
 const COUNTDOWN = [
@@ -101,7 +102,7 @@ export class App {
       if (this.session) this.input(this.session, { type: "releaseAll" });
     });
     window.addEventListener("pointerdown", () => this.unlockAudio(), { once: false });
-    this.showMenu();
+    this.showTitle();
     requestAnimationFrame((t) => this.loop(t));
     void fetchMe().then((p) => p && this.adoptProfile(p));
   }
@@ -397,6 +398,12 @@ export class App {
       this.finishListening(e.code);
       return;
     }
+    if (this.screen === "title") {
+      // Any key skips to the menu. Leave browser shortcuts (Ctrl+R, F5, ...) alone.
+      if (!(e.ctrlKey || e.metaKey || e.altKey || /^F\d+$/.test(e.code))) e.preventDefault();
+      this.showMenu();
+      return;
+    }
     if (this.screen === "play") {
       const bind = this.bindFor(e.code);
       if (!bind) return;
@@ -502,19 +509,57 @@ export class App {
       }),
     );
     bars.push(this.bar({
-      accent: "#3b3b4a", title: "CONFIG", tagline: "Handling, controls, audio, visuals.", glyph: "⚙", index: MODES.length,
+      accent: "#0f6b3e", title: "CONFIG", tagline: "Handling, controls, audio, visuals.", glyph: "⚙", index: MODES.length,
       onClick: () => this.showConfig(),
     }));
-    const page = el("div", { class: "menu" },
-      el("header", { class: "brand" },
-        el("h1", {}, el("span", {}, "TE"), el("span", { class: "slash" }, "ZA")),
-        el("p", {}, "Tetris + cheza — Swahili for play. SRS+, 180 kicks, 7-bag, B2B chaining, with mechanics matched to the modern online stacker."),
-      ),
+    const replay = el("button", { class: "wm-replay", type: "button", title: "Replay the title" }, wordmark());
+    replay.addEventListener("click", () => this.showTitle());
+    const page = this.splitPage(el("header", { class: "brand" }, el("h1", {}, replay)),
+      el("p", { class: "lede" }, "Tetris + cheza — Swahili for play. SRS+, 180 kicks, 7-bag, B2B chaining, with mechanics matched to the modern online stacker."),
       el("nav", { class: "bars" }, ...bars),
-      this.accountBlock(sprint ?? "—", blitz ?? "—", `${w}W – ${l}L`),
-      el("footer", { class: "hint" }, "↑ ↓ to choose · ENTER to play · ESC to go back"),
+      el("div", { class: "menu-foot" },
+        this.accountBlock(sprint ?? "—", blitz ?? "—", `${w}W – ${l}L`),
+        el("footer", { class: "hint" }, el("span", {}, "↑ ↓ to choose · ENTER to play · ESC to go back"), el("span", { class: "origin" }, "built in kenya")),
+      ),
     );
     this.setScreen("menu", page);
+  }
+
+  /**
+   * The title screen, once per page load and again from the menu's wordmark. The letters drop into the
+   * red slab as Tetris pieces, then the CHEZA row clears and wipes away to the menu, which is already
+   * built underneath. Any key, click or tap skips. With reduced motion it shows the last frame and waits.
+   */
+  private showTitle(): void {
+    this.showMenu();
+    const menu = this.root.firstElementChild as HTMLElement;
+    menu.inert = true;
+    const still = this.settings.reduceMotion || (this.motionQuery?.matches ?? false);
+    const title = el("section", { class: still ? "title still" : "title", "aria-label": "TEZA" },
+      el("div", { class: "title-stage" }, wordmark("ghost"), el("h1", {}, wordmark())),
+      el("div", { class: "title-row" },
+        el("span", { class: "title-cheza", "aria-hidden": "true" }, "CHEZA"),
+        el("p", { class: "title-gloss" }, el("span", {}, "Tetris + cheza"), el("span", {}, "Swahili for play")),
+      ),
+      el("footer", { class: "title-foot" }, el("span", { class: "origin" }, "built in kenya"), el("span", {}, "press any key")),
+    );
+    title.addEventListener("click", () => this.showMenu());
+    title.addEventListener("animationend", (e) => {
+      if (e.target === title && this.screen === "title") this.showMenu();
+    });
+    this.root.append(title);
+    this.screen = "title";
+    this.root.dataset.screen = "title";
+  }
+
+  /** The menu screens' layout: the red slab (wordmark or screen title) beside the main column. */
+  private splitPage(slab: HTMLElement, ...main: HTMLElement[]): HTMLElement {
+    return el("div", { class: "menu" }, slab, el("div", { class: "menu-main" }, ...main));
+  }
+
+  /** The slab for a sub-screen: its title set like the wordmark, with the wordmark small above it. */
+  private titleSlab(title: string): HTMLElement {
+    return el("header", { class: "brand small" }, wordmark(), el("h1", { style: `--len:${title.length}` }, title));
   }
 
   /** Menu corner: SIGN IN when anonymous; username, profile stats and SIGN OUT when signed in. */
@@ -608,11 +653,8 @@ export class App {
       this.adoptProfile(result);
       this.showMenu();
     });
-    const page = el("div", { class: "menu" },
-      el("header", { class: "brand small" },
-        el("h1", {}, el("span", {}, "ACCOUNT")),
-        el("p", {}, "Sign in to keep your personal bests and bot record with you. Playing without an account works the same."),
-      ),
+    const page = this.splitPage(this.titleSlab("ACCOUNT"),
+      el("p", { class: "lede" }, "Sign in to keep your personal bests and bot record with you. Playing without an account works the same."),
       form,
       el("footer", { class: "hint" }, "ENTER to submit · ESC to go back"),
     );
@@ -630,8 +672,8 @@ export class App {
         onClick: () => this.startSession("vs", p),
       });
     });
-    const page = el("div", { class: "menu" },
-      el("header", { class: "brand small" }, el("h1", {}, el("span", {}, "VERSUS")), el("p", {}, "Pick an opponent. First to top out loses.")),
+    const page = this.splitPage(this.titleSlab("VERSUS"),
+      el("p", { class: "lede" }, "Pick an opponent. First to top out loses."),
       el("nav", { class: "bars" }, ...bars),
       el("footer", { class: "hint" }, "ESC to go back"),
     );
@@ -743,7 +785,7 @@ export class App {
     const back = el("button", { class: "ghost-btn", "data-nav": "" }, "← BACK");
     back.addEventListener("click", () => this.showMenu());
     const page = el("div", { class: "config" },
-      el("header", { class: "brand small" }, el("h1", {}, el("span", {}, "CONFIG"))),
+      el("header", { class: "brand small" }, wordmark(), el("h1", {}, "CONFIG")),
       el("div", { class: "panels" }, handling, visual, keys),
       el("div", { class: "actions" }, back, reset),
     );
