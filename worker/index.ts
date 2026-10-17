@@ -1,12 +1,13 @@
 // The `teza` Worker. Static files in dist/ are served by Cloudflare's asset handler; only
 // /api/* (see `run_worker_first` in wrangler.jsonc) and asset misses reach this script.
-// GET /api/match/<id> with `Upgrade: websocket` joins the match's Durable Object. A player
-// coming back adds `?resume=<token>&ack=<peerAck>`, which is checked before the upgrade.
+// POST /api/room issues a room code; GET /api/match/<code>?mode=create|join with `Upgrade:
+// websocket` opens or joins that room's Durable Object. A player coming back adds
+// `?resume=<token>&ack=<peerAck>` instead of `mode`, which is checked before the upgrade.
 // /api/account/* goes to the single `Accounts` Durable Object (src/server/accounts.ts).
 
 import { DurableObject } from "cloudflare:workers";
 import { AccountRow, AccountStore, handleAccount, MAX_BODY_BYTES, readBody, SessionRow } from "../src/server/accounts";
-import { MatchSession, ResumeRequest } from "../src/server/match";
+import { MatchSession, newRoomCode, ResumeRequest, ROOM_CODE } from "../src/server/match";
 
 export interface Env {
   MATCH: DurableObjectNamespace<Match>;
@@ -14,7 +15,6 @@ export interface Env {
 }
 
 const MATCH_ROUTE = /^\/api\/match\/([^/]*)$/;
-const MATCH_ID = /^[A-Za-z0-9_-]{1,32}$/;
 const TOKEN = /^[0-9a-f]{32}$/;
 const ACK = /^[0-9]{1,15}$/;
 
@@ -39,9 +39,14 @@ export default {
       }
       return env.ACCOUNTS.get(env.ACCOUNTS.idFromName("accounts")).fetch(new Request(request, { body }));
     }
+    if (path === "/api/room") {
+      // No storage: the room exists once its creator's socket holds a slot (Match.fetch).
+      if (request.method !== "POST") return new Response("Method not allowed", { status: 405, headers: { Allow: "POST" } });
+      return Response.json({ code: newRoomCode() }, { status: 201 });
+    }
     const route = MATCH_ROUTE.exec(path);
     if (!route) return new Response("Not found", { status: 404 });
-    if (!MATCH_ID.test(route[1])) return new Response("Bad match id", { status: 400 });
+    if (!ROOM_CODE.test(route[1])) return new Response("Bad room code", { status: 400 });
     if (request.method !== "GET") return new Response("Method not allowed", { status: 405, headers: { Allow: "GET" } });
     if (request.headers.get("Upgrade")?.toLowerCase() !== "websocket") {
       return new Response("Expected a WebSocket upgrade", { status: 426, headers: { Upgrade: "websocket" } });
@@ -62,9 +67,17 @@ export class Match extends DurableObject<Env> {
     if (request.headers.get("Upgrade")?.toLowerCase() !== "websocket") {
       return new Response("Expected a WebSocket upgrade", { status: 426 });
     }
-    const resume = resumeParams(new URL(request.url));
+    const url = new URL(request.url);
+    const resume = resumeParams(url);
     if (resume === null) return new Response("Bad resume parameters", { status: 400 });
     if (resume && !this.session.hasToken(resume.token)) return new Response("Unknown resume token", { status: 403 });
+    if (!resume) {
+      // a new player says whether they open the room or join it, so nobody takes over a live code
+      const mode = url.searchParams.get("mode");
+      if (mode !== "create" && mode !== "join") return new Response("Expected ?mode=create or ?mode=join", { status: 400 });
+      if (mode === "create" && this.session.hasPlayers) return new Response("Room code taken", { status: 409 });
+      if (mode === "join" && !this.session.hasPlayers) return new Response("No such room", { status: 404 });
+    }
     const [client, server] = Object.values(new WebSocketPair());
     server.accept();
     const conn = this.session.connect({

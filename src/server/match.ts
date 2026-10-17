@@ -10,7 +10,7 @@
 // payload. The last 100 packets per slot are kept so a reconnecting client can catch up.
 
 import { Action, DEFAULT_HANDLING, Game, Handling } from "../engine/game";
-import { restFrame, stepTo, stepToClock } from "../engine/stepping";
+import { stepTo, stepToClock } from "../engine/stepping";
 import { modeById } from "../modes";
 
 export const MAX_MESSAGE_BYTES = 1024;
@@ -24,6 +24,22 @@ export const RESUME_TIMEOUT_MS = 5000; // an extra socket must `resume` within t
 export const MAX_PENDING = 2; // extra sockets waiting to `resume` at once
 export const LOBBY_TIMEOUT_MS = 120_000; // a match without an opponent by then is reset
 export const IDLE_TIMEOUT_MS = 60_000; // a started match where nobody sends anything for this long ends
+
+/** Room codes (= match ids) are issued by `POST /api/room`: 6 symbols, no 0/O, 1/I/L look-alikes. */
+export const ROOM_ALPHABET = "ABCDEFGHJKMNPQRSTUVWXYZ23456789";
+export const ROOM_CODE = /^[ABCDEFGHJKMNPQRSTUVWXYZ23456789]{6}$/;
+
+/** A fresh room code from `crypto.getRandomValues`, without modulo bias (bytes from 248 up are redrawn). */
+export function newRoomCode(): string {
+  const limit = 256 - (256 % ROOM_ALPHABET.length);
+  let code = "";
+  while (code.length < 6) {
+    for (const b of crypto.getRandomValues(new Uint8Array(8))) {
+      if (b < limit && code.length < 6) code += ROOM_ALPHABET[b % ROOM_ALPHABET.length];
+    }
+  }
+  return code;
+}
 
 const ACTIONS: readonly string[] = ["left", "right", "soft", "hard", "cw", "ccw", "180", "hold"];
 
@@ -120,6 +136,11 @@ export class MatchSession {
 
   get isOver(): boolean {
     return this.ended;
+  }
+
+  /** Whether anyone holds a slot, so the adapter can tell `create` (needs none) from `join` (needs one). */
+  get hasPlayers(): boolean {
+    return this.slots.length > 0;
   }
 
   /** Whether `token` belongs to a slot, so the adapter can refuse a bad `?resume=` before accepting. */
@@ -268,7 +289,11 @@ export class MatchSession {
   private settle(): void {
     const garbage = this.garbageOut;
     this.garbageOut = [];
-    for (const g of garbage) this.send(g.slot, "garbage", { amount: g.amount, frame: g.frame });
+    for (const g of garbage) {
+      // the attacker's client simulates the target's board, so it learns the frame the garbage landed at
+      this.send(g.slot, "garbage", { amount: g.amount, frame: g.frame });
+      this.send(this.other(g.slot), "opponentGarbage", { amount: g.amount, frame: g.frame });
+    }
     // VS has no objective, so over = topped out; both on the same catch-up frame is a draw
     const out = this.slots.filter((s) => s.game?.over);
     if (out.length === 1) this.finish(this.other(out[0]).index, "topout");
@@ -387,11 +412,14 @@ export class MatchSession {
     slot.lastFrame = frame;
     const action = d.action as Action;
     // the input lands on the 1/256-frame grid, after whole-frame steps, as on a client (stepping.ts)
+    // A catch-up may already have moved the engine past that point; the input then lands at the
+    // engine's frame, and that is the frame relayed, so the opponent's client applies it where we did.
     stepToClock(game, frame, true);
+    const applied = game.frame;
     if (d.kind === "press") game.press(action);
     else game.release(action);
 
-    this.send(this.other(slot), "opponentInput", { frame: restFrame(frame, true), action, kind: d.kind });
+    this.send(this.other(slot), "opponentInput", { frame: applied, action, kind: d.kind });
     this.settle();
   }
 
