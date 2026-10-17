@@ -219,3 +219,9 @@
 **Still open**
 - Between inputs the 40L display trails the clock by under one frame.
 - A PB merged from the account server on sign-in has no replay, so it shows no ghost until a faster local clear.
+- The match server (`src/server/match.ts`) steps a game straight to each input frame, so a future online client must step the same way (whole frames between inputs, inputs on a fixed grid) or the boards can drift. Worth a backlog item.
+
+**Round 2 (design review)**
+- The ghost marker now sits above the ghost's three spawn rows, so the falling piece no longer covers it.
+- In windows too narrow for a ghost cell of at least 8 px (e.g. 390 wide), the ghost is not drawn, instead of showing a clipped sliver.
+- The ghost no longer draws its clear names, which overlapped its stats at 1440x900.
