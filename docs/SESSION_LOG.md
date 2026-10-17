@@ -208,3 +208,14 @@
 
 **Still open**
 - There is no online client yet. When one is written it must build its Game with `start.handling`, and send releases for held keys when it calls `releaseAll` on blur.
+
+## 2026-10-17 — PB ghost for 40 LINES (factory job 009)
+
+**What changed**
+- `src/engine/replay.ts`: a 40L replay is `{seed, handling, frames, events}`, where each event is a press, release or releaseAll with the game frame it landed on. `Recorder` applies and records inputs. `ReplayPlayer` rebuilds the run on a fresh 40L game with the saved seed and handling. `parseReplay` accepts a stored replay only when it has a valid shape and its `frames` equals the PB.
+- A 40L clear that sets a new PB saves its replay to `localStorage["teza:ghost40l"]`. It is not in `Records` and does not go to the server. The next 40L run shows a translucent PB GHOST board to the right of the player, in lockstep from GO, with a `GHOST +n` / `YOU +n` / `EVEN` lines marker. It freezes at 40 lines.
+- Exactness: `Game.advance` resolves lock delay, gravity and DAS at the end of each step, so a run depends on where it stopped. The 40L player now rests only on whole frames between inputs, and inputs land on a 1/256-frame grid (`restFrame`), so a replay takes the same steps. Without this, 40 of 40 probe runs diverged on replay. The e2e planner mirrors the new stepping, and the 40L e2e replays the browser's stored replay in Node.
+
+**Still open**
+- Between inputs the 40L display trails the clock by under one frame.
+- A PB merged from the account server on sign-in has no replay, so it shows no ghost until a faster local clear.

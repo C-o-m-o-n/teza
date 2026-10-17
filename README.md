@@ -25,7 +25,7 @@ npx playwright install chromium   # once, downloads the browser Playwright drive
 npm run e2e
 ```
 
-`npm run e2e` builds `dist/`, serves it from a small static server on a free localhost port (no dev server or network needed) and plays two full games in headless Chromium: a 40 LINES run to `40 LINES CLEARED` and a 2-minute BLITZ run to `TIME'S UP`. Each run opens the game with `?seed=7` (a `?seed=<positive integer>` URL parameter fixes the piece sequence) and presses keys from a plan the game's own bot computes in Node (`e2e/plan.ts`). Playwright's fake clock drives time, so the runs are identical every time and take about 1.5 minutes of real time. The BLITZ score in the browser must equal the score of the same inputs replayed in Node, and any page error or `console.error` fails the run. The e2e files (`e2e/*.e2e.ts`) are not part of `npm test` or `npm run check`.
+`npm run e2e` builds `dist/`, serves it from a small static server on a free localhost port (no dev server or network needed) and plays two full games in headless Chromium: a 40 LINES run to `40 LINES CLEARED` and a 2-minute BLITZ run to `TIME'S UP`. Each run opens the game with `?seed=7` (a `?seed=<positive integer>` URL parameter fixes the piece sequence) and presses keys from a plan the game's own bot computes in Node (`e2e/plan.ts`). Playwright's fake clock drives time, so the runs are identical every time and take about 1.5 minutes of real time. The BLITZ score in the browser must equal the score of the same inputs replayed in Node, the 40 LINES run's stored PB replay (see PB ghost) must replay in Node to the same clear, frame count and pieces, and any page error or `console.error` fails the run. The e2e files (`e2e/*.e2e.ts`) are not part of `npm test` or `npm run check`.
 
 ## Deploy
 
@@ -116,6 +116,14 @@ Login and register are covered by the zone's per-IP rate-limit rule on `/api/*` 
 
 For local testing of the API, build and run `npx wrangler dev --local-upstream 127.0.0.1:8787` (with the port you use). Without `--local-upstream`, wrangler rewrites the request URL to the route host `teza.comonhq.com`, so the browser's own `Origin` doesn't match and sign-in gets 403. `npm start` serves only static files, so the account screen there says accounts aren't available.
 
+## PB ghost (40 LINES)
+
+Every 40 LINES run records the player's inputs (`src/engine/replay.ts`). When a run is a clear and a new personal best, its replay is saved to `localStorage["teza:ghost40l"]` as plain JSON: `seed`, the `handling` in effect (DAS/ARR/DCD/SDF, IRS/IHS), `frames` (the PB time) and `events` (each press, release or releaseAll with the game frame it landed on). It is not part of `teza:records` and is never sent to the accounts server. Slower clears and top-outs leave it alone.
+
+Starting 40 LINES loads it when it parses and its `frames` equals the stored PB. The PB run then plays as a translucent PB GHOST board to the right of the player, with its own seed and its saved handling (not the current settings), in lockstep from GO. It freezes at 40 lines. A marker above it shows the lines difference (`GHOST +3`, `YOU +2` or `EVEN`). A PB from another device or an older build has no matching replay, so no ghost appears.
+
+To make a replay exact, the 40 LINES player's game rests only on whole frames between inputs, and inputs land on a 1/256-frame grid (`restFrame`). The display is at most one frame behind the clock between inputs; inputs still apply at their own time.
+
 ## Controls (TETR.IO defaults, rebindable in CONFIG)
 
 | Action | Keys |
@@ -175,7 +183,7 @@ Each kick ducks the rest of the music (sidechain). Combos (from 1 COMBO) add a m
 
 ## Layout
 
-- `src/engine/` — deterministic, headless engine (sub-frame input timing, same as the original)
+- `src/engine/` — deterministic, headless engine (sub-frame input timing, same as the original), and 40L replays
 - `src/server/` — online match and accounts logic (runtime-independent; the Worker in `worker/` wraps each in a Durable Object)
 - `src/profile.ts` — records type, validator and merge, shared by the client and the accounts server
 - `src/ai/bot.ts` — VS opponent: searches every placement, including soft-drop + spin finishes
