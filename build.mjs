@@ -8,7 +8,7 @@ const serve = process.argv.includes("--serve");
 const port = Number(process.env.PORT) || 3000;
 
 const files = ["index.html", "style.css", "manifest.webmanifest"];
-const dirs = ["fonts", "icons"];
+const dirs = ["fonts", "icons", "og"];
 
 // The service worker's cache name carries a hash of everything it precaches, so each new build
 // gets a fresh cache. In --serve mode dist/sw.js is a no-op worker instead (no fetch handler, and it
