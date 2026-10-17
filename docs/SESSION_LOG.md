@@ -239,3 +239,8 @@
 **Still open**
 - The domain for visible copy is undecided (the v1.0.0 line said `teza.ke`). Only the OG URLs name one.
 - The title's auto-advance uses CSS animation time, which Playwright's fake clock doesn't control; the e2e skips the title with a key instead.
+
+**Round 2 (design review)**
+- CONFIG opens scrolled to the top, so its red header is fully in view (focusing BACK used to scroll it off). A rebind redraws the screen at the scroll position it had. The header band is smaller.
+- Arrow key caps are drawn as SVG block arrows. The brand fonts have no ← or →, and their ↑ ↓ are hairlines. Key-cap text is 16px.
+- The title's "press any key" is paper at 70%, not muted grey. At 390 the small wordmark has more room above the VERSUS and ACCOUNT titles.
