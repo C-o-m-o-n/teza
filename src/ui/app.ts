@@ -36,6 +36,24 @@ function el<K extends keyof HTMLElementTagNameMap>(tag: K, attrs: Record<string,
   return e;
 }
 
+const ARROW_TURN: Record<string, number> = { ArrowUp: 0, ArrowRight: 90, ArrowDown: 180, ArrowLeft: 270 };
+
+/** A binding's label on its key cap. Arrows are drawn: the UI fonts have no ← or →, and their ↑ ↓ are hairlines. */
+function keyLabel(code: string): Node | string {
+  const turn = ARROW_TURN[code];
+  if (turn === undefined) return keyName(code);
+  const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+  svg.setAttribute("class", "key-arrow");
+  svg.setAttribute("viewBox", "0 0 16 16");
+  svg.setAttribute("role", "img");
+  svg.setAttribute("aria-label", `${code.slice(5)} arrow`);
+  svg.style.transform = `rotate(${turn}deg)`;
+  const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
+  path.setAttribute("d", "M8 1.5 15 9H10.5v5.5h-5V9H1z");
+  svg.append(path);
+  return svg;
+}
+
 function keyName(code: string): string {
   if (code.startsWith("Key")) return code.slice(3);
   if (code.startsWith("Digit")) return code.slice(5);
@@ -680,7 +698,8 @@ export class App {
     this.setScreen("bots", page);
   }
 
-  private showConfig(): void {
+  /** CONFIG opens at the top (header in view); a rebind redraws it at the scroll position it had. */
+  private showConfig(scrollTop = 0): void {
     const s = this.settings;
     const save = () => {
       saveSettings(s);
@@ -762,7 +781,7 @@ export class App {
       const row = el("div", { class: "row" }, el("span", {}, BIND_LABELS[bind]));
       for (let slot = 0; slot < 2; slot++) {
         const code = s.keys[bind][slot];
-        const btn = el("button", { class: "key" }, code ? keyName(code) : "—");
+        const btn = el("button", { class: "key" }, code ? keyLabel(code) : "—");
         btn.addEventListener("click", () => {
           if (this.listening) this.listening.btn.classList.remove("listening");
           this.listening = { bind, slot, btn };
@@ -790,6 +809,7 @@ export class App {
       el("div", { class: "actions" }, back, reset),
     );
     this.setScreen("config", page);
+    page.scrollTop = scrollTop; // focusing BACK, the first control, would scroll the header out of view
   }
 
   private finishListening(code: string): void {
@@ -806,7 +826,7 @@ export class App {
       keys[l.bind] = keys[l.bind].filter((_, i) => i !== l.slot);
     }
     saveSettings(this.settings);
-    this.showConfig();
+    this.showConfig(this.root.querySelector(".config")?.scrollTop ?? 0);
   }
 
   private showResults(): void {
