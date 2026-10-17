@@ -8,17 +8,20 @@ import { Action, Game, GameEvent } from "../engine/game";
 import { Recorder, ReplayInput, ReplayPlayer } from "../engine/replay";
 import { stepToClock } from "../engine/stepping";
 import { MODES, Mode, ModeId, modeById } from "../modes";
+import { OnlineClient, OnlineResult } from "../net/online";
 import { mergeRecords, passwordError, usernameError } from "../profile";
 import { BoardView, formatTime, Renderer } from "../render/renderer";
+import { ROOM_CODE } from "../server/match";
 import {
   BIND_LABELS, BIND_ORDER, Bind, Records, Settings, defaultSettings, loadGhost, loadRecords, loadSettings, saveGhost,
   saveRecords, saveSettings,
 } from "../settings";
 import { Profile, fetchMe, finishSession, putRecords, signIn } from "./account";
 import { classicWordmark, wordmark } from "./brand";
+import { newRoom, onlineAvailable } from "./rooms";
 import { THEMES, themeById } from "./themes";
 
-type Screen = "title" | "menu" | "bots" | "config" | "account" | "play" | "results";
+type Screen = "title" | "menu" | "bots" | "lobby" | "config" | "account" | "play" | "results";
 
 const GAME_ACTIONS: Action[] = ["left", "right", "soft", "hard", "cw", "ccw", "180", "hold"];
 const COUNTDOWN = [
@@ -94,8 +97,19 @@ interface Session {
   started: boolean;
   last: number; // performance.now() of last sim advance
   endAt: number | null; // when to show results
-  outcome: "win" | "lose" | "clear" | "fail" | null;
+  outcome: "win" | "lose" | "draw" | "lost" | "clear" | "fail" | null;
+  online: OnlineClient | null; // an online match: `bot` is the opponent as the server relays it
+  away: number | null; // performance.now() when the absent opponent forfeits
+  notice: { text: string; until: number } | null; // a server error, shown over the board for a while
 }
+
+const UNAVAILABLE = "Online play isn't available here";
+const OUTCOME_TEXT: Record<OnlineResult["outcome"], [string, string]> = {
+  win: ["VICTORY", "YOU WIN"], lose: ["DEFEAT", "YOU LOSE"], draw: ["DRAW", "DRAW"], lost: ["CONNECTION LOST", "NO RESULT"],
+};
+const REASON_TEXT: Record<string, string> = {
+  topout: "BY TOP-OUT", disconnect: "BY DISCONNECT", idle: "IDLE MATCH", connection: "THE CONNECTION DROPPED",
+};
 
 export class App {
   private settings: Settings = loadSettings();
@@ -105,6 +119,7 @@ export class App {
   private root: HTMLElement;
   private screen: Screen = "menu";
   private session: Session | null = null;
+  private room: OnlineClient | null = null; // the online lobby's connection, until the match starts
   private held = new Set<Bind>();
   private listening: { bind: Bind; slot: number; btn: HTMLButtonElement } | null = null;
   private lastFrame = performance.now();
@@ -232,9 +247,14 @@ export class App {
     for (const b of this.held) if ((GAME_ACTIONS as string[]).includes(b)) this.input(s, { type: "press", action: b as Action });
   }
 
-  /** Apply an input to the player's game, recording it in 40 LINES. */
+  /** Apply an input to the player's game, recording it in 40 LINES; online, the client sends it too. */
   private input(s: Session, input: ReplayInput): void {
-    if (s.recorder) s.recorder.apply(input);
+    if (s.online) {
+      // a blur releases each held action on its own, so the server's engine does the same
+      if (input.type === "press") s.online.press(input.action);
+      else if (input.type === "release") s.online.release(input.action);
+      else s.online.blur();
+    } else if (s.recorder) s.recorder.apply(input);
     else if (input.type === "press") s.player.press(input.action);
     else if (input.type === "release") s.player.release(input.action);
     else s.player.releaseAll();
@@ -251,6 +271,7 @@ export class App {
     const dt = Math.min(0.25, Math.max(0, (now - s.last) / 1000));
     s.last = now;
     if (s.endAt !== null) return;
+    if (s.online) return this.advanceOnline(s, now);
     s.clock += dt * 60;
     stepToClock(s.player, s.clock, input);
     if (s.ghost && s.ghostView) {
@@ -267,6 +288,19 @@ export class App {
         s.botAI.playPiece();
       }
     }
+  }
+
+  /**
+   * Online, the client keeps its own clock (the server's, from `start`) and steps both boards; the
+   * opponent's only moves when the server relays it. Here: the status lines over the boards.
+   */
+  private advanceOnline(s: Session, now: number): void {
+    const client = s.online!;
+    client.update();
+    s.clock = client.clock;
+    if (s.notice && now >= s.notice.until) s.notice = null;
+    s.playerView.marker = s.notice?.text ?? (s.player.over ? "TOPPED OUT · WAITING" : null);
+    s.botView!.marker = s.away === null ? null : `OPPONENT DISCONNECTED · ${Math.max(0, Math.ceil((s.away - now) / 1000))}s`;
   }
 
   // ------------------------------------------------------------------ sessions
@@ -296,41 +330,77 @@ export class App {
       botView = new BoardView(bot, { accent: mode.accent, mode: "vs", label: `${profile.name} BOT`, compact: true });
       botAI = new Bot(bot, profile);
     }
-    this.session = {
+    this.mount({
       mode, seed, player, playerView, bot, botView, botAI, botProfile: profile, botAcc: 0,
       recorder: mode.id === "40l" ? new Recorder(player) : null, clock: 0, ghost, ghostView,
-      t: 0, started: false, last: performance.now(), endAt: null, outcome: null,
+      t: 0, started: false, last: performance.now(), endAt: null, outcome: null, online: null, away: null, notice: null,
+    });
+    if (bot && botView) {
+      player.onAttack = (n) => this.sendAttack(playerView, botView!, bot!, n);
+      bot.onAttack = (n) => this.sendAttack(botView!, playerView, player, n);
+    }
+    bot?.on((e) => {
+      if (e.type === "topout") this.endSession("win");
+    });
+  }
+
+  /**
+   * Both players are in: the online match starts at once (the server's clock began at `start`, so
+   * there is no countdown), with the server's rules and handling. Only the server's `end` decides it.
+   */
+  private startOnline(client: OnlineClient): void {
+    const mode = modeById("vs");
+    const player = client.player!;
+    const opponent = client.opponent!;
+    const playerView = new BoardView(player, { accent: mode.accent, mode: "vs", objectiveLines: 40, label: "YOU" });
+    const opponentView = new BoardView(opponent, { accent: mode.accent, mode: "vs", label: "OPPONENT", compact: true });
+    this.room = null;
+    const s: Session = {
+      mode, seed: player.opts.seed, player, playerView, bot: opponent, botView: opponentView, botAI: null, botProfile: null,
+      botAcc: 0, recorder: null, clock: 0, ghost: null, ghostView: null, t: 0, started: true, last: performance.now(),
+      endAt: null, outcome: null, online: client, away: null, notice: null,
     };
-    this.renderer.accent = mode.accent;
-    this.renderer.views = botView ? [playerView, botView] : ghostView ? [playerView, ghostView] : [playerView];
+    // garbage flights: our predicted attacks go out (the server sends the real ones); the server's come in
+    client.events = {
+      attack: (n) => this.flight(playerView, opponentView, n, opponent.opts.garbagespeed),
+      garbage: (n) => this.flight(opponentView, playerView, n, player.opts.garbagespeed),
+      opponentAway: (ms) => (s.away = ms === null ? null : performance.now() + ms),
+      error: (_code, message) => (s.notice = { text: message.toUpperCase(), until: performance.now() + 3000 }),
+      end: (result) => this.endSession(result.outcome),
+    };
+    this.mount(s);
+  }
+
+  /** Show a session: its boards, music and sounds, on the play screen. */
+  private mount(s: Session): void {
+    this.session = s;
+    this.renderer.accent = s.mode.accent;
+    this.renderer.views = s.botView ? [s.playerView, s.botView] : s.ghostView ? [s.playerView, s.ghostView] : [s.playerView];
     this.renderer.flights = [];
     this.renderer.overlay = { countdown: null, countdownT: 0 };
     this.renderer.layoutViews();
     this.applySettings();
     this.syncMusic(true); // crossfade into the mode's song: the countdown is its intro
-    this.wireSounds(player, true);
-    if (bot) this.wireSounds(bot, false);
-    if (bot && botView) {
-      player.onAttack = (n) => this.sendAttack(playerView, botView!, bot!, n);
-      bot.onAttack = (n) => this.sendAttack(botView!, playerView, player, n);
-    }
-    player.on((e) => this.onPlayerEvent(e));
-    bot?.on((e) => {
-      if (e.type === "topout") this.endSession("win");
-    });
+    this.wireSounds(s.player, true);
+    if (s.bot) this.wireSounds(s.bot, false);
+    s.player.on((e) => this.onPlayerEvent(e));
     this.setScreen("play");
   }
 
   private sendAttack(from: BoardView, to: BoardView, target: Game, n: number): void {
+    this.flight(from, to, n, target.opts.garbagespeed);
+    target.receive(n);
+  }
+
+  private flight(from: BoardView, to: BoardView, n: number, frames: number): void {
     this.renderer.flights.push({
       from: this.renderer.boardCentre(from),
       to: this.renderer.meterPoint(to),
       t: 0,
-      dur: target.opts.garbagespeed / 60,
+      dur: frames / 60,
       amount: n,
       color: n >= 6 ? "#ff3fa4" : "#ff7a3c",
     });
-    target.receive(n);
   }
 
   /** `loud` is the player's game: every sound, panned by piece column. The bot's is quieter and centred. */
@@ -376,6 +446,7 @@ export class App {
     const s = this.session;
     if (!s) return;
     if (e.type === "topout") {
+      if (s.online) return; // input stops; the server's `end` decides the match
       if (s.mode.id === "zen") {
         setTimeout(() => s.player.wipe(), 0);
         return;
@@ -391,6 +462,7 @@ export class App {
     if (!s || s.endAt !== null) return;
     s.outcome = outcome;
     s.endAt = s.t + (outcome === "clear" || outcome === "win" ? 0.9 : 1.3);
+    if (s.online) s.playerView.marker = s.botView!.marker = null;
     this.syncMusic(); // back to the menu song for the results
     if (outcome === "win") {
       s.botView!.bigText = { text: "K.O.", t: 0, color: "#ff3f5f" };
@@ -400,11 +472,12 @@ export class App {
 
   private retry(): void {
     const s = this.session;
-    if (!s) return;
+    if (!s || s.online) return; // no rematch online
     this.startSession(s.mode.id, s.botProfile);
   }
 
   private exitToMenu(): void {
+    this.session?.online?.leave(); // the opponent wins by forfeit after the server's grace period
     this.session = null;
     this.syncMusic();
     this.renderer.views = [];
@@ -459,7 +532,10 @@ export class App {
       // Game keys (e.g. spamming hard drop after a top-out) must never activate a button.
       if (bind || e.code === "Enter" || e.code === "Space") e.preventDefault();
       if (performance.now() < this.resultsShownAt + 600) return;
-      if (bind === "retry" || e.code === "Enter") {
+      if (this.session?.online) {
+        // online results have one action, MENU
+        if (bind === "exit" || e.code === "Enter") this.exitToMenu();
+      } else if (bind === "retry" || e.code === "Enter") {
         e.preventDefault();
         this.retry();
       } else if (bind === "exit") {
@@ -477,7 +553,11 @@ export class App {
       items[next].focus();
       sfx.menu();
     } else if (e.code === "Escape") {
-      if (this.screen !== "menu") {
+      if (this.screen === "lobby") {
+        sfx.menu();
+        this.leaveRoom();
+        this.showBots();
+      } else if (this.screen !== "menu") {
         sfx.menu();
         this.showMenu();
       }
@@ -718,11 +798,154 @@ export class App {
         onClick: () => this.startSession("vs", p),
       });
     });
+    // online: the same bars, then the answer when there is no game server here
+    const unavailable = el("p", { class: "form-error", role: "alert" });
+    const online = async (open: () => Promise<boolean>) => {
+      unavailable.textContent = "";
+      if (!(await open()) && this.screen === "bots") unavailable.textContent = UNAVAILABLE;
+    };
+    bars.push(
+      this.bar({
+        accent: "#e0337a", title: "CREATE ROOM", tagline: "Play a friend online: get a code to send them.",
+        glyph: "1V1", meta: "ONLINE", index: bars.length, onClick: () => void online(() => this.createRoom()),
+      }),
+      this.bar({
+        accent: "#7a3fe0", title: "JOIN ROOM", tagline: "Enter the 6-letter code a friend sent you.",
+        glyph: "CODE", meta: "ONLINE", index: bars.length + 1, onClick: () => void online(() => this.showJoin()),
+      }),
+    );
     const page = this.subPage("VERSUS", "Pick an opponent. First to top out loses.",
       el("nav", { class: "bars" }, ...bars),
+      unavailable,
       el("footer", { class: "hint" }, "ESC to go back"),
     );
     this.setScreen("bots", page);
+  }
+
+  // ------------------------------------------------------------------ online rooms
+
+  /**
+   * The thin WebSocket adapter for the online client: a same-origin URL (behind the zone's rate
+   * limit), never a fixed host.
+   */
+  private connect(code: string, mode: "create" | "join"): OnlineClient {
+    const url = new URL(`/api/match/${code}?mode=${mode}`, location.href);
+    url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
+    const ws = new WebSocket(url);
+    const client = new OnlineClient({
+      send: (data) => {
+        if (ws.readyState === WebSocket.OPEN) ws.send(data);
+      },
+      close: () => ws.close(1000, "left"),
+    }, () => performance.now());
+    ws.addEventListener("message", (e) => {
+      if (typeof e.data === "string") client.receive(e.data);
+    });
+    ws.addEventListener("close", () => client.closed());
+    this.room = client;
+    return client;
+  }
+
+  private leaveRoom(): void {
+    this.room?.leave();
+    this.room = null;
+  }
+
+  /** The lobby screens (CREATE's code, JOIN's field): one box in the VERSUS layout. */
+  private lobbyPage(title: string, lede: string, ...box: HTMLElement[]): void {
+    const page = this.subPage(title, lede,
+      el("section", { class: "account-form room" }, ...box),
+      el("footer", { class: "hint" }, "ESC to cancel"),
+    );
+    this.setScreen("lobby", page);
+  }
+
+  /** CREATE ROOM: a code from the server, then wait on the socket for the opponent. False without a server. */
+  private async createRoom(): Promise<boolean> {
+    const code = await newRoom();
+    if (!code) return false;
+    if (this.screen !== "bots") return true; // left the page meanwhile
+    const status = el("p", { class: "note", role: "status" }, "Waiting for opponent… (ESC to cancel)");
+    const error = el("p", { class: "form-error", role: "alert" });
+    const back = el("button", { class: "ghost-btn", type: "button", "data-nav": "" }, "← BACK");
+    back.addEventListener("click", () => {
+      this.leaveRoom();
+      this.showBots();
+    });
+    this.lobbyPage("ROOM", "Send this code to your opponent. The match starts as soon as they join.",
+      el("p", { class: "account-label" }, "ROOM CODE"),
+      el("p", { class: "room-code", "aria-label": code.split("").join(" ") }, code),
+      status,
+      error,
+      el("div", { class: "actions" }, back),
+    );
+    const client = this.connect(code, "create");
+    client.events = {
+      start: () => this.startOnline(client),
+      closed: () => {
+        if (this.room !== client) return;
+        this.room = null;
+        status.textContent = "";
+        error.textContent = client.lastError?.code === "no-opponent"
+          ? "Nobody joined in time. Go back to open a new room."
+          : client.slot === null ? "Couldn't open the room. Go back and try again." : "The connection to the room was lost.";
+      },
+    };
+    return true;
+  }
+
+  /** JOIN ROOM: a field for the code. False (and no page) without a server. */
+  private async showJoin(): Promise<boolean> {
+    if (!(await onlineAvailable())) return false;
+    if (this.screen !== "bots") return true;
+    const input = el("input", {
+      name: "room", maxlength: "6", autocomplete: "off", autocapitalize: "characters", spellcheck: "false",
+      inputmode: "text", "aria-label": "Room code", "data-nav": "",
+    });
+    const error = el("p", { class: "form-error", role: "alert" });
+    const submit = el("button", { class: "ghost-btn primary", type: "submit", "data-nav": "" }, "JOIN →");
+    const back = el("button", { class: "ghost-btn", type: "button", "data-nav": "" }, "← BACK");
+    back.addEventListener("click", () => {
+      this.leaveRoom();
+      this.showBots();
+    });
+    input.addEventListener("input", () => {
+      input.value = input.value.toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 6);
+    });
+    const form = el("form", { novalidate: "" },
+      el("label", { class: "field" }, el("span", {}, "ROOM CODE"), input),
+      error,
+      el("div", { class: "actions" }, submit, back),
+    );
+    form.addEventListener("submit", (e) => {
+      e.preventDefault();
+      if (this.room) return; // already joining
+      const code = input.value;
+      // the alphabet has no 0, O, 1, I or L, so a code with one can't exist
+      if (!ROOM_CODE.test(code)) {
+        error.textContent = code.length === 6 ? "No such room" : "Room codes have 6 letters and digits";
+        return;
+      }
+      error.textContent = "";
+      submit.disabled = true;
+      submit.textContent = "JOINING…";
+      const client = this.connect(code, "join");
+      client.events = {
+        start: () => this.startOnline(client),
+        closed: () => {
+          if (this.room !== client) return;
+          this.room = null;
+          submit.disabled = false;
+          submit.textContent = "JOIN →";
+          // a refused upgrade (404) gives the page no status: no welcome and no error means no room
+          const full = ["full", "busy", "resume-timeout", "ended"].includes(client.lastError?.code ?? "");
+          error.textContent = full ? "Room is full" : client.slot === null ? "No such room" : "The connection to the room was lost.";
+        },
+      };
+    });
+    this.lobbyPage("JOIN", "Type the code your opponent sees on their screen, then press Enter.", form);
+    input.focus();
+    return true;
   }
 
   /** CONFIG opens at the top (header in view); a rebind redraws it at the scroll position it had. */
@@ -889,7 +1112,14 @@ export class App {
       stat("FINESSE", `${g.stats.finesse}`),
     ];
     const run = { pps: g.pps(), apm: g.apm(), pieces: g.stats.pieces, date: Date.now() };
-    if (s.mode.id === "40l") {
+    if (s.online) {
+      // the server's word; online results are not records (no bot W-L, nothing sent to the account)
+      const result = s.online.result ?? { outcome: "lost", reason: "connection" };
+      [headline, big] = OUTCOME_TEXT[result.outcome];
+      badge = `ONLINE · ${REASON_TEXT[result.reason] ?? result.reason.toUpperCase()}`;
+      stats.splice(4, 1); // no finesse count: the online board runs the server's way
+      stats.splice(2, 0, stat("APM", g.apm().toFixed(1)), stat("SENT", `${g.stats.sent}`));
+    } else if (s.mode.id === "40l") {
       if (s.outcome === "clear") {
         const t = formatTime(g.frame);
         headline = "40 LINES CLEARED";
@@ -927,18 +1157,20 @@ export class App {
       stats.splice(2, 0, stat("APM", g.apm().toFixed(1)), stat("SENT", `${g.stats.sent}`));
       if (s.bot) stats.push(stat("BOT APM", s.bot.apm().toFixed(1)));
     }
-    saveRecords(this.records);
-    if (this.account) void putRecords(this.records);
+    if (!s.online) {
+      saveRecords(this.records);
+      if (this.account) void putRecords(this.records);
+    }
     const retry = el("button", { class: "ghost-btn primary", "data-nav": "" }, s.mode.id === "vs" ? "REMATCH  ·  R" : "RETRY  ·  R");
     retry.addEventListener("click", () => this.retry());
-    const back = el("button", { class: "ghost-btn", "data-nav": "" }, "MENU  ·  ESC");
+    const back = el("button", { class: s.online ? "ghost-btn primary" : "ghost-btn", "data-nav": "" }, "MENU  ·  ESC");
     back.addEventListener("click", () => this.exitToMenu());
     const page = el("div", { class: "results", style: `--accent:${s.mode.accent}` },
       el("p", { class: "headline" }, headline),
       el("p", { class: "big" }, big),
       badge ? el("p", { class: "badge" }, badge) : "",
       el("div", { class: "stats" }, ...stats),
-      el("div", { class: "actions" }, retry, back),
+      el("div", { class: "actions" }, ...(s.online ? [back] : [retry, back])),
     );
     this.resultsShownAt = performance.now();
     this.setScreen("results", page);
