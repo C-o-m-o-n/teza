@@ -44,9 +44,9 @@ Live URL: https://teza.comonhq.com/
 
 ### Offline and install (PWA)
 
-The fonts (Russo One, Saira Semi Condensed; SIL Open Font License, see `fonts/OFL-*.txt`) are self-hosted from `fonts/`, so the page makes no request to Google Fonts. `manifest.webmanifest` and the placeholder icons in `icons/` make the game installable.
+The fonts (Big Shoulders Display, Archivo Narrow, Russo One, Saira Semi Condensed; SIL Open Font License, see `fonts/OFL-*.txt`) are self-hosted from `fonts/`, so the page makes no request to Google Fonts. `manifest.webmanifest` and the icons in `icons/` (see [Brand](#brand)) make the game installable.
 
-`sw.js` is a service worker that precaches the static build (`index.html`, `style.css`, `game.js`, the manifest, fonts and icons) on first load and then serves those cache-first, so solo modes work offline. `npm run build` stamps a hash of the build into its cache name, so each deploy gets a fresh cache and the old one is deleted. It only handles same-origin `GET`s: **`/api/*` (accounts, match WebSockets) is never intercepted or cached**, and neither are other methods or cross-origin requests. Under `npm start` the served `sw.js` is a no-op worker, so live rebuilds are never stale; to try offline mode locally, serve a production `dist/` instead.
+`sw.js` is a service worker that precaches the static build (`index.html`, `style.css`, `game.js`, the manifest, fonts and icons; not the share image, which only link previews fetch) on first load and then serves those cache-first, so solo modes work offline. `npm run build` stamps a hash of the build into its cache name, so each deploy gets a fresh cache and the old one is deleted. It only handles same-origin `GET`s: **`/api/*` (accounts, match WebSockets) is never intercepted or cached**, and neither are other methods or cross-origin requests. Under `npm start` the served `sw.js` is a no-op worker, so live rebuilds are never stale; to try offline mode locally, serve a production `dist/` instead.
 
 ## Game server
 
@@ -181,6 +181,17 @@ Each gear has its own tempo and a denser arrangement. The danger gear is a jump 
 
 Each kick ducks the rest of the music (sidechain). Combos (from 1 COMBO) add a melody phrase in the song's key that starts on the next 16th note and grows longer and higher up to 8 COMBO. The phrase is cut when the combo ends. Each of your line clears ducks the music for about a third of a second, and quads, spins and all clears duck it deeper. The effects' chords follow the playing song's key. The bot's sounds are centred. Your piece sounds (move, rotate, hold, drop, spin, clear) are panned left or right by the piece's column. The thresholds and intensity mix are in `src/audio/music.ts` (`GEARS`, `musicIntensity`).
 
+## Brand
+
+The "Poster Slab" identity. The game opens on a title screen where T, E, Z and A drop into a red slab like pieces, lock with a one-frame squash, and the CHEZA row clears and wipes away to the menu. Any key, click or tap skips it. Clicking the wordmark on the menu replays it. With reduced motion (the OS setting or CONFIG › Reduce motion) it shows its last frame and waits for a key.
+
+- **Wordmark**: TEZA in Big Shoulders Display 900, tight tracking. The Z is drawn in SVG (`src/ui/brand.ts`, `Z_PIECES`): a heavy Z cut into four pieces laid out like a Z-tetromino's cells. One `wordmark()` is used on the title screen, the menu slab and the ACCOUNT, VERSUS and CONFIG headers.
+- **Palette**: ink black `#0B0B0C` (background, `theme_color`), paper white `#F3EFE6` (text), signal red `#E0301E` (the slab), field green `#0F6B3E` (the 12px stripe). These are the `:root` tokens in `style.css`. Piece colours, mode accents and the board are unchanged.
+- **Type**: Big Shoulders Display (800 to 900) for display, Archivo Narrow (500 to 700) for body text. Both are variable latin subsets, one woff2 each in `fonts/`. Russo One and Saira Semi Condensed stay for the in-game canvas text.
+- **Icons**: the Z-tetromino as four paper cells on a red square, with one cell green. `icons/favicon.svg` is the same cells with no side padding. The maskable icon keeps the cells inside the central 80% safe circle.
+- **Share image**: `og/og-image.png`, 1200x630. It shows the title screen's last frame: wordmark, "Tetris + cheza / Swahili for play" and "Built in Kenya". `index.html` points Open Graph and Twitter cards at `https://teza.comonhq.com/og/og-image.png`.
+- **Regenerating**: `npm run brand` (`scripts/brand.mjs`) rewrites `icons/favicon.svg`, the four PNG icons and `og/og-image.png`. It draws them in SVG/HTML from the same `Z_PIECES` and fonts, and screenshots them with Playwright's Chromium (the `@playwright/test` devDependency; run `npx playwright install chromium` once). It is not part of `npm run build`, so commit the outputs after running it.
+
 ## Layout
 
 - `src/engine/` — deterministic, headless engine (sub-frame input timing, same as the original), and 40L replays
@@ -189,6 +200,7 @@ Each kick ducks the rest of the music (sidechain). Combos (from 1 COMBO) add a m
 - `src/ai/bot.ts` — VS opponent: searches every placement, including soft-drop + spin finishes
 - `src/render/` — canvas renderer (board spring physics, particles, action text)
 - `src/audio/` — synthesized WebAudio SFX, sound packs and generative music
-- `src/ui/` — menus, config, results, session orchestration
+- `src/ui/` — title screen, wordmark, menus, config, results, session orchestration
+- `scripts/brand.mjs` — regenerates the icons, favicon and share image (`npm run brand`)
 - `test/` — engine, bot, match server and accounts tests (vitest)
 - `e2e/` — browser runs of 40 LINES and BLITZ (Playwright, `npm run e2e`)

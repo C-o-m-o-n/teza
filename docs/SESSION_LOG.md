@@ -225,3 +225,17 @@
 - The ghost marker now sits above the ghost's three spawn rows, so the falling piece no longer covers it.
 - In windows too narrow for a ghost cell of at least 8 px (e.g. 390 wide), the ghost is not drawn, instead of showing a clipped sliver.
 - The ghost no longer draws its clear names, which overlapped its stats at 1440x900.
+
+## 2026-10-17 — Brand identity, "Poster Slab" (factory job 010)
+
+**What changed**
+- New identity (direction A, picked at the user's request): ink `#0B0B0C`, paper `#F3EFE6`, signal red `#E0301E`, field green `#0F6B3E`; Big Shoulders Display and Archivo Narrow, self-hosted (variable latin woff2 plus OFL texts). Russo One and Saira stay for the canvas HUD.
+- `src/ui/brand.ts` `wordmark()`: TEZA with the Z drawn in SVG as a heavy Z cut into four Z-tetromino-like pieces. It appears on the title, the menu slab and the ACCOUNT, VERSUS and CONFIG headers.
+- Menu: a red slab (40%) holds the wordmark set bottom to top and cropped, then a 12px green stripe, then the mode bars as bands on ink, separated by thick paper rules and stepping in two grid columns per row. At 860px and below the slab becomes a top band.
+- Title screen (once per load, and again by clicking the menu's wordmark): T, E, Z, A drop over their ghost outlines and lock with a one-frame squash, the CHEZA row clears, and the screen wipes off to the menu underneath (about 4 s). Any key or click skips it. With reduced motion (OS or CONFIG) it shows the last frame with no animations and waits for input.
+- Icons, `icons/favicon.svg` and `og/og-image.png` come from `npm run brand` (`scripts/brand.mjs`, Playwright screenshots). Open Graph/Twitter tags point at https://teza.comonhq.com/. No domain appears in visible copy; the footer line is "built in kenya".
+- The e2e now waits for the title and presses Space to reach the menu.
+
+**Still open**
+- The domain for visible copy is undecided (the v1.0.0 line said `teza.ke`). Only the OG URLs name one.
+- The title's auto-advance uses CSS animation time, which Playwright's fake clock doesn't control; the e2e skips the title with a key instead.
