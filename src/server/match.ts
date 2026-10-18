@@ -10,13 +10,17 @@
 // payload. The last 100 packets per slot are kept so a reconnecting client can catch up.
 
 import { Action, DEFAULT_HANDLING, Game, Handling } from "../engine/game";
-import { restFrame, stepTo, stepToClock } from "../engine/stepping";
+import { stepTo, stepToClock } from "../engine/stepping";
 import { modeById } from "../modes";
 
 export const MAX_MESSAGE_BYTES = 1024;
 export const SEND_BUFFER = 100;
 export const FRAME_TOLERANCE = 30; // frames an input may be ahead of the server's clock
+// Inputs are metered by a token bucket: INPUT_BURST may arrive at once, then MAX_INPUTS_PER_SECOND
+// on average. The client paces itself with a smaller burst at the same rate (online.ts), so packets
+// network jitter bunches together still fit (README "Game server").
 export const MAX_INPUTS_PER_SECOND = 60;
+export const INPUT_BURST = 90;
 export const MAX_REJECTED = 20; // rejected messages before the connection is dropped
 export const RECONNECT_GRACE_MS = 15000;
 export const MAX_LAG_FRAMES = 120; // frames an input (or an engine) may trail the server's clock
@@ -24,6 +28,22 @@ export const RESUME_TIMEOUT_MS = 5000; // an extra socket must `resume` within t
 export const MAX_PENDING = 2; // extra sockets waiting to `resume` at once
 export const LOBBY_TIMEOUT_MS = 120_000; // a match without an opponent by then is reset
 export const IDLE_TIMEOUT_MS = 60_000; // a started match where nobody sends anything for this long ends
+
+/** Room codes (= match ids) are issued by `POST /api/room`: 6 symbols, no 0/O, 1/I/L look-alikes. */
+export const ROOM_ALPHABET = "ABCDEFGHJKMNPQRSTUVWXYZ23456789";
+export const ROOM_CODE = /^[ABCDEFGHJKMNPQRSTUVWXYZ23456789]{6}$/;
+
+/** A fresh room code from `crypto.getRandomValues`, without modulo bias (bytes from 248 up are redrawn). */
+export function newRoomCode(): string {
+  const limit = 256 - (256 % ROOM_ALPHABET.length);
+  let code = "";
+  while (code.length < 6) {
+    for (const b of crypto.getRandomValues(new Uint8Array(8))) {
+      if (b < limit && code.length < 6) code += ROOM_ALPHABET[b % ROOM_ALPHABET.length];
+    }
+  }
+  return code;
+}
 
 const ACTIONS: readonly string[] = ["left", "right", "soft", "hard", "cw", "ccw", "180", "hold"];
 
@@ -79,7 +99,8 @@ interface Slot {
   buffer: Envelope[];
   game: Game | null;
   lastFrame: number;
-  recent: number[]; // clock times of inputs accepted in the last second
+  budget: number; // inputs the slot may still send now (the token bucket)
+  budgetAt: number; // clock time `budget` was last brought up to date
   grace: unknown; // forfeit timer while disconnected mid-match
 }
 
@@ -122,6 +143,11 @@ export class MatchSession {
     return this.ended;
   }
 
+  /** Whether anyone holds a slot, so the adapter can tell `create` (needs none) from `join` (needs one). */
+  get hasPlayers(): boolean {
+    return this.slots.length > 0;
+  }
+
   /** Whether `token` belongs to a slot, so the adapter can refuse a bad `?resume=` before accepting. */
   hasToken(token: string): boolean {
     return this.slots.some((s) => s.token === token);
@@ -140,7 +166,7 @@ export class MatchSession {
     } else if (this.slots.length < 2) {
       const slot: Slot = {
         index: this.slots.length as SlotIndex, token: this.random.token(), conn, seq: 0, ack: 0,
-        buffer: [], game: null, lastFrame: 0, recent: [], grace: null,
+        buffer: [], game: null, lastFrame: 0, budget: INPUT_BURST, budgetAt: 0, grace: null,
       };
       this.slots.push(slot);
       conn.slot = slot;
@@ -180,7 +206,7 @@ export class MatchSession {
       case "resume":
         return this.resume(conn, msg.d);
       case "input":
-        return this.input(conn, msg.d);
+        return this.input(conn, msg.d, Number.isSafeInteger(msg.s) ? (msg.s as number) : undefined);
       default:
         return this.reject(conn, "bad-type", "unknown message type");
     }
@@ -268,7 +294,11 @@ export class MatchSession {
   private settle(): void {
     const garbage = this.garbageOut;
     this.garbageOut = [];
-    for (const g of garbage) this.send(g.slot, "garbage", { amount: g.amount, frame: g.frame });
+    for (const g of garbage) {
+      // the attacker's client simulates the target's board, so it learns the frame the garbage landed at
+      this.send(g.slot, "garbage", { amount: g.amount, frame: g.frame });
+      this.send(this.other(g.slot), "opponentGarbage", { amount: g.amount, frame: g.frame });
+    }
     // VS has no objective, so over = topped out; both on the same catch-up frame is a draw
     const out = this.slots.filter((s) => s.game?.over);
     if (out.length === 1) this.finish(this.other(out[0]).index, "topout");
@@ -286,10 +316,13 @@ export class MatchSession {
     slot.conn?.peer.send(JSON.stringify(pkt));
   }
 
-  /** Send an `error`. Unbound sockets are closed at once; bound ones after too many. */
-  private reject(conn: Conn, code: string, message: string): void {
+  /**
+   * Send an `error`. Unbound sockets are closed at once; bound ones after too many. A refused
+   * input names its `s`, so the client can take it back out of its predicted board.
+   */
+  private reject(conn: Conn, code: string, message: string, s?: number): void {
     if (conn.closed) return;
-    if (conn.slot) this.send(conn.slot, "error", { code, message });
+    if (conn.slot) this.send(conn.slot, "error", s === undefined ? { code, message } : { code, message, s });
     else conn.peer.send(JSON.stringify({ t: "error", s: 0, a: 0, d: { code, message } }));
     if (!conn.slot || ++conn.rejected > MAX_REJECTED) this.drop(conn, 1008, code);
   }
@@ -361,37 +394,42 @@ export class MatchSession {
     this.maybeStart();
   }
 
-  private input(conn: Conn, d: unknown): void {
+  private input(conn: Conn, d: unknown, s: number | undefined): void {
+    const reject = (code: string, message: string) => this.reject(conn, code, message, s);
     const slot = conn.slot;
-    if (!slot) return this.reject(conn, "not-joined", "send resume first");
+    if (!slot) return reject("not-joined", "send resume first");
     if (this.ended) return;
     const game = slot.game;
-    if (!game) return this.reject(conn, "not-started", "the match has not started");
+    if (!game) return reject("not-started", "the match has not started");
     if (
       !isObject(d) || typeof d.action !== "string" || !ACTIONS.includes(d.action) ||
       (d.kind !== "press" && d.kind !== "release") || typeof d.frame !== "number" || !Number.isFinite(d.frame)
     ) {
-      return this.reject(conn, "bad-input", "input needs {frame, action, kind}");
+      return reject("bad-input", "input needs {frame, action, kind}");
     }
     const frame = d.frame;
-    if (frame < slot.lastFrame) return this.reject(conn, "frame-behind", "frame is before the last accepted input");
+    if (frame < slot.lastFrame) return reject("frame-behind", "frame is before the last accepted input");
     const now = this.clock.now();
     const wall = this.wallFrame();
-    if (frame > wall + FRAME_TOLERANCE) return this.reject(conn, "frame-ahead", "frame is ahead of the server clock");
-    if (frame < wall - MAX_LAG_FRAMES) return this.reject(conn, "frame-late", "frame is too far behind the server clock");
-    slot.recent = slot.recent.filter((t) => t > now - 1000);
-    if (slot.recent.length >= MAX_INPUTS_PER_SECOND) return this.reject(conn, "rate-limit", "too many inputs");
+    if (frame > wall + FRAME_TOLERANCE) return reject("frame-ahead", "frame is ahead of the server clock");
+    if (frame < wall - MAX_LAG_FRAMES) return reject("frame-late", "frame is too far behind the server clock");
+    slot.budget = Math.min(INPUT_BURST, slot.budget + ((now - slot.budgetAt) * MAX_INPUTS_PER_SECOND) / 1000);
+    slot.budgetAt = now;
+    if (slot.budget < 1) return reject("rate-limit", "too many inputs");
 
-    slot.recent.push(now);
+    slot.budget--;
     this.lastActive = now;
     slot.lastFrame = frame;
     const action = d.action as Action;
     // the input lands on the 1/256-frame grid, after whole-frame steps, as on a client (stepping.ts)
+    // A catch-up may already have moved the engine past that point; the input then lands at the
+    // engine's frame, and that is the frame relayed, so the opponent's client applies it where we did.
     stepToClock(game, frame, true);
+    const applied = game.frame;
     if (d.kind === "press") game.press(action);
     else game.release(action);
 
-    this.send(this.other(slot), "opponentInput", { frame: restFrame(frame, true), action, kind: d.kind });
+    this.send(this.other(slot), "opponentInput", { frame: applied, action, kind: d.kind });
     this.settle();
   }
 

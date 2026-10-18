@@ -710,6 +710,7 @@ export class Renderer {
     }
     if (this.overlay.countdown && v === this.views[0]) this.drawCountdown(v);
     if (names && v.opts.label) this.drawName(v);
+    if (names && v.marker) this.drawMarker(v);
   }
 
   private drawMarker(v: BoardView): void {

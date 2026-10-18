@@ -225,6 +225,12 @@ button { font: inherit; color: inherit; }
   padding: 6px 12px;
   margin-right: 90px;
 }
+/* VERSUS stacks six bars (four bots, two online rooms): tighter, so they fit a 720px screen */
+:where(html:not([data-theme="poster"])) .bars.dense { gap: 8px; }
+:where(html:not([data-theme="poster"])) .bars.dense .bar { min-height: 84px; padding: 12px 34px 11px 30px; }
+:where(html:not([data-theme="poster"])) .bars.dense .bar-title { font-size: 38px; }
+:where(html:not([data-theme="poster"])) .bars.dense .bar-tagline { font-size: 15px; margin-top: 4px; }
+:where(html:not([data-theme="poster"])) .bars.dense .bar-glyph { font-size: 120px; }
 
 :where(html:not([data-theme="poster"])) .hint {
   grid-column: 1 / -1;
@@ -270,6 +276,16 @@ button { font: inherit; color: inherit; }
 :where(html:not([data-theme="poster"])) .form-error { min-height: 1.4em; margin: 0; color: #ff5f7a; font-size: 15px; }
 :where(html:not([data-theme="poster"])) .account-form .actions { margin-top: 18px; }
 :where(html:not([data-theme="poster"])) .account .form-error { margin-top: 10px; }
+:where(html:not([data-theme="poster"])) .room-code {
+  margin: 0 0 18px;
+  font-family: var(--display);
+  font-size: clamp(56px, 7vw, 104px);
+  line-height: 1;
+  letter-spacing: 0.12em;
+  color: #3f6bff;
+  user-select: all;
+}
+:where(html:not([data-theme="poster"])) .room .note { margin: 0 0 6px; font-size: 16px; }
 :where(html:not([data-theme="poster"])) .ghost-btn:disabled { opacity: 0.5; cursor: wait; }
 
 /* ------------------------------------------------------------------ config */
@@ -567,6 +583,10 @@ button { font: inherit; color: inherit; }
   padding: 5px 10px;
   margin-right: 90px;
 }
+/* VERSUS stacks six bars (four bots, two online rooms): tighter, stepping in one column a row */
+:where(html[data-theme="poster"]) .bars.dense .bar { margin-left: calc(var(--i) * var(--col)); padding: 8px 34px 9px 34px; }
+:where(html[data-theme="poster"]) .bars.dense .bar-title { font-size: 46px; }
+:where(html[data-theme="poster"]) .bars.dense .bar-glyph { font-size: 120px; }
 
 :where(html[data-theme="poster"]) .menu-foot {
   display: flex;
@@ -756,6 +776,16 @@ button { font: inherit; color: inherit; }
 :where(html[data-theme="poster"]) .form-error { min-height: 1.4em; margin: 0; color: #ff5f7a; font-size: 15px; }
 :where(html[data-theme="poster"]) .account-form .actions { margin-top: 18px; }
 :where(html[data-theme="poster"]) .account .form-error { margin-top: 10px; }
+:where(html[data-theme="poster"]) .room-code {
+  margin: 0 0 18px;
+  font-family: var(--display);
+  font-size: clamp(56px, 7vw, 104px);
+  line-height: 1;
+  letter-spacing: 0.12em;
+  color: var(--red);
+  user-select: all;
+}
+:where(html[data-theme="poster"]) .room .note { margin: 0 0 6px; font-size: 16px; }
 :where(html[data-theme="poster"]) .ghost-btn:disabled { opacity: 0.5; cursor: wait; }
 
 /* ------------------------------------------------------------------ config */

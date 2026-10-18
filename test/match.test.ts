@@ -1,9 +1,10 @@
 import { describe, expect, it } from "vitest";
 import { Action, Game, Handling } from "../src/engine/game";
 import {
-  IDLE_TIMEOUT_MS, LOBBY_TIMEOUT_MS, MATCH_HANDLING, MAX_LAG_FRAMES, MAX_PENDING, MatchSession,
-  RECONNECT_GRACE_MS, RESUME_TIMEOUT_MS, SEND_BUFFER, matchOptions,
+  IDLE_TIMEOUT_MS, INPUT_BURST, LOBBY_TIMEOUT_MS, MATCH_HANDLING, MAX_LAG_FRAMES, MAX_PENDING, MatchSession,
+  RECONNECT_GRACE_MS, RESUME_TIMEOUT_MS, ROOM_ALPHABET, ROOM_CODE, SEND_BUFFER, matchOptions, newRoomCode,
 } from "../src/server/match";
+import { restFrame, stepTo } from "../src/engine/stepping";
 import { FakeClock, Player, input, join, lastError, send, setup } from "./match-harness";
 
 describe("match: joining", () => {
@@ -99,23 +100,33 @@ describe("match: inputs", () => {
     expect(game.stats.inputs).toBe(2);
   });
 
-  it("rejects more than 60 inputs per second", () => {
+  it("takes a burst of 90 inputs, then 60 a second, and names the input it refuses", () => {
     const { clock, session, p0 } = setup();
     clock.advance(2000);
     const game = session.game(0)!;
-    for (let i = 0; i < 60; i++) input(session, p0, 10 + i * 0.5, i % 2 ? "cw" : "ccw");
+    for (let i = 0; i < INPUT_BURST; i++) input(session, p0, 10 + i * 0.5, i % 2 ? "cw" : "ccw");
     expect(p0.peer.of("error")).toEqual([]);
-    expect(game.stats.inputs).toBe(60);
+    expect(game.stats.inputs).toBe(90);
     const frame = game.frame;
 
-    input(session, p0, 50, "cw");
+    input(session, p0, 60, "cw");
     expect(lastError(p0)).toBe("rate-limit");
-    expect(game.stats.inputs).toBe(60);
+    const refused = p0.peer.last();
+    expect((refused.d as { s: number }).s).toBe(refused.a); // the `s` of the refused input
+    expect(game.stats.inputs).toBe(90);
     expect(game.frame).toBe(frame);
 
-    clock.advance(1000);
-    input(session, p0, 70, "cw"); // server clock frame = 180, so 60 is the lowest frame allowed
-    expect(game.stats.inputs).toBe(61);
+    clock.advance(500); // the bucket refills 30 inputs
+    for (let i = 0; i < 30; i++) input(session, p0, 60 + i * 0.5, "cw");
+    expect(game.stats.inputs).toBe(120);
+    input(session, p0, 80, "cw");
+    expect(lastError(p0)).toBe("rate-limit");
+    expect(p0.peer.of("error").length).toBe(2);
+
+    clock.advance(10_000); // never more than the burst, however long it waited
+    for (let i = 0; i < INPUT_BURST + 1; i++) input(session, p0, 700 + i * 0.5, "cw");
+    expect(game.stats.inputs).toBe(210);
+    expect(p0.peer.of("error").length).toBe(3);
   });
 
   it("drops the connection after more than 20 rejected inputs", () => {
@@ -251,6 +262,78 @@ describe("match: inputs", () => {
     input(session, p0, 5, "cw");
     expect(session.game(1)!.stats.received).toBe(3);
     expect(p1.peer.last()).toMatchObject({ t: "garbage", d: { amount: 3, frame: 0 } });
+  });
+
+  it("tells the attacker where its garbage landed: opponentGarbage with the target's garbage frame", () => {
+    const { clock, session, p0, p1 } = setup();
+    clock.advance(1000);
+    input(session, p1, 12.5, "cw"); // the target's engine rests at 12.5
+    session.game(0)!.onAttack!(2);
+    input(session, p0, 20, "cw");
+    const garbage = p1.peer.of("garbage");
+    const told = p0.peer.of("opponentGarbage");
+    expect(garbage.map((m) => m.d)).toEqual([{ amount: 2, frame: 12.5 }]);
+    expect(told.map((m) => m.d)).toEqual([{ amount: 2, frame: 12.5 }]);
+    // the attacker's view of the target: its relayed input, then the garbage, in server order
+    expect(p0.peer.sent.filter((m) => m.t === "opponentInput" || m.t === "opponentGarbage").map((m) => m.t))
+      .toEqual(["opponentInput", "opponentGarbage"]);
+  });
+
+  it("relays the frame the engine applied an input at, when the engine was already past the input's frame", () => {
+    const { clock, session, p0, p1 } = setup();
+    clock.advance(1000); // server clock frame = 60
+    const game = session.game(0)!;
+    // The frame-late bound equals the catch-up target, so a catch-up alone only ever brings the
+    // engine up to an input's snapped frame. Move it past directly, as any future path might.
+    stepTo(game, 40);
+    input(session, p0, 30.3, "cw");
+    expect(p0.peer.of("error")).toEqual([]);
+    expect(game.stats.inputs).toBe(1);
+    const relayed = p1.peer.of("opponentInput")[0].d as { frame: number };
+    expect(relayed.frame).toBe(game.frame);
+    expect(relayed.frame).toBe(40);
+    expect(relayed.frame).toBeGreaterThan(restFrame(30.3, true));
+  });
+
+  it("relays the snapped input frame when nothing moved the engine past it", () => {
+    const { clock, session, p0, p1 } = setup();
+    clock.advance(1000);
+    input(session, p0, 30.3, "cw");
+    const relayed = p1.peer.of("opponentInput")[0].d as { frame: number };
+    expect(relayed.frame).toBe(restFrame(30.3, true));
+    expect(relayed.frame).toBe(session.game(0)!.frame);
+    // and after a catch-up brought the engine to the lowest frame still accepted
+    clock.advance(2000); // server clock frame = 180
+    input(session, p0, 180 - MAX_LAG_FRAMES, "ccw");
+    expect(p0.peer.of("error")).toEqual([]);
+    expect((p1.peer.of("opponentInput")[1].d as { frame: number }).frame).toBe(180 - MAX_LAG_FRAMES);
+  });
+});
+
+describe("match: rooms", () => {
+  it("issues 6-symbol room codes from the unambiguous alphabet", () => {
+    const seen = new Set<string>();
+    for (let i = 0; i < 2000; i++) {
+      const code = newRoomCode();
+      expect(code).toMatch(/^[ABCDEFGHJKMNPQRSTUVWXYZ23456789]{6}$/);
+      expect(ROOM_CODE.test(code)).toBe(true);
+      seen.add(code);
+    }
+    expect(seen.size).toBe(2000);
+    const used = new Set([...seen].join(""));
+    expect(used.size).toBe(ROOM_ALPHABET.length); // every symbol turns up
+    for (const bad of ["abcdef", "ABCDE", "ABCDEFG", "ABCDE0", "ABCDEI", "ABC-EF"]) expect(ROOM_CODE.test(bad)).toBe(false);
+  });
+
+  it("reports whether anyone holds a slot (create needs none, join needs one)", () => {
+    const clock = new FakeClock();
+    const session = new MatchSession(clock);
+    expect(session.hasPlayers).toBe(false);
+    const p0 = join(session);
+    expect(session.hasPlayers).toBe(true);
+    clock.advance(LOBBY_TIMEOUT_MS); // nobody joined: the room resets and its code can be created again
+    expect(p0.peer.closed).not.toBeNull();
+    expect(session.hasPlayers).toBe(false);
   });
 });
 

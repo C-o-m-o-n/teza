@@ -168,3 +168,43 @@ test("Classic wordmark: no drop with reduced motion, from the OS or CONFIG", asy
   await page.keyboard.press("Escape");
   expect(await zPieces(page)).toMatchObject({ count: 4, running: 0 });
 });
+
+for (const theme of ["classic", "poster"]) {
+  test(`${theme}: VERSUS offers CREATE ROOM and JOIN ROOM, which say so when there is no game server`, async ({ page }) => {
+    await page.setViewportSize({ width: 1280, height: 720 });
+    await seedTheme(page, theme);
+    await openMenu(page, server.url);
+    await page.locator("button.bar", { hasText: "VERSUS" }).click();
+    await expect(ui(page)).toHaveAttribute("data-screen", "bots");
+    const titles = page.locator("nav.bars .bar-title");
+    await expect(titles).toHaveText(["ROOKIE", "CASUAL", "RANKED", "PRO", "CREATE ROOM", "JOIN ROOM"]);
+    // all six fit a 1280x720 screen
+    for (const box of await page.locator("nav.bars .bar").evaluateAll((bars) => bars.map((b) => b.getBoundingClientRect().toJSON()))) {
+      expect(box.top).toBeGreaterThanOrEqual(0);
+      expect(box.bottom).toBeLessThanOrEqual(720);
+    }
+
+    // this static server answers /api/* with 204: no rooms here, and the page stays
+    const alert = page.locator(".form-error");
+    for (const bar of ["CREATE ROOM", "JOIN ROOM"]) {
+      await page.locator("button.bar", { hasText: bar }).click();
+      await expect(alert).toHaveText("Online play isn't available here");
+      await expect(ui(page)).toHaveAttribute("data-screen", "bots");
+    }
+
+    // with a server that issues codes, JOIN's field takes the theme's input style (no socket is opened)
+    await page.route("**/api/room", (route) => route.fulfill({ status: 201, json: { code: "ABCDEF" } }));
+    await page.locator("button.bar", { hasText: "JOIN ROOM" }).click();
+    await expect(ui(page)).toHaveAttribute("data-screen", "lobby");
+    const field = page.locator('input[name="room"]');
+    await expect(field).toBeFocused();
+    await page.keyboard.type("ab1-c2d3");
+    await expect(field).toHaveValue("AB1C2D");
+    await expect(field).toHaveCSS("font-family", theme === "poster" ? '"Big Shoulders Display", "Russo One", system-ui, sans-serif' : '"Russo One", Saira, system-ui, sans-serif');
+    await expect(field).toHaveCSS("border-bottom-width", "2px");
+    const box = (await field.boundingBox())!;
+    expect(box.x + box.width).toBeLessThanOrEqual(1280);
+    await page.keyboard.press("Escape");
+    await expect(ui(page)).toHaveAttribute("data-screen", "bots");
+  });
+}

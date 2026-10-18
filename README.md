@@ -2,7 +2,7 @@
 
 *Tetris + cheza (Swahili for "play").*
 
-A clean-room rebuild of TETR.IO's gameplay: 40 LINES, BLITZ, ZEN, and VERSUS against a bot.
+A clean-room rebuild of TETR.IO's gameplay: 40 LINES, BLITZ, ZEN, and VERSUS against a bot or, online, against a friend.
 The mechanics were taken from the official client: SRS+ kicks, 180° kicks, the T-spin corner rule, all-mini+
 spins, the attack/B2B-chaining/combo formulas, lock delay, DAS/ARR/DCD/SDF, the Park–Miller 7-bag RNG
 and the 40L/Blitz presets. See `docs/MECHANICS.md`.
@@ -25,11 +25,11 @@ npx playwright install chromium   # once, downloads the browser Playwright drive
 npm run e2e
 ```
 
-`npm run e2e` builds `dist/`, serves it from a small static server on a free localhost port (no dev server or network needed) and plays two full games in headless Chromium, once in each interface theme (Classic opens on the menu, Poster Slab on its title screen, which the run skips with a key): a 40 LINES run to `40 LINES CLEARED` and a 2-minute BLITZ run to `TIME'S UP`. Each run opens the game with `?seed=7` (a `?seed=<positive integer>` URL parameter fixes the piece sequence) and presses keys from a plan the game's own bot computes in Node (`e2e/plan.ts`). Playwright's fake clock drives time, so the runs are identical every time and take about 4 minutes of real time. The BLITZ score in the browser must equal the score of the same inputs replayed in Node, the 40 LINES run's stored PB replay (see PB ghost) must replay in Node to the same clear, frame count and pieces, and any page error or `console.error` fails the run. `e2e/themes.e2e.ts` checks the themes: the theme set before first paint, each theme's first screen, switching in CONFIG (live, after a reload, and RESET), and Classic's Z drop with and without reduced motion. The e2e files (`e2e/*.e2e.ts`) are not part of `npm test` or `npm run check`.
+`npm run e2e` builds `dist/`, serves it from a small static server on a free localhost port (no dev server or network needed) and plays two full games in headless Chromium, once in each interface theme (Classic opens on the menu, Poster Slab on its title screen, which the run skips with a key): a 40 LINES run to `40 LINES CLEARED` and a 2-minute BLITZ run to `TIME'S UP`. Each run opens the game with `?seed=7` (a `?seed=<positive integer>` URL parameter fixes the piece sequence) and presses keys from a plan the game's own bot computes in Node (`e2e/plan.ts`). Playwright's fake clock drives time, so the runs are identical every time and take about 4 minutes of real time. The BLITZ score in the browser must equal the score of the same inputs replayed in Node, the 40 LINES run's stored PB replay (see PB ghost) must replay in Node to the same clear, frame count and pieces, and any page error or `console.error` fails the run. `e2e/themes.e2e.ts` checks the themes: the theme set before first paint, each theme's first screen, switching in CONFIG (live, after a reload, and RESET), Classic's Z drop with and without reduced motion, and, in both themes, VERSUS's CREATE ROOM and JOIN ROOM bars (all six bars fit 1280x720, the static server's 204 gives `Online play isn't available here`, and JOIN's field is styled). The e2e files (`e2e/*.e2e.ts`) are not part of `npm test` or `npm run check`.
 
 ## Deploy
 
-Every push to `main` deploys to Cloudflare Workers through `.github/workflows/deploy.yml`. It runs `npm ci` and `npm run check`, then `wrangler deploy` publishes `dist/` as static assets plus the game server Worker (see `wrangler.jsonc`). The job then checks that `/` and `/game.js` load from https://teza.comonhq.com, and that `/api/match/ci-check` (no upgrade header) returns 426, which proves the Worker route is live and not only the assets.
+Every push to `main` deploys to Cloudflare Workers through `.github/workflows/deploy.yml`. It runs `npm ci` and `npm run check`, then `wrangler deploy` publishes `dist/` as static assets plus the game server Worker (see `wrangler.jsonc`). The job then checks that `/` and `/game.js` load from https://teza.comonhq.com, and that `/api/match/CHECK2` (no upgrade header) returns 426, which proves the Worker route is live and not only the assets.
 
 The Worker is served only on the custom domain `teza.comonhq.com` (`routes` with `custom_domain: true`); `workers_dev` is off, so there is no `*.workers.dev` URL that would skip the zone's rate limit.
 
@@ -52,12 +52,15 @@ The fonts (Big Shoulders Display, Archivo Narrow, Russo One, Saira Semi Condense
 
 The `teza` Worker (`worker/index.ts`) serves `dist/` as static assets. Only `/api/*` runs the script:
 
-- `GET /api/match/<id>` with `Upgrade: websocket` joins match `<id>`. Each id gets its own `Match` Durable Object, which holds both sockets and runs one headless engine per player. `<id>` must match `^[A-Za-z0-9_-]{1,32}$` (else 400). Without the upgrade header the route returns 426.
-- `GET /api/match/<id>?resume=<token>&ack=<peerAck>` is the same upgrade for a player coming back: the token is checked before the socket is accepted (malformed parameters give 400, an unknown token 403), and the socket takes its slot at once. `ack` defaults to 0.
+- `POST /api/room` returns 201 `{code}`: a room code of 6 symbols from `ABCDEFGHJKMNPQRSTUVWXYZ23456789` (no 0/O, 1/I/L), drawn with `crypto.getRandomValues` (`newRoomCode` in `src/server/match.ts`). Nothing is stored: the room exists once its creator's socket holds a slot. Any other method gets 405 with `Allow: POST`.
+- `GET /api/match/<code>?mode=create` or `?mode=join` with `Upgrade: websocket` opens or joins the room. The room code is the match id: each gets its own `Match` Durable Object, which holds both sockets and runs one headless engine per player. A path that isn't a room code gets 400 (whatever the method), a non-GET 405, and no upgrade header 426. On the upgrade, a missing or other `mode` gets 400, `create` on a room someone already holds gets 409 (`Room code taken`, so nobody can take over a live code), and `join` on a room nobody holds gets 404 (`No such room`). A third player joining a full room is upgraded, then gets `error` (`full`) and is closed.
+- `GET /api/match/<code>?resume=<token>&ack=<peerAck>` is the same upgrade for a player coming back, without `mode`: the token is checked before the socket is accepted (malformed parameters give 400, an unknown token 403), and the socket takes its slot at once. `ack` defaults to 0.
 - `/api/account/*` is the accounts API (see Accounts below).
 - Any other `/api/*` path returns 404.
 
-All of `/api/*` (the match and account routes) is rate-limited per IP by a Cloudflare rate-limiting rule in the comonhq.com zone (hostname `teza.comonhq.com`, path `/api/*`, action block). The rule is dashboard config that lives in the zone, not in this repo: if the domain changes, recreate it for the new hostname. Clients must call the API same-origin with a relative URL (`/api/match/<id>`), never a hardcoded host.
+All of `/api/*` (the room, match and account routes) is rate-limited per IP by a Cloudflare rate-limiting rule in the comonhq.com zone (hostname `teza.comonhq.com`, path `/api/*`, action block). The rule is dashboard config that lives in the zone, not in this repo: if the domain changes, recreate it for the new hostname. Clients must call the API same-origin with a relative URL (`/api/room`, `/api/match/<code>`), never a hardcoded host. With 887 million codes behind that limit, guessing a live room is impractical, so rooms have no other secret.
+
+Server hardening done so far: room codes are random and generated by the server on request (`POST /api/room`), though nothing enforces that a code came from there, so a client can still open any well-formed code; and the create/join flag above. Not done yet: an `Origin` check on the upgrade, moving the resume token out of the URL, a constant-time token compare, and a CSP.
 
 The match logic lives in `src/server/match.ts`, which has no Cloudflare imports so the tests can drive it with a fake clock.
 
@@ -67,12 +70,13 @@ Messages are JSON envelopes `{t, s, a, d}` in both directions: type, sequence nu
 |---|---|
 | `welcome` | `{slot, token}`: slot 0 or 1 and the resume token |
 | `start` | `{seed, options, handling}`: both players get the same seed, the VS rules and the handling the server replays inputs with (DAS/ARR/DCD/SDF and IRS/IHS; a client must use it, not its own settings, to stay in sync) |
-| `opponentInput` | `{frame, action, kind}`: an input the server accepted from the opponent, at the grid frame it was applied on |
-| `garbage` | `{amount, frame}`: attack received, applied at your current server frame |
+| `opponentInput` | `{frame, action, kind}`: an input the server accepted from the opponent, with the frame the server's engine applied it at. That is the input's frame floored to the 1/256 grid, unless the engine was already past it, in which case it is the engine's frame: the relayed frame always equals the applied one |
+| `garbage` | `{amount, frame}`: attack received, applied to your engine at `frame`, after the inputs of yours the server had read by then (the envelope's `a`) |
+| `opponentGarbage` | `{amount, frame}`: sent to the attacker with every `garbage` the opponent gets, with the same `frame`, so the attacker's copy of the opponent's board takes it where the server did. Packets go out in the order the server applied them |
 | `opponentDisconnected` | `{grace}`: ms the opponent has to come back (15000) |
 | `opponentReconnected` | none |
 | `end` | `{winner, reason}`: reason is `topout`, `disconnect` or `idle`; `winner` is null for a draw; sent once |
-| `error` | `{code, message}` |
+| `error` | `{code, message}`; a refused `input` adds its `s`, so the client can take it back out of its predicted board |
 | `pong` | none |
 
 | Client to server | `d` |
@@ -81,16 +85,33 @@ Messages are JSON envelopes `{t, s, a, d}` in both directions: type, sequence nu
 | `resume` | `{token, peerAck}`: rebind a slot on a new socket, then get the missed packets with `s > peerAck`. Prefer `?resume=` on the upgrade, which does the same and can't be crowded out |
 | `ping` | anything; answered with `pong` |
 
-The first two sockets take slots 0 and 1, and the match starts when both are connected. A third socket gets `error` (`full`) and is closed. If no second player joins within 2 minutes, the first gets `error` (`no-opponent`), its socket is closed and the match id starts fresh.
+The creator (`mode=create`) takes slot 0 and the joiner slot 1, and the match starts when both are connected. A third socket gets `error` (`full`) and is closed. If no second player joins within 2 minutes, the first gets `error` (`no-opponent`), its socket is closed and the room code can be created again.
 
 There is no server tick. Engines advance when a message arrives: a player's engine moves to the frame of each input it accepts, floored to the 1/256-frame grid and stepped through whole frames as a client steps (`src/engine/stepping.ts`), and any engine more than 120 frames behind the server clock (ms since `start` × 60 / 1000) is first moved up to that limit, as if the player pressed nothing. A player who goes quiet therefore keeps falling and can still top out. Lagging engines are caught up together, frame by frame, so whoever tops out first loses; both on the same frame is a draw. An input is rejected with `error` and leaves the engine alone when:
 
 - the action or kind is unknown, or `frame` is not a number;
 - `frame` is lower than that player's last accepted frame;
 - `frame` is more than 30 frames ahead of the server clock, or more than 120 frames behind it;
-- the player already sent 60 accepted inputs in the last second.
+- the player is over the input budget: a token bucket per player that holds 90 inputs and refills at 60 a second, so a burst of up to 90 arrives fine and the average stays at 60 a second.
 
 More than 20 rejected messages (including messages over 1 KB or not JSON) close the socket. When a socket closes mid-match the opponent gets `opponentDisconnected`; the player has 15 s to reconnect with `?resume=<token>&ack=<peerAck>` (or to send `resume` on a new socket), or they forfeit. While a slot is free, at most 2 sockets without a resume token may wait to resume (more get `busy`), and each must send `resume` within 5 s (else `resume-timeout`). A socket with a valid token on the upgrade never waits, so other sockets can't block the owner's reconnect. A wrong token gets `error` and the socket is closed. If the missed packets have already left the 100-packet buffer, the server sends `error` with code `resync` instead of a partial replay. If neither player sends a valid message (an accepted input, a ping or a resume) for 60 s after `start`, both engines are run to the server clock: a top-out decides the match, otherwise it ends as a draw with reason `idle`. After `end` the server closes both sockets, and new sockets get `error` (`ended`) and are closed.
+
+### Online client
+
+VERSUS has two more bars under the bots. CREATE ROOM asks `POST /api/room` for a code, opens the socket with `mode=create` and shows the code large with `Waiting for opponent… (ESC to cancel)`. JOIN ROOM shows a field (uppercase letters and digits, 6 at most); Enter opens the socket with `mode=join`. A browser can't read the status of a refused upgrade, so a socket that closes before `welcome` without an `error` reads as `No such room`, and `full` (or a room whose free slot is waiting for its owner) as `Room is full`. JOIN first checks with `POST /api/room` (which stores nothing) that a game server is there. Without one (`npm start`, the e2e server, offline) both bars say `Online play isn't available here` and stay on the page. The socket URL is built from `location`, never a fixed host.
+
+`src/net/online.ts` (no DOM, tested against `MatchSession` in `test/online.test.ts`) holds the protocol and the prediction; `app.ts` only hands it a WebSocket:
+
+- The match starts with no countdown: the client's clock is 0 when `start` arrives and runs on wall time (frames = ms × 60 / 1000), as the server's does. Both games are built from `start.options` and `start.handling`, never local settings, and `?seed=` is ignored.
+- Your board is predicted. A key applies at once, with the canonical stepping (`stepToClock(game, clock, true)`), and goes out as `input {frame: clock}`. Inputs are paced by a token bucket at the server's rate but with a burst of 30, not 90 (extra ones wait and apply when sent, so the board and the server stay equal). Over any span the client sends at most 30 + 60 a second, and the socket keeps their order, so however jitter bunches them, the server receives at most 30 + 60 × (span + jitter): that fits its 90 for up to 1 s of jitter (`test/online.test.ts` bunches packets with 900 ms stalls at the cap). If the server refuses an input anyway, the client rewinds and replays without it, as for garbage; a refused press no longer counts as held, and a refused release is sent again. Frames never go down, and a `ping` goes out after 10 s without traffic.
+- Garbage is the server's call. The client keeps a snapshot of its game every 15 frames (the last 30 s) and a log of what it applied. On `garbage {amount, frame}` it puts the garbage in the log after the inputs the server had read (the envelope's ack), rewinds to the last snapshot before that point, replays silently to its clock, and so holds the board the server's engine will have. Attacks your own board predicts are drawn as flights, but only the server sends garbage.
+- The opponent's board is a second game stepped only by `opponentInput` and `opponentGarbage`, at their frames. Between packets it rests at the last relayed frame; nothing is extrapolated.
+- On window blur the client releases each held action on its own, here and on the server (not `releaseAll`), and does not press them again on focus.
+- Only the server's `end` decides the match. A local top-out stops input, shows `TOPPED OUT · WAITING` and sends one `release soft` at the clock so the server's engine reaches the top-out at once. `opponentDisconnected` shows `OPPONENT DISCONNECTED · 15s` counting down over the opponent's board; a server `error` shows over yours for 3 s. A socket that closes before `end` ends the session as `CONNECTION LOST`.
+- Results show YOU WIN, YOU LOSE or DRAW with the reason (top-out, disconnect, idle) and a single MENU action; there is no rematch. ESC in a match closes the socket, and the opponent wins after the server's 15 s grace. Online results are not saved to the bot W–L record or to the account.
+- No auto-reconnect: the server's `?resume=` stays, but the client does not use it yet.
+
+To try it locally, run `npm run build`, then `npx wrangler dev --local-upstream 127.0.0.1:8787 --port 8787` and open the page in two browser windows.
 
 ## Accounts
 
