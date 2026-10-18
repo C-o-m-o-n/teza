@@ -59,6 +59,13 @@ export class MemoryStore implements AccountStore {
     const [lo, hi] = sorted(keyA, keyB);
     return this.pairs.filter((p) => p.keys[0] === lo && p.keys[1] === hi && p.at >= since).length;
   }
+  openMatchCount(keyA: string, keyB: string, since: number): number {
+    const [lo, hi] = sorted(keyA, keyB);
+    return [...this.ranked.values()].filter((m) => {
+      const [x, y] = sorted(m.keys[0], m.keys[1]);
+      return x === lo && y === hi && m.createdAt >= since;
+    }).length;
+  }
   calibrated(): CalibratedRow[] {
     const rows: CalibratedRow[] = [];
     for (const [key, r] of this.ratings) {

@@ -285,12 +285,14 @@ export class MatchSession {
 
   /**
    * Nobody joined in time: close the lone player's socket and start over, so the id can be reused.
-   * A ranked room first reports the account that never came, if the other one is still here.
+   * A ranked room first reports the absent account if exactly one of the two is connected.
    */
   private reset(): void {
     this.lobby = null;
     if (this.started) return;
-    const present = this.slots.length === 1 && this.slots[0].conn !== null ? this.slots[0].account : null;
+    // whoever is connected now is present; the other account is absent even if it took a slot and left
+    const connected = this.slots.filter((s) => s.conn !== null);
+    const present = connected.length === 1 ? connected[0].account : null;
     const absent = present === null ? undefined : this.ranked?.accounts.find((k) => k !== present);
     if (absent !== undefined) {
       try {

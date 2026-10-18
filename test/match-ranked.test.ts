@@ -218,7 +218,7 @@ describe("ranked: no-shows", () => {
   it("after 30 s with only A there: A gets no-opponent, B is reported once, nobody is rated, and B cools down 120 s", async () => {
     const clock = new FakeClock();
     const w = await world(clock);
-    const { calls, noShows, take } = ranked(undefined, async (absent) => reportNoShow(w.store, w.host.cooldowns, "ABCDEF", absent, () => clock.t), clock);
+    const { calls, noShows, take } = ranked(undefined, async (absent) => reportNoShow(w.host, w.store, "ABCDEF", absent, () => clock.t), clock);
     const a = take("alice");
     clock.advance(RANKED_LOBBY_TIMEOUT_MS - 1);
     expect(lastError(a)).toBeUndefined();
@@ -251,6 +251,17 @@ describe("ranked: no-shows", () => {
     session.disconnect(a.conn);
     clock.advance(RANKED_LOBBY_TIMEOUT_MS);
     expect(noShows).toEqual([]);
+  });
+
+  it("reports the account that connected and left when the other is the only one connected", () => {
+    const { clock, noShows, session, take } = ranked();
+    const a = take("alice");
+    session.disconnect(a.conn); // slot 0 stays taken, without a socket
+    const b = take("bob");
+    expect(b.peer.of("start")).toEqual([]);
+    clock.advance(RANKED_LOBBY_TIMEOUT_MS);
+    expect(lastError(b)).toBe("no-opponent");
+    expect(noShows).toEqual(["alice"]);
   });
 
   it("ignores a report that fails or throws", async () => {

@@ -13,7 +13,7 @@
 import { DurableObject } from "cloudflare:workers";
 import {
   AccountRow, AccountStore, CalibratedRow, cookieToken, handleAccount, MAX_BODY_BYTES, PAIR_WINDOW_MS, pairAllowed, RankedMatchRow,
-  RatingChange, rateRankedMatch, RatingRow, readBody, reportNoShow, sessionKey, SessionRow, withTimeout,
+  QueueHost, RatingChange, rateRankedMatch, RatingRow, readBody, reportNoShow, sessionKey, SessionRow, withTimeout,
 } from "../src/server/accounts";
 import { handlePublic, isPublicRoute } from "../src/server/leaderboard";
 import {
@@ -276,22 +276,32 @@ export class Accounts extends DurableObject<Env> {
           return true;
         });
       },
+      openMatchCount(keyA, keyB, since) {
+        return sql.exec<{ n: number }>(
+          `SELECT COUNT(*) AS n FROM ranked_matches
+           WHERE ((key_a = ? AND key_b = ?) OR (key_a = ? AND key_b = ?)) AND created_at >= ?`,
+          keyA, keyB, keyB, keyA, since).one().n;
+      },
       pairCount(keyA, keyB, since) {
         const [lo, hi] = ordered(keyA, keyB);
         return sql.exec<{ n: number }>(
           "SELECT COUNT(*) AS n FROM rated_pairs WHERE key_lo = ? AND key_hi = ? AND rated_at >= ?", lo, hi, since).one().n;
       },
     };
-    this.matchmaker = new Matchmaker(() => Date.now(), pairAllowed(this.store));
+    this.matchmaker = new Matchmaker(() => Date.now(), pairAllowed(this.store, this.cooldowns));
   }
 
   async fetch(request: Request): Promise<Response> {
     if (isPublicRoute(new URL(request.url).pathname)) return handlePublic(request, this.store);
-    return handleAccount(request, this.store, Date.now, {
+    return handleAccount(request, this.store, Date.now, this.queueHost());
+  }
+
+  private queueHost(): QueueHost {
+    return {
       matchmaker: this.matchmaker,
       openRoom: (code, players) => this.env.MATCH.get(this.env.MATCH.idFromName(code)).registerRanked(code, players),
       cooldowns: this.cooldowns,
-    });
+    };
   }
 
   /** RPC from the Worker: the account key a `Cookie` header's session belongs to, or null. */
@@ -306,6 +316,6 @@ export class Accounts extends DurableObject<Env> {
 
   /** RPC from a ranked `Match` whose lobby timed out with one account missing: drop the room unrated and cool that account down. */
   async reportNoShow(code: string, absentKey: string): Promise<boolean> {
-    return reportNoShow(this.store, this.cooldowns, code, absentKey);
+    return reportNoShow(this.queueHost(), this.store, code, absentKey);
   }
 }

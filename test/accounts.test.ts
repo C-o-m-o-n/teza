@@ -24,9 +24,10 @@ beforeEach(() => {
   rooms = [];
   roomsRefused = 0;
   roomsHang = false;
+  const cooldowns = new Map<string, number>();
   queue = {
-    matchmaker: new Matchmaker(() => clock, pairAllowed(store, () => clock)),
-    cooldowns: new Map(),
+    matchmaker: new Matchmaker(() => clock, pairAllowed(store, cooldowns, () => clock)),
+    cooldowns,
     openRoom: async (code, players) => {
       if (roomsHang) return new Promise<boolean>(() => {});
       if (roomsRefused > 0) {
@@ -544,13 +545,13 @@ describe("ranked hardening", () => {
     await call("POST", "queue/join", { cookie: a });
     await call("POST", "queue/join", { cookie: b });
     const code = rooms[0].code;
-    expect(reportNoShow(store, queue.cooldowns, "ZZZZZZ", "bob", () => clock)).toBe(false);
-    expect(reportNoShow(store, queue.cooldowns, code, "mallory", () => clock)).toBe(false);
+    expect(reportNoShow(queue, store, "ZZZZZZ", "bob", () => clock)).toBe(false);
+    expect(reportNoShow(queue, store, code, "mallory", () => clock)).toBe(false);
     expect(queue.cooldowns.size).toBe(0);
-    expect(reportNoShow(store, queue.cooldowns, code, "bob", () => clock)).toBe(true);
+    expect(reportNoShow(queue, store, code, "bob", () => clock)).toBe(true);
     expect(store.rankedMatch(code)).toBeNull();
     expect(store.ratings.size).toBe(0);
-    expect(reportNoShow(store, queue.cooldowns, code, "bob", () => clock)).toBe(false); // once
+    expect(reportNoShow(queue, store, code, "bob", () => clock)).toBe(false); // once
 
     const refused = await call("POST", "queue/join", { cookie: b });
     expect(refused.status).toBe(429);
@@ -567,6 +568,63 @@ describe("ranked hardening", () => {
     clock += 1500;
     expect((await call("POST", "queue/join", { cookie: b })).status).toBe(200);
     expect(queue.cooldowns.size).toBe(0);
+  });
+
+  it("counts the pair's open rooms toward the cap: matching again and again opens at most 3, and at most 3 are rated", async () => {
+    const a = await register("Alice");
+    const b = await register("Bob");
+    for (let i = 0; i < 5; i++) {
+      await call("POST", "queue/join", { cookie: a });
+      await call("POST", "queue/join", { cookie: b });
+      await call("GET", "queue/status", { cookie: a });
+      await call("GET", "queue/status", { cookie: b });
+    }
+    expect(rooms).toHaveLength(MAX_PAIR_RATED);
+    expect(queue.matchmaker.size).toBe(2); // the rest wait for other opponents
+    const rated = rooms.filter((r) => rateRankedMatch(store, r.code, "alice", () => clock) !== null);
+    expect(rated).toHaveLength(MAX_PAIR_RATED);
+  });
+
+  it("rates at most MAX_PAIR_RATED of a pair's rooms however they were opened", async () => {
+    await register("Alice");
+    await register("Bob");
+    for (const code of ["AAAAAA", "BBBBBB", "CCCCCC", "DDDDDD", "EEEEEE"]) store.insertRankedMatch(code, { keys: ["alice", "bob"], createdAt: clock });
+    const results = ["AAAAAA", "BBBBBB", "CCCCCC", "DDDDDD", "EEEEEE"].map((code) => rateRankedMatch(store, code, "bob", () => clock));
+    expect(results.filter((r) => r !== null)).toHaveLength(MAX_PAIR_RATED);
+    expect(store.ratings.get("bob")!.games).toBe(MAX_PAIR_RATED);
+    expect(store.rankedMatch("DDDDDD")).toBeNull(); // dropped unrated
+  });
+
+  it("a dodger who re-joined before the no-show report is taken out of the queue and not paired until the cooldown ends", async () => {
+    const a = await register("Alice");
+    const b = await register("Bob");
+    const c = await register("Carol");
+    await call("POST", "queue/join", { cookie: a });
+    await call("POST", "queue/join", { cookie: b });
+    const code = rooms[0].code;
+    await call("POST", "queue/leave", { cookie: a });
+    await call("POST", "queue/join", { cookie: b }); // back in the queue before the lobby times out
+    expect(reportNoShow(queue, store, code, "bob", () => clock)).toBe(true);
+
+    await call("POST", "queue/join", { cookie: c });
+    expect(rooms).toHaveLength(1); // carol is not paired with bob
+    expect(await (await call("GET", "queue/status", { cookie: b })).json()).toEqual({ status: "none" });
+    expect((await call("POST", "queue/join", { cookie: b })).status).toBe(429);
+
+    // a cooling key is never paired, even if it got into the queue some other way
+    queue.cooldowns.set("bob", clock + NO_SHOW_COOLDOWN_MS);
+    queue.matchmaker.join({ key: "bob", username: "Bob" }, 12500);
+    await call("GET", "queue/status", { cookie: c });
+    expect(rooms).toHaveLength(1);
+    queue.matchmaker.leave("bob");
+
+    for (let t = 0; t < NO_SHOW_COOLDOWN_MS; t += 10_000) {
+      clock += 10_000;
+      await call("GET", "queue/status", { cookie: c }); // carol keeps her entry alive
+    }
+    expect((await call("POST", "queue/join", { cookie: b })).status).toBe(200);
+    expect(rooms).toHaveLength(2);
+    expect(rooms[1].players.sort()).toEqual(["bob", "carol"]);
   });
 
   it("bounds a hung room registration: join and status answer after the timeout, requeue, and pair later", async () => {

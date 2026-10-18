@@ -10,9 +10,10 @@
 // The ranked queue (/api/account/queue/*, matchmaking.ts) pairs signed-in players, and each
 // pairing's room is recorded so that its result can be rated once (`rateRankedMatch`).
 //
-// Hardening for a public ranked ladder: the same two accounts are paired at most MAX_PAIR_RATED
-// times per PAIR_WINDOW_MS (`pairAllowed`), an account that never connects to its ranked room is
-// kept out of the queue for NO_SHOW_COOLDOWN_MS (`reportNoShow`), and registering a room with its
+// Hardening for a public ranked ladder: the same two accounts get at most MAX_PAIR_RATED rooms
+// per PAIR_WINDOW_MS, counting rated matches and rooms still open (`pairAllowed`, checked again
+// when a match is rated), an account that never connects to its ranked room is taken out of the
+// queue and kept out for NO_SHOW_COOLDOWN_MS (`reportNoShow`), and registering a room with its
 // `Match` object is bounded by OPEN_ROOM_TIMEOUT_MS.
 
 import { mergeRecords, MAX_BOT_NAMES, passwordError, Records, recordsError, usernameError } from "../profile";
@@ -87,6 +88,8 @@ export interface AccountStore {
   rateMatch(code: string, ratings: [string, RatingRow][], at: number): boolean;
   /** Rated matches between the two accounts (either order) at or after `since`. */
   pairCount(keyA: string, keyB: string, since: number): number;
+  /** Unrated ranked matches between the two accounts (either order) created at or after `since`. */
+  openMatchCount(keyA: string, keyB: string, since: number): number;
 }
 
 export const RANKED_MATCH_TTL_MS = 6 * 60 * 60 * 1000; // an unrated ranked room is forgotten after this
@@ -250,6 +253,10 @@ export function rateRankedMatch(
 ): [RatingChange, RatingChange] | null {
   const match = store.rankedMatch(code);
   if (!match || (winnerKey !== null && !match.keys.includes(winnerKey))) return null;
+  if (store.pairCount(match.keys[0], match.keys[1], now() - PAIR_WINDOW_MS) >= MAX_PAIR_RATED) {
+    store.deleteRankedMatch(code); // over the pair cap however the room was opened: nobody is rated
+    return null;
+  }
   const before = match.keys.map((k) => ratingOf(store, k));
   const after = match.keys.map((k, i): RatingRow => {
     const score = winnerKey === null ? 0.5 : winnerKey === k ? 1 : 0;
@@ -265,24 +272,30 @@ export function rateRankedMatch(
 }
 
 /**
- * The matchmaker's pair predicate (`Matchmaker`'s `mayPair`): false once the two accounts have
- * played MAX_PAIR_RATED rated matches in the last PAIR_WINDOW_MS.
+ * The matchmaker's pair predicate (`Matchmaker`'s `mayPair`): false while either account is on a
+ * no-show cooldown, or once the two accounts' rated matches in the last PAIR_WINDOW_MS plus their
+ * rooms still open reach MAX_PAIR_RATED (so opening rooms faster than they are rated can't pass it).
  */
-export function pairAllowed(store: AccountStore, now: () => number = Date.now): (a: string, b: string) => boolean {
-  return (a, b) => store.pairCount(a, b, now() - PAIR_WINDOW_MS) < MAX_PAIR_RATED;
+export function pairAllowed(
+  store: AccountStore, cooldowns: Map<string, number>, now: () => number = Date.now,
+): (a: string, b: string) => boolean {
+  const cooling = (key: string) => (cooldowns.get(key) ?? 0) > now();
+  return (a, b) => !cooling(a) && !cooling(b) &&
+    store.pairCount(a, b, now() - PAIR_WINDOW_MS) + store.openMatchCount(a, b, now() - RANKED_MATCH_TTL_MS) < MAX_PAIR_RATED;
 }
 
 /**
  * RPC from a ranked `Match` whose lobby timed out with only one of its accounts connected: forget
- * the room without rating anyone and keep the absent account out of the queue for
- * NO_SHOW_COOLDOWN_MS. False (nothing changes) if `code` is not an unrated ranked match or
- * `absentKey` is not one of its players.
+ * the room without rating anyone, take the absent account out of the queue (it may have joined
+ * again meanwhile) and keep it out for NO_SHOW_COOLDOWN_MS. False (nothing changes) if `code` is
+ * not an unrated ranked match or `absentKey` is not one of its players.
  */
-export function reportNoShow(store: AccountStore, cooldowns: Map<string, number>, code: string, absentKey: string, now: () => number = Date.now): boolean {
+export function reportNoShow(host: QueueHost, store: AccountStore, code: string, absentKey: string, now: () => number = Date.now): boolean {
   const match = store.rankedMatch(code);
   if (!match || !match.keys.includes(absentKey)) return false;
   if (!store.deleteRankedMatch(code)) return false;
-  cooldowns.set(absentKey, now() + NO_SHOW_COOLDOWN_MS);
+  host.cooldowns.set(absentKey, now() + NO_SHOW_COOLDOWN_MS);
+  host.matchmaker.leave(absentKey);
   return true;
 }
 
