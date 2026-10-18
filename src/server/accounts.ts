@@ -5,8 +5,15 @@
 // Passwords are stored only as PBKDF2-SHA-256 (random 16-byte salt, 100000 iterations,
 // both kept inside the stored value). Sessions are a random 32-byte token in an HttpOnly
 // cookie; only its SHA-256 is stored.
+//
+// Ratings (rating.ts) are kept per account; an account without a row has the default rating.
+// The ranked queue (/api/account/queue/*, matchmaking.ts) pairs signed-in players, and each
+// pairing's room is recorded so that its result can be rated once (`rateRankedMatch`).
 
 import { mergeRecords, MAX_BOT_NAMES, passwordError, Records, recordsError, usernameError } from "../profile";
+import { Matchmaker, QueuePlayer } from "./matchmaking";
+import { newRoomCode } from "./match";
+import { calcTR, DEFAULT_RATING, Rating, tdisplay, updateGlicko2 } from "./rating";
 
 export const COOKIE_NAME = "teza_session";
 export const SESSION_TTL_S = 30 * 24 * 60 * 60;
@@ -28,6 +35,16 @@ export interface SessionRow {
   expiresAt: number; // ms
 }
 
+export interface RatingRow extends Rating {
+  games: number; // ranked matches rated
+}
+
+/** A room the matchmaker opened, until its result is rated. `keys` in pairing order. */
+export interface RankedMatchRow {
+  keys: [string, string];
+  createdAt: number; // ms
+}
+
 /** Accounts are keyed by the lower-cased username, which makes names unique regardless of case. */
 export interface AccountStore {
   account(key: string): AccountRow | null;
@@ -38,9 +55,32 @@ export interface AccountStore {
   insertSession(tokenHash: string, row: SessionRow): void;
   deleteSession(tokenHash: string): void;
   deleteExpiredSessions(now: number): void;
+  /** Null for an account that has never been rated. */
+  rating(key: string): RatingRow | null;
+  rankedMatch(code: string): RankedMatchRow | null;
+  insertRankedMatch(code: string, row: RankedMatchRow): void;
+  deleteRankedMatchesBefore(createdAt: number): void;
+  /**
+   * In one transaction: delete the ranked match `code` and write the new ratings. False (and
+   * nothing written) if the match is no longer there, so a match is rated at most once.
+   */
+  rateMatch(code: string, ratings: [string, RatingRow][]): boolean;
 }
 
-const ROUTES: Record<string, string> = { register: "POST", login: "POST", logout: "POST", me: "GET", records: "PUT" };
+export const RANKED_MATCH_TTL_MS = 6 * 60 * 60 * 1000; // an unrated ranked room is forgotten after this
+const ROOM_ATTEMPTS = 3; // codes tried before a pairing goes back into the queue
+
+/** How the accounts API reaches the ranked queue and the match rooms (the Accounts Durable Object). */
+export interface QueueHost {
+  matchmaker: Matchmaker;
+  /** Register `code` as a ranked room for the two players. False if that code is already in use. */
+  openRoom(code: string, players: [QueuePlayer, QueuePlayer]): Promise<boolean>;
+}
+
+const ROUTES: Record<string, string> = {
+  register: "POST", login: "POST", logout: "POST", me: "GET", records: "PUT",
+  "queue/join": "POST", "queue/status": "GET", "queue/leave": "POST",
+};
 
 const encoder = new TextEncoder();
 
@@ -97,8 +137,8 @@ function sessionCookie(token: string): string {
 
 const CLEAR_COOKIE = `${COOKIE_NAME}=; HttpOnly; Secure; SameSite=Strict; Path=/api; Max-Age=0`;
 
-function cookieToken(request: Request): string | null {
-  for (const part of (request.headers.get("Cookie") ?? "").split(";")) {
+function cookieToken(cookie: string | null): string | null {
+  for (const part of (cookie ?? "").split(";")) {
     const [name, value] = part.trim().split("=");
     if (name === COOKIE_NAME && value !== undefined && TOKEN.test(value)) return value;
   }
@@ -135,11 +175,90 @@ function profile(row: AccountRow) {
   return { username: row.username, createdAt: row.createdAt, records: JSON.parse(row.records) as Records };
 }
 
-/** Handles one request to /api/account/<route>. `now` is the clock in ms. */
-export async function handleAccount(request: Request, store: AccountStore, now: () => number = Date.now): Promise<Response> {
+/**
+ * The account key a `Cookie` header's session belongs to, or null. Expired sessions are deleted.
+ * Shared by the accounts API and the Worker's ranked-socket check (worker/index.ts).
+ */
+export async function sessionKey(cookie: string | null, store: AccountStore, now: () => number = Date.now): Promise<string | null> {
+  const token = cookieToken(cookie);
+  if (!token) return null;
+  const tokenHash = await sha256(token);
+  const session = store.session(tokenHash);
+  if (!session) return null;
+  if (session.expiresAt <= now()) {
+    store.deleteSession(tokenHash);
+    return null;
+  }
+  return store.account(session.key) ? session.key : null;
+}
+
+function ratingOf(store: AccountStore, key: string): RatingRow {
+  return store.rating(key) ?? { ...DEFAULT_RATING, games: 0 };
+}
+
+/** What a client may see of a rating: the TR (null while hidden) and the games count, never r/RD/vol. */
+export function publicRating(row: RatingRow): { tr: number | null; games: number } {
+  return { tr: tdisplay(row.r, row.rd), games: row.games };
+}
+
+/** One player's side of a rated match: the TR after it (null if hidden) and the change, if both TRs are visible. */
+export interface RatingChange {
+  key: string;
+  tr: number | null;
+  delta: number | null;
+}
+
+/**
+ * Rate the result of ranked match `code`: `winnerKey` won (score 1, the other 0), or null for a
+ * draw (0.5 each). Each player is updated against the other's pre-match rating. Null if `code`
+ * is not an unrated ranked match or `winnerKey` is not one of its players; nothing changes then.
+ */
+export function rateRankedMatch(store: AccountStore, code: string, winnerKey: string | null): [RatingChange, RatingChange] | null {
+  const match = store.rankedMatch(code);
+  if (!match || (winnerKey !== null && !match.keys.includes(winnerKey))) return null;
+  const before = match.keys.map((k) => ratingOf(store, k));
+  const after = match.keys.map((k, i): RatingRow => {
+    const score = winnerKey === null ? 0.5 : winnerKey === k ? 1 : 0;
+    return { ...updateGlicko2(before[i], before[1 - i], score), games: before[i].games + 1 };
+  });
+  if (!store.rateMatch(code, match.keys.map((k, i): [string, RatingRow] => [k, after[i]]))) return null;
+  const change = (i: number): RatingChange => {
+    const was = tdisplay(before[i].r, before[i].rd);
+    const tr = tdisplay(after[i].r, after[i].rd);
+    return { key: match.keys[i], tr, delta: was !== null && tr !== null ? tr - was : null };
+  };
+  return [change(0), change(1)];
+}
+
+/** Open a room for every pairing the queue has now; a pairing without a room goes back into the queue. */
+async function openPairings(host: QueueHost, store: AccountStore, now: () => number): Promise<void> {
+  for (const pairing of host.matchmaker.pair()) {
+    let code: string | null = null;
+    for (let i = 0; i < ROOM_ATTEMPTS && code === null; i++) {
+      const candidate = newRoomCode();
+      try {
+        if (await host.openRoom(candidate, pairing.players)) code = candidate;
+      } catch {
+        break;
+      }
+    }
+    if (code === null) {
+      host.matchmaker.requeue(pairing);
+      continue;
+    }
+    store.deleteRankedMatchesBefore(now() - RANKED_MATCH_TTL_MS);
+    store.insertRankedMatch(code, { keys: [pairing.players[0].key, pairing.players[1].key], createdAt: now() });
+    host.matchmaker.matchedTo(pairing, code);
+  }
+}
+
+/** Handles one request to /api/account/<route>. `now` is the clock in ms; `queue` hosts the ranked queue (404 without). */
+export async function handleAccount(
+  request: Request, store: AccountStore, now: () => number = Date.now, queue?: QueueHost,
+): Promise<Response> {
   const url = new URL(request.url);
   const route = url.pathname.startsWith("/api/account/") ? url.pathname.slice("/api/account/".length) : "";
-  if (!Object.hasOwn(ROUTES, route)) return fail(404, "Not found.");
+  if (!Object.hasOwn(ROUTES, route) || (route.startsWith("queue/") && !queue)) return fail(404, "Not found.");
   const method = ROUTES[route];
   if (request.method !== method) return fail(405, "Method not allowed.", { Allow: method });
 
@@ -171,18 +290,7 @@ export async function handleAccount(request: Request, store: AccountStore, now: 
   };
 
   /** The signed-in account's key, or null. Expired sessions are deleted. */
-  const currentKey = async (): Promise<string | null> => {
-    const token = cookieToken(request);
-    if (!token) return null;
-    const tokenHash = await sha256(token);
-    const session = store.session(tokenHash);
-    if (!session) return null;
-    if (session.expiresAt <= now()) {
-      store.deleteSession(tokenHash);
-      return null;
-    }
-    return store.account(session.key) ? session.key : null;
-  };
+  const currentKey = () => sessionKey(request.headers.get("Cookie"), store, now);
 
   switch (route) {
     case "register":
@@ -205,14 +313,35 @@ export async function handleAccount(request: Request, store: AccountStore, now: 
       return signIn(key, 200);
     }
     case "logout": {
-      const token = cookieToken(request);
+      const token = cookieToken(request.headers.get("Cookie"));
       if (token) store.deleteSession(await sha256(token));
       return json(200, {}, { "Set-Cookie": CLEAR_COOKIE });
     }
     case "me": {
       const key = await currentKey();
       if (!key) return fail(401, "Not signed in.");
-      return json(200, profile(store.account(key)!));
+      return json(200, { ...profile(store.account(key)!), rating: publicRating(ratingOf(store, key)) });
+    }
+    case "queue/join":
+    case "queue/status":
+    case "queue/leave": {
+      const key = await currentKey();
+      if (!key) return fail(401, "Not signed in.");
+      const mm = queue!.matchmaker;
+      if (route === "queue/leave") {
+        mm.leave(key);
+        return json(200, { status: "none" });
+      }
+      if (route === "queue/join") {
+        // the internal TR, hidden or not, so new players are matched too
+        const r = ratingOf(store, key);
+        mm.join({ key, username: store.account(key)!.username }, calcTR(r.r, r.rd));
+        await openPairings(queue!, store, now);
+        return json(200, { status: "waiting" });
+      }
+      mm.touch(key); // the poll keeps the entry alive before the pairing pass drops stale ones
+      await openPairings(queue!, store, now);
+      return json(200, mm.status(key));
     }
     default: { // records
       const key = await currentKey();

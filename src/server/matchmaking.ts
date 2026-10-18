@@ -80,6 +80,12 @@ export class Matchmaker {
     return { status: "waiting", waited: Math.floor((t - e.joinedAt) / 1000), range: rangeAfter(t - e.joinedAt) };
   }
 
+  /** Keep a waiting entry alive without answering (status does this too). */
+  touch(key: string): void {
+    const e = this.waiting.find((x) => x.key === key) ?? this.opening.get(key);
+    if (e) e.seenAt = this.now();
+  }
+
   /** Take every pair that fits out of the queue, oldest entries first. Stale entries are dropped first. */
   pair(): Pairing[] {
     this.expire();
