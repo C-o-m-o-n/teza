@@ -8,6 +8,10 @@
 // Wire format is the Ribbon envelope from the old server, {t, s, a, d}: type, sequence id
 // (per slot, increments per packet sent), ack (last `s` received from the other side) and
 // payload. The last 100 packets per slot are kept so a reconnecting client can catch up.
+//
+// A ranked match (opened by the matchmaker, accounts.ts) is given the two accounts allowed to
+// play it and a `report` callback. Only those accounts take its slots, and when it finishes the
+// result is reported once and `end` waits for the new ratings (REPORT_TIMEOUT_MS at most).
 
 import { Action, DEFAULT_HANDLING, Game, Handling } from "../engine/game";
 import { stepTo, stepToClock } from "../engine/stepping";
@@ -28,6 +32,7 @@ export const RESUME_TIMEOUT_MS = 5000; // an extra socket must `resume` within t
 export const MAX_PENDING = 2; // extra sockets waiting to `resume` at once
 export const LOBBY_TIMEOUT_MS = 120_000; // a match without an opponent by then is reset
 export const IDLE_TIMEOUT_MS = 60_000; // a started match where nobody sends anything for this long ends
+export const REPORT_TIMEOUT_MS = 3000; // a ranked `end` waits this long for the ratings at most
 
 /** Room codes (= match ids) are issued by `POST /api/room`: 6 symbols, no 0/O, 1/I/L look-alikes. */
 export const ROOM_ALPHABET = "ABCDEFGHJKMNPQRSTUVWXYZ23456789";
@@ -90,9 +95,23 @@ export const cryptoRandom: Random = {
 
 export type SlotIndex = 0 | 1;
 
+/** One player's rating after a ranked match: TR (null while hidden) and its change (null unless both TRs are visible). */
+export interface SlotRating {
+  tr: number | null;
+  delta: number | null;
+}
+
+/** What makes a match ranked. The client never reports a result: `report` is called by `finish` only. */
+export interface RankedConfig {
+  accounts: readonly [string, string]; // account keys allowed to take a slot, one each
+  /** Rate the result (`winner` null for a draw); resolves with each slot's rating, by slot index, or null. */
+  report(winner: SlotIndex | null): Promise<readonly [SlotRating, SlotRating] | null>;
+}
+
 interface Slot {
   index: SlotIndex;
   token: string;
+  account: string | null; // ranked: the account key holding the slot
   conn: Conn | null;
   seq: number; // last `s` sent
   ack: number; // last `s` received
@@ -132,7 +151,21 @@ export class MatchSession {
   private lastActive = 0; // clock time of the last valid message from a player
   private garbageOut: { slot: Slot; amount: number; frame: number }[] = [];
 
-  constructor(private clock: Clock, private random: Random = cryptoRandom) {}
+  constructor(private clock: Clock, private random: Random = cryptoRandom, private ranked: RankedConfig | null = null) {}
+
+  get isRanked(): boolean {
+    return this.ranked !== null;
+  }
+
+  /** Whether `account` may take a slot: ranked, one of its two accounts, and not holding one already. */
+  mayTake(account: string): boolean {
+    return !!this.ranked?.accounts.includes(account) && !this.slots.some((s) => s.account === account);
+  }
+
+  /** The account holding slot `index` (ranked matches), or null. */
+  accountOf(index: SlotIndex): string | null {
+    return this.slots[index]?.account ?? null;
+  }
 
   /** The server's engine for a player, once the match has started. */
   game(index: SlotIndex): Game | null {
@@ -157,15 +190,17 @@ export class MatchSession {
    * A new socket. With `resume` (the token from the upgrade URL) the socket rebinds that slot
    * at once and never waits among the pending sockets, so others can't crowd the owner out.
    */
-  connect(peer: Peer, resume?: ResumeRequest): Conn {
+  connect(peer: Peer, resume?: ResumeRequest, account?: string): Conn {
     const conn: Conn = { peer, slot: null, rejected: 0, closed: false, timer: null };
     if (this.ended) {
       this.reject(conn, "ended", "the match is over");
     } else if (resume) {
       this.resume(conn, resume);
+    } else if (this.ranked && (account === undefined || !this.mayTake(account))) {
+      this.reject(conn, "not-yours", "this ranked match is for two other accounts");
     } else if (this.slots.length < 2) {
       const slot: Slot = {
-        index: this.slots.length as SlotIndex, token: this.random.token(), conn, seq: 0, ack: 0,
+        index: this.slots.length as SlotIndex, token: this.random.token(), account: this.ranked ? account! : null, conn, seq: 0, ack: 0,
         buffer: [], game: null, lastFrame: 0, budget: INPUT_BURST, budgetAt: 0, grace: null,
       };
       this.slots.push(slot);
@@ -433,7 +468,7 @@ export class MatchSession {
     this.settle();
   }
 
-  /** `winner` is null for a draw (an idle match). */
+  /** `winner` is null for a draw (an idle match). A ranked match reports it first (see `rate`). */
   private finish(winner: SlotIndex | null, reason: string): void {
     if (this.ended) return;
     this.ended = true;
@@ -444,13 +479,71 @@ export class MatchSession {
       slot.grace = null;
       if (slot.game) slot.game.onAttack = null;
     }
-    for (const slot of this.slots) this.send(slot, "end", { winner, reason });
+    if (this.ranked) return this.rate(this.ranked, winner, reason);
+    this.end(winner, reason, null);
+  }
+
+  /**
+   * Report a ranked result once, then send `end` with each player's rating. If `report` fails,
+   * answers something unreadable or takes over REPORT_TIMEOUT_MS, `end` goes out without ratings.
+   */
+  private rate(ranked: RankedConfig, winner: SlotIndex | null, reason: string): void {
+    let done = false;
+    const deliver = (ratings: readonly SlotRating[] | null) => {
+      if (done) return;
+      done = true;
+      this.clock.clearTimeout(timer);
+      this.end(winner, reason, ratings);
+    };
+    const timer = this.clock.setTimeout(() => deliver(null), REPORT_TIMEOUT_MS);
+    let reported: Promise<unknown>;
+    try {
+      reported = Promise.resolve(ranked.report(winner));
+    } catch (e) {
+      reported = Promise.reject(e);
+    }
+    reported.then(
+      (r) => deliver(Array.isArray(r) && r.length === 2 && r.every(isSlotRating) ? r : null),
+      () => deliver(null),
+    );
+  }
+
+  private end(winner: SlotIndex | null, reason: string, ratings: readonly SlotRating[] | null): void {
+    for (const slot of this.slots) {
+      const rating = ratings?.[slot.index];
+      this.send(slot, "end", rating ? { winner, reason, rating: { tr: rating.tr, delta: rating.delta } } : { winner, reason });
+    }
     this.closeAll(1000, "ended", "the match is over");
   }
 }
 
 function isObject(v: unknown): v is Record<string, unknown> {
   return typeof v === "object" && v !== null && !Array.isArray(v);
+}
+
+const intOrNull = (v: unknown) => v === null || Number.isSafeInteger(v);
+
+function isSlotRating(v: unknown): v is SlotRating {
+  return isObject(v) && intOrNull(v.tr) && intOrNull(v.delta);
+}
+
+/**
+ * Whether a new socket (no `?resume=`) may open with `mode`, given the account the Worker
+ * resolved from its session cookie: null if so, else the refusal. Only `mode=ranked` takes a
+ * ranked room's slots, and only for its two accounts; create and join can't touch it (409).
+ */
+export function admission(session: MatchSession, mode: string | null, account: string | null): { status: number; message: string } | null {
+  if (mode === "ranked") {
+    if (!session.isRanked) return { status: 404, message: "No such ranked match" };
+    if (account === null) return { status: 401, message: "Sign in to play ranked" };
+    if (!session.mayTake(account)) return { status: 403, message: "This ranked match is not yours" };
+    return null;
+  }
+  if (mode !== "create" && mode !== "join") return { status: 400, message: "Expected ?mode=create, ?mode=join or ?mode=ranked" };
+  if (session.isRanked) return { status: 409, message: "That code is a ranked match" };
+  if (mode === "create" && session.hasPlayers) return { status: 409, message: "Room code taken" };
+  if (mode === "join" && !session.hasPlayers) return { status: 404, message: "No such room" };
+  return null;
 }
 
 /** Decode one client frame, or return an error code. Never throws. */

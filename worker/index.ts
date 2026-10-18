@@ -3,11 +3,18 @@
 // POST /api/room issues a room code; GET /api/match/<code>?mode=create|join with `Upgrade:
 // websocket` opens or joins that room's Durable Object. A player coming back adds
 // `?resume=<token>&ack=<peerAck>` instead of `mode`, which is checked before the upgrade.
-// /api/account/* goes to the single `Accounts` Durable Object (src/server/accounts.ts).
+// /api/account/* goes to the single `Accounts` Durable Object (src/server/accounts.ts), which
+// also hosts the ranked queue. A ranked room (`?mode=ranked`) is registered with its `Match`
+// object by the queue over RPC; its socket needs a session, which the Worker resolves to an
+// account and hands to `Match` in ACCOUNT_HEADER.
 
 import { DurableObject } from "cloudflare:workers";
-import { AccountRow, AccountStore, handleAccount, MAX_BODY_BYTES, readBody, SessionRow } from "../src/server/accounts";
-import { MatchSession, newRoomCode, ResumeRequest, ROOM_CODE } from "../src/server/match";
+import {
+  AccountRow, AccountStore, handleAccount, MAX_BODY_BYTES, RankedMatchRow, RatingChange, rateRankedMatch, RatingRow, readBody,
+  sessionKey, SessionRow,
+} from "../src/server/accounts";
+import { admission, cryptoRandom, MatchSession, newRoomCode, ResumeRequest, ROOM_CODE, SlotIndex, SlotRating } from "../src/server/match";
+import { Matchmaker, QueuePlayer } from "../src/server/matchmaking";
 
 export interface Env {
   MATCH: DurableObjectNamespace<Match>;
@@ -15,6 +22,8 @@ export interface Env {
 }
 
 const MATCH_ROUTE = /^\/api\/match\/([^/]*)$/;
+/** The account key of a ranked socket, set only by the Worker (incoming copies are stripped). */
+const ACCOUNT_HEADER = "X-Teza-Account";
 const TOKEN = /^[0-9a-f]{32}$/;
 const ACK = /^[0-9]{1,15}$/;
 
@@ -51,17 +60,57 @@ export default {
     if (request.headers.get("Upgrade")?.toLowerCase() !== "websocket") {
       return new Response("Expected a WebSocket upgrade", { status: 426, headers: { Upgrade: "websocket" } });
     }
-    return env.MATCH.get(env.MATCH.idFromName(route[1])).fetch(request);
+    const headers = new Headers(request.headers);
+    headers.delete(ACCOUNT_HEADER);
+    const url = new URL(request.url);
+    if (url.searchParams.get("mode") === "ranked" && !url.searchParams.has("resume")) {
+      const key = await accounts(env).sessionAccount(request.headers.get("Cookie"));
+      if (key === null) return new Response("Sign in to play ranked", { status: 401 });
+      headers.set(ACCOUNT_HEADER, key);
+    }
+    return env.MATCH.get(env.MATCH.idFromName(route[1])).fetch(new Request(request, { headers }));
   },
 } satisfies ExportedHandler<Env>;
 
+function accounts(env: Env): DurableObjectStub<Accounts> {
+  return env.ACCOUNTS.get(env.ACCOUNTS.idFromName("accounts"));
+}
+
+const clock = {
+  now: () => Date.now(),
+  setTimeout: (fn: () => void, ms: number) => setTimeout(fn, ms),
+  clearTimeout: (handle: unknown) => clearTimeout(handle as number),
+};
+
 /** One instance per match id. Holds both sockets in memory (no hibernation) for the life of the match. */
 export class Match extends DurableObject<Env> {
-  private session = new MatchSession({
-    now: () => Date.now(),
-    setTimeout: (fn, ms) => setTimeout(fn, ms),
-    clearTimeout: (handle) => clearTimeout(handle as number),
-  });
+  private session = new MatchSession(clock);
+
+  /**
+   * RPC from the matchmaker (Accounts): make this room a ranked match for `players`. False if the
+   * code is already in use (someone holds a slot, or it is ranked already). Kept in memory only:
+   * if the object restarts, the match just can't start as ranked.
+   */
+  async registerRanked(code: string, players: [QueuePlayer, QueuePlayer]): Promise<boolean> {
+    if (this.session.hasPlayers || this.session.isRanked) return false;
+    const keys = [players[0].key, players[1].key] as const;
+    const session: MatchSession = new MatchSession(clock, cryptoRandom, {
+      accounts: keys,
+      report: async (winner: SlotIndex | null) => {
+        const winnerKey = winner === null ? null : session.accountOf(winner);
+        const changes = await accounts(this.env).reportRanked(code, winnerKey);
+        if (!changes) return null;
+        const bySlot = (i: SlotIndex): SlotRating | undefined => {
+          const c = changes.find((x) => x.key === session.accountOf(i));
+          return c && { tr: c.tr, delta: c.delta };
+        };
+        const ratings = [bySlot(0), bySlot(1)];
+        return ratings[0] && ratings[1] ? [ratings[0], ratings[1]] : null;
+      },
+    });
+    this.session = session;
+    return true;
+  }
 
   async fetch(request: Request): Promise<Response> {
     if (request.headers.get("Upgrade")?.toLowerCase() !== "websocket") {
@@ -71,12 +120,11 @@ export class Match extends DurableObject<Env> {
     const resume = resumeParams(url);
     if (resume === null) return new Response("Bad resume parameters", { status: 400 });
     if (resume && !this.session.hasToken(resume.token)) return new Response("Unknown resume token", { status: 403 });
+    const account = request.headers.get(ACCOUNT_HEADER);
     if (!resume) {
-      // a new player says whether they open the room or join it, so nobody takes over a live code
-      const mode = url.searchParams.get("mode");
-      if (mode !== "create" && mode !== "join") return new Response("Expected ?mode=create or ?mode=join", { status: 400 });
-      if (mode === "create" && this.session.hasPlayers) return new Response("Room code taken", { status: 409 });
-      if (mode === "join" && !this.session.hasPlayers) return new Response("No such room", { status: 404 });
+      // a new player says whether they open the room, join it or take a ranked slot, so nobody takes over a live code
+      const refused = admission(this.session, url.searchParams.get("mode"), account);
+      if (refused) return new Response(refused.message, { status: refused.status });
     }
     const [client, server] = Object.values(new WebSocketPair());
     server.accept();
@@ -95,7 +143,7 @@ export class Match extends DurableObject<Env> {
           // already closed
         }
       },
-    }, resume);
+    }, resume, account ?? undefined);
     server.addEventListener("message", (event) => this.session.message(conn, event.data));
     server.addEventListener("close", () => {
       this.session.disconnect(conn);
@@ -110,9 +158,10 @@ export class Match extends DurableObject<Env> {
   }
 }
 
-/** One global instance holding every account and session in its SQLite storage. */
+/** One global instance holding every account, session and rating in its SQLite storage, and the ranked queue in memory. */
 export class Accounts extends DurableObject<Env> {
   private store: AccountStore;
+  private matchmaker = new Matchmaker(() => Date.now());
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
@@ -128,6 +177,20 @@ export class Accounts extends DurableObject<Env> {
       token_hash TEXT PRIMARY KEY,
       username_key TEXT NOT NULL,
       expires_at INTEGER NOT NULL
+    )`);
+    // Ratings and the ranked rooms awaiting a result are new tables in this class: no migration needed.
+    sql.exec(`CREATE TABLE IF NOT EXISTS ratings (
+      username_key TEXT PRIMARY KEY,
+      r REAL NOT NULL,
+      rd REAL NOT NULL,
+      vol REAL NOT NULL,
+      games INTEGER NOT NULL
+    )`);
+    sql.exec(`CREATE TABLE IF NOT EXISTS ranked_matches (
+      code TEXT PRIMARY KEY,
+      key_a TEXT NOT NULL,
+      key_b TEXT NOT NULL,
+      created_at INTEGER NOT NULL
     )`);
     this.store = {
       account(key): AccountRow | null {
@@ -156,10 +219,47 @@ export class Accounts extends DurableObject<Env> {
       deleteExpiredSessions(now) {
         sql.exec("DELETE FROM sessions WHERE expires_at <= ?", now);
       },
+      rating(key): RatingRow | null {
+        return sql.exec<{ r: number; rd: number; vol: number; games: number }>(
+          "SELECT r, rd, vol, games FROM ratings WHERE username_key = ?", key).toArray()[0] ?? null;
+      },
+      rankedMatch(code): RankedMatchRow | null {
+        const row = sql.exec<{ key_a: string; key_b: string; created_at: number }>(
+          "SELECT key_a, key_b, created_at FROM ranked_matches WHERE code = ?", code).toArray()[0];
+        return row ? { keys: [row.key_a, row.key_b], createdAt: row.created_at } : null;
+      },
+      insertRankedMatch(code, row) {
+        sql.exec("INSERT OR REPLACE INTO ranked_matches VALUES (?, ?, ?, ?)", code, row.keys[0], row.keys[1], row.createdAt);
+      },
+      deleteRankedMatchesBefore(createdAt) {
+        sql.exec("DELETE FROM ranked_matches WHERE created_at < ?", createdAt);
+      },
+      rateMatch(code, ratings) {
+        return ctx.storage.transactionSync(() => {
+          if (sql.exec("DELETE FROM ranked_matches WHERE code = ?", code).rowsWritten === 0) return false;
+          for (const [key, row] of ratings) {
+            sql.exec("INSERT OR REPLACE INTO ratings VALUES (?, ?, ?, ?, ?)", key, row.r, row.rd, row.vol, row.games);
+          }
+          return true;
+        });
+      },
     };
   }
 
   async fetch(request: Request): Promise<Response> {
-    return handleAccount(request, this.store);
+    return handleAccount(request, this.store, Date.now, {
+      matchmaker: this.matchmaker,
+      openRoom: (code, players) => this.env.MATCH.get(this.env.MATCH.idFromName(code)).registerRanked(code, players),
+    });
+  }
+
+  /** RPC from the Worker: the account key a `Cookie` header's session belongs to, or null. */
+  async sessionAccount(cookie: string | null): Promise<string | null> {
+    return sessionKey(cookie, this.store);
+  }
+
+  /** RPC from a ranked `Match`: rate its result once. Null if it was not a ranked match or was rated already. */
+  async reportRanked(code: string, winnerKey: string | null): Promise<RatingChange[] | null> {
+    return rateRankedMatch(this.store, code, winnerKey);
   }
 }
