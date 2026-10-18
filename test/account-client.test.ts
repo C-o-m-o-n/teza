@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { REQUEST_TIMEOUT_MS, fetchMe, finishSession, joinQueue, putRecords, queueStatus, signOut } from "../src/ui/account";
 import { Records } from "../src/profile";
+import { onlineAvailable } from "../src/ui/rooms";
 
 const records: Records = { "40l": { value: 2500, pps: 2, apm: 60, pieces: 100, date: 0 }, vs: { ROOKIE: { wins: 1, losses: 4 } } };
 
@@ -152,5 +153,25 @@ describe("ranked queue client", () => {
     );
     expect((await fetchMe())?.rating).toEqual({ tr: null, games: 3 });
     expect((await fetchMe())?.rating).toBeNull();
+  });
+});
+
+describe("rooms client", () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  it("onlineAvailable asks GET /api/room and takes only the Worker's 200 {online: true}", async () => {
+    const calls: string[] = [];
+    const answers: [number, unknown][] = [[200, { online: true }], [204, null], [404, null], [201, { code: "ABCDEF" }], [200, { online: "yes" }]];
+    vi.stubGlobal("fetch", (url: string, init: RequestInit) => {
+      calls.push(`${init.method} ${url}`);
+      const [status, body] = answers.shift()!;
+      return Promise.resolve(new Response(body === null ? null : JSON.stringify(body), { status }));
+    });
+    expect(await onlineAvailable()).toBe(true);
+    expect(await onlineAvailable()).toBe(false); // the e2e server
+    expect(await onlineAvailable()).toBe(false); // npm start
+    expect(await onlineAvailable()).toBe(false);
+    expect(await onlineAvailable()).toBe(false);
+    expect(new Set(calls)).toEqual(new Set(["GET /api/room"]));
   });
 });

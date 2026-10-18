@@ -194,8 +194,9 @@ for (const theme of ["classic", "poster"]) {
       await expect(ui(page)).toHaveAttribute("data-screen", "bots");
     }
 
-    // with a server that issues codes, JOIN's field takes the theme's input style (no socket is opened)
-    await page.route("**/api/room", (route) => route.fulfill({ status: 201, json: { code: "ABCDEF" } }));
+    // with a game server (GET /api/room says so), JOIN's field takes the theme's input style (no socket is opened)
+    await page.route("**/api/room", (route) => route.fulfill(route.request().method() === "GET"
+      ? { status: 200, json: { online: true } } : { status: 201, json: { code: "ABCDEF" } }));
     await page.locator("button.bar", { hasText: "JOIN ROOM" }).click();
     await expect(ui(page)).toHaveAttribute("data-screen", "lobby");
     const field = page.locator('input[name="room"]');
