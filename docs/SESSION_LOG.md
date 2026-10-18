@@ -339,12 +339,12 @@
 **What changed**
 - Socket: the match upgrade and `POST /api/room` refuse an `Origin` that is neither the request URL's own nor `https://teza.comonhq.com` (403, before any Durable Object call; no `Origin` passes). The resume token moved from `?resume=&ack=` (now 400) to `Sec-WebSocket-Protocol: teza, resume.<token>.<ack>`; the 101 answers `teza` only. Tokens are compared with `timingSafeEqual` against every slot.
 - Issued room codes: `POST /api/room` reserves its code with that code's `Match` object (RPC `issueRoom`, a claim in DO storage for 2 minutes, an alarm deletes it unused; 5 tries then 503). `mode=create` needs a live claim and uses it up (404 `Room code was not issued` otherwise).
-- Accounts: cookie renamed `__Host-teza_session` (`Path=/`), with a read-only fallback to the legacy `teza_session` (remove 30 days after deploy); sign-in expires the legacy cookie and ends the account's other sessions; register answers 503 at `MAX_ACCOUNTS` (20000); `sessions` indexed on `expires_at` and `username_key`.
+- Accounts: cookie renamed `__Host-teza_session` (`Path=/`), with a read-only fallback to the legacy `teza_session` (remove 30 days after deploy); sign-in expires the legacy cookie and ends the account's other sessions; register answers 503 once 500 accounts were created in the last 24 h (round 2, replacing a lifetime cap a script could fill for good; 200000 stays as a storage backstop); `sessions` indexed on `expires_at` and `username_key`.
 - SIGN OUT: a 400 on the last records upload no longer keeps the player signed in.
 - CSP: `build.mjs` writes `dist/_headers` with a strict policy and the inline theme script's hash; the e2e server sends it. `el()` now sets `style` through the CSSOM (`style.cssText`), since the policy refuses `style` attributes (the `--accent`/`--i`/`--len` custom properties were being set that way).
+- JOIN ROOM's server check is `GET /api/room` (200 `{online: true}`), which reserves nothing.
 - Checked on `wrangler dev --local-upstream` (4.150.0): `_headers` applied to `/` and assets (and not served itself); headless Chromium in both themes with zero CSP violations, theme set before the stylesheet, service worker registered and controlling after reload, fonts loaded; a room (Classic creates, Poster Slab joins) and a ranked match both reached play. A `teza_session` made by main's Worker still signed in after the switch; logging in replaced it with `__Host-teza_session`.
 
 **Still open**
 - The client still has no auto-reconnect over the resume subprotocol.
-- JOIN ROOM's server check (`POST /api/room`) reserves a code it never uses; the claim just expires.
 - Remove `LEGACY_COOKIE_NAME` 30 days after this deploys.
