@@ -1,58 +1,12 @@
-import { beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
-  AccountRow, AccountStore, COOKIE_NAME, MAX_BODY_BYTES, QueueHost, RANKED_MATCH_TTL_MS, RankedMatchRow, RatingRow,
-  SESSION_TTL_S, SessionRow, handleAccount, rateRankedMatch, sessionKey,
+  COOKIE_NAME, MAX_BODY_BYTES, MAX_PAIR_RATED, NO_SHOW_COOLDOWN_MS, OPEN_ROOM_TIMEOUT_MS, PAIR_WINDOW_MS, QueueHost,
+  RANKED_MATCH_TTL_MS, SESSION_TTL_S, cookieToken, handleAccount, pairAllowed, rateRankedMatch, reportNoShow, sessionKey,
 } from "../src/server/accounts";
 import { Matchmaker, QUEUE_STALE_MS } from "../src/server/matchmaking";
 import { ROOM_CODE } from "../src/server/match";
 import { Records, mergeRecords, recordsError } from "../src/profile";
-
-class MemoryStore implements AccountStore {
-  accounts = new Map<string, AccountRow>();
-  sessions = new Map<string, SessionRow>();
-  account(key: string): AccountRow | null {
-    return this.accounts.get(key) ?? null;
-  }
-  insertAccount(key: string, row: AccountRow): boolean {
-    if (this.accounts.has(key)) return false;
-    this.accounts.set(key, { ...row });
-    return true;
-  }
-  setRecords(key: string, records: string): void {
-    this.accounts.get(key)!.records = records;
-  }
-  session(tokenHash: string): SessionRow | null {
-    return this.sessions.get(tokenHash) ?? null;
-  }
-  insertSession(tokenHash: string, row: SessionRow): void {
-    this.sessions.set(tokenHash, { ...row });
-  }
-  deleteSession(tokenHash: string): void {
-    this.sessions.delete(tokenHash);
-  }
-  deleteExpiredSessions(now: number): void {
-    for (const [k, s] of this.sessions) if (s.expiresAt <= now) this.sessions.delete(k);
-  }
-  ratings = new Map<string, RatingRow>();
-  ranked = new Map<string, RankedMatchRow>();
-  rating(key: string): RatingRow | null {
-    return this.ratings.get(key) ?? null;
-  }
-  rankedMatch(code: string): RankedMatchRow | null {
-    return this.ranked.get(code) ?? null;
-  }
-  insertRankedMatch(code: string, row: RankedMatchRow): void {
-    this.ranked.set(code, row);
-  }
-  deleteRankedMatchesBefore(createdAt: number): void {
-    for (const [k, m] of this.ranked) if (m.createdAt < createdAt) this.ranked.delete(k);
-  }
-  rateMatch(code: string, ratings: [string, RatingRow][]): boolean {
-    if (!this.ranked.delete(code)) return false;
-    for (const [key, row] of ratings) this.ratings.set(key, { ...row });
-    return true;
-  }
-}
+import { MemoryStore } from "./account-store";
 
 const ORIGIN = "https://teza.example";
 const PASSWORD = "correct horse battery";
@@ -62,15 +16,19 @@ let clock: number;
 let queue: QueueHost;
 let rooms: { code: string; players: string[] }[]; // what the queue registered with the Match objects
 let roomsRefused: number; // how many registrations to refuse (a code already in use) before accepting
+let roomsHang: boolean; // registrations never answer (a hung Match object)
 
 beforeEach(() => {
   store = new MemoryStore();
   clock = 1_700_000_000_000;
   rooms = [];
   roomsRefused = 0;
+  roomsHang = false;
   queue = {
-    matchmaker: new Matchmaker(() => clock),
+    matchmaker: new Matchmaker(() => clock, pairAllowed(store, () => clock)),
+    cooldowns: new Map(),
     openRoom: async (code, players) => {
+      if (roomsHang) return new Promise<boolean>(() => {});
       if (roomsRefused > 0) {
         roomsRefused--;
         return false;
@@ -495,5 +453,160 @@ describe("ranked queue", () => {
     await call("POST", "queue/join", { cookie: b });
     expect(store.rankedMatch(first)).toBeNull();
     expect(store.rankedMatch(rooms[1].code)).not.toBeNull();
+  });
+});
+
+describe("ranked hardening", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  /** Until the registration's timeout is armed (the session lookup before it hashes with real async crypto). */
+  async function timerArmed(): Promise<void> {
+    // setInterval is left real (only setTimeout and clearTimeout are faked), so it yields to the event loop
+    while (vi.getTimerCount() === 0) {
+      await new Promise<void>((resolve) => {
+        const tick = setInterval(() => {
+          clearInterval(tick);
+          resolve();
+        }, 1);
+      });
+    }
+  }
+
+  /** Queue both, read the match, and rate it as a win for `a` at the test clock. */
+  async function playRated(a: string, b: string): Promise<void> {
+    await call("POST", "queue/join", { cookie: a });
+    await call("POST", "queue/join", { cookie: b });
+    const status = await (await call("GET", "queue/status", { cookie: a })).json();
+    expect(status.status).toBe("matched");
+    await call("GET", "queue/status", { cookie: b });
+    expect(rateRankedMatch(store, status.code, store.rankedMatch(status.code)!.keys[0], () => clock)).not.toBeNull();
+  }
+
+  it(`pairs the same two accounts at most ${MAX_PAIR_RATED} times in 24 h; a third account in range is paired instead`, async () => {
+    const a = await register("Alice");
+    const b = await register("Bob");
+    for (let i = 0; i < MAX_PAIR_RATED; i++) {
+      await playRated(a, b);
+      clock += 60_000;
+    }
+    expect(store.pairCount("bob", "alice", clock - PAIR_WINDOW_MS)).toBe(MAX_PAIR_RATED);
+
+    // at the cap: both stay in the queue
+    const before = rooms.length;
+    await call("POST", "queue/join", { cookie: a });
+    await call("POST", "queue/join", { cookie: b });
+    expect(rooms).toHaveLength(before);
+    expect(queue.matchmaker.size).toBe(2);
+    expect((await (await call("GET", "queue/status", { cookie: a })).json()).status).toBe("waiting");
+    expect((await (await call("GET", "queue/status", { cookie: b })).json()).status).toBe("waiting");
+
+    // a third account in range pairs with one of them
+    const c = await register("Carol");
+    await call("POST", "queue/join", { cookie: c });
+    expect(rooms).toHaveLength(before + 1);
+    expect(rooms[before].players).toContain("carol");
+    expect(queue.matchmaker.size).toBe(1);
+    await call("POST", "queue/leave", { cookie: a });
+    await call("POST", "queue/leave", { cookie: b });
+    await call("POST", "queue/leave", { cookie: c });
+
+    // 24 h after the first of those matches, the pair is under the cap again
+    clock += PAIR_WINDOW_MS - MAX_PAIR_RATED * 60_000 + 1;
+    await call("POST", "queue/join", { cookie: a });
+    await call("POST", "queue/join", { cookie: b });
+    expect(rooms).toHaveLength(before + 2);
+    expect(rooms[before + 1].players.sort()).toEqual(["alice", "bob"]);
+  });
+
+  it("pairs a pair below the cap as before", async () => {
+    const a = await register("Alice");
+    const b = await register("Bob");
+    for (let i = 0; i < MAX_PAIR_RATED - 1; i++) await playRated(a, b);
+    await call("POST", "queue/join", { cookie: a });
+    await call("POST", "queue/join", { cookie: b });
+    expect(rooms).toHaveLength(MAX_PAIR_RATED);
+  });
+
+  it("prunes pair records older than the window when a match is rated", async () => {
+    const a = await register("Alice");
+    const b = await register("Bob");
+    await playRated(a, b);
+    clock += PAIR_WINDOW_MS + 1;
+    await playRated(a, b);
+    expect(store.pairs).toHaveLength(1);
+  });
+
+  it("a no-show drops the room unrated and cools the absent account down; the other can queue at once", async () => {
+    const a = await register("Alice");
+    const b = await register("Bob");
+    await call("POST", "queue/join", { cookie: a });
+    await call("POST", "queue/join", { cookie: b });
+    const code = rooms[0].code;
+    expect(reportNoShow(store, queue.cooldowns, "ZZZZZZ", "bob", () => clock)).toBe(false);
+    expect(reportNoShow(store, queue.cooldowns, code, "mallory", () => clock)).toBe(false);
+    expect(queue.cooldowns.size).toBe(0);
+    expect(reportNoShow(store, queue.cooldowns, code, "bob", () => clock)).toBe(true);
+    expect(store.rankedMatch(code)).toBeNull();
+    expect(store.ratings.size).toBe(0);
+    expect(reportNoShow(store, queue.cooldowns, code, "bob", () => clock)).toBe(false); // once
+
+    const refused = await call("POST", "queue/join", { cookie: b });
+    expect(refused.status).toBe(429);
+    const body = await refused.json();
+    expect(body.retryAfter).toBe(NO_SHOW_COOLDOWN_MS / 1000);
+    expect(typeof body.error).toBe("string");
+    expect(refused.headers.get("Retry-After")).toBe(String(NO_SHOW_COOLDOWN_MS / 1000));
+    expect((await call("POST", "queue/join", { cookie: a })).status).toBe(200);
+
+    clock += NO_SHOW_COOLDOWN_MS - 1500;
+    const later = await call("POST", "queue/join", { cookie: b });
+    expect(later.status).toBe(429);
+    expect((await later.json()).retryAfter).toBe(2); // rounded up
+    clock += 1500;
+    expect((await call("POST", "queue/join", { cookie: b })).status).toBe(200);
+    expect(queue.cooldowns.size).toBe(0);
+  });
+
+  it("bounds a hung room registration: join and status answer after the timeout, requeue, and pair later", async () => {
+    const a = await register("Alice");
+    const b = await register("Bob");
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    await call("POST", "queue/join", { cookie: a });
+    roomsHang = true;
+    let answered = false;
+    const join = call("POST", "queue/join", { cookie: b }).then((r) => ((answered = true), r));
+    await timerArmed();
+    await vi.advanceTimersByTimeAsync(OPEN_ROOM_TIMEOUT_MS - 1);
+    expect(answered).toBe(false);
+    await vi.advanceTimersByTimeAsync(1);
+    expect((await join).status).toBe(200);
+    expect(vi.getTimerCount()).toBe(0); // the timeout timer is gone
+    expect(queue.matchmaker.size).toBe(2); // requeued
+
+    let polled = false;
+    const poll = call("GET", "queue/status", { cookie: a }).then((r) => ((polled = true), r));
+    await timerArmed();
+    await vi.advanceTimersByTimeAsync(OPEN_ROOM_TIMEOUT_MS);
+    expect(polled).toBe(true);
+    expect((await (await poll).json()).status).toBe("waiting");
+
+    roomsHang = false;
+    const ok = await call("GET", "queue/status", { cookie: a });
+    expect(vi.getTimerCount()).toBe(0); // cleared when the registration answered
+    expect((await ok.json()).status).toBe("matched");
+    expect(rooms).toHaveLength(1);
+  });
+
+  it("reads the session token from a Cookie header only when well-formed", () => {
+    const token = "a".repeat(64);
+    expect(cookieToken(`${COOKIE_NAME}=${token}`)).toBe(token);
+    expect(cookieToken(`x=1; ${COOKIE_NAME}=${token}`)).toBe(token);
+    expect(cookieToken(null)).toBeNull();
+    expect(cookieToken("")).toBeNull();
+    expect(cookieToken("other=1")).toBeNull();
+    expect(cookieToken(`${COOKIE_NAME}=short`)).toBeNull();
+    expect(cookieToken(`${COOKIE_NAME}=${"G".repeat(64)}`)).toBeNull();
   });
 });

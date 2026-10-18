@@ -6,6 +6,8 @@
 // widens by 500 every 10 s. Two entries pair, oldest first, when |trA - trB| <= max(rangeA, rangeB).
 // Polling `status` is the keep-alive: an entry not polled for QUEUE_STALE_MS is dropped. A pairing
 // is kept as a `matched` answer until that player reads it, or MATCHED_TTL_MS pass.
+// An injected `mayPair` can veto a pair of accounts (the Accounts object caps how often the same
+// two are rated together); vetoed entries keep waiting for other opponents.
 
 export const INITIAL_RANGE = 500;
 export const RANGE_EXPAND = 500;
@@ -50,7 +52,7 @@ export class Matchmaker {
   private matched = new Map<string, { code: string; at: number }>();
   private opening = new Map<string, Entry>(); // paired, waiting for their room to be registered
 
-  constructor(private now: () => number) {}
+  constructor(private now: () => number, private mayPair: (keyA: string, keyB: string) => boolean = () => true) {}
 
   /** Enter (or re-enter) the queue; any earlier entry or unread match for the account is dropped. */
   join(player: QueuePlayer, tr: number): void {
@@ -96,7 +98,7 @@ export class Matchmaker {
       for (let j = i + 1; j < this.waiting.length; j++) {
         const b = this.waiting[j];
         if (a.key === b.key) continue; // join replaces an entry, so this can't happen; never pair anyone with themselves
-        if (Math.abs(a.tr - b.tr) <= Math.max(rangeAfter(t - a.joinedAt), rangeAfter(t - b.joinedAt))) {
+        if (Math.abs(a.tr - b.tr) <= Math.max(rangeAfter(t - a.joinedAt), rangeAfter(t - b.joinedAt)) && this.mayPair(a.key, b.key)) {
           this.waiting.splice(j, 1);
           this.waiting.splice(i, 1);
           pairs.push({ players: [{ key: a.key, username: a.username }, { key: b.key, username: b.username }], entries: [a, b] });

@@ -12,6 +12,8 @@
 // A ranked match (opened by the matchmaker, accounts.ts) is given the two accounts allowed to
 // play it and a `report` callback. Only those accounts take its slots, and when it finishes the
 // result is reported once and `end` waits for the new ratings (REPORT_TIMEOUT_MS at most).
+// Its lobby waits only RANKED_LOBBY_TIMEOUT_MS (the queue just told both players to connect); if
+// only one account arrived by then, the absent one is reported with `noShow`.
 
 import { Action, DEFAULT_HANDLING, Game, Handling } from "../engine/game";
 import { stepTo, stepToClock } from "../engine/stepping";
@@ -31,6 +33,7 @@ export const MAX_LAG_FRAMES = 120; // frames an input (or an engine) may trail t
 export const RESUME_TIMEOUT_MS = 5000; // an extra socket must `resume` within this time
 export const MAX_PENDING = 2; // extra sockets waiting to `resume` at once
 export const LOBBY_TIMEOUT_MS = 120_000; // a match without an opponent by then is reset
+export const RANKED_LOBBY_TIMEOUT_MS = 30_000; // the same for a ranked room
 export const IDLE_TIMEOUT_MS = 60_000; // a started match where nobody sends anything for this long ends
 export const REPORT_TIMEOUT_MS = 3000; // a ranked `end` waits this long for the ratings at most
 
@@ -106,6 +109,8 @@ export interface RankedConfig {
   accounts: readonly [string, string]; // account keys allowed to take a slot, one each
   /** Rate the result (`winner` null for a draw); resolves with each slot's rating, by slot index, or null. */
   report(winner: SlotIndex | null): Promise<readonly [SlotRating, SlotRating] | null>;
+  /** The lobby timed out with only one account connected: `absent` never came. Not waited on; failures are ignored. */
+  noShow(absent: string): Promise<unknown>;
 }
 
 interface Slot {
@@ -206,7 +211,7 @@ export class MatchSession {
       this.slots.push(slot);
       conn.slot = slot;
       this.send(slot, "welcome", { slot: slot.index, token: slot.token });
-      if (slot.index === 0) this.lobby = this.clock.setTimeout(() => this.reset(), LOBBY_TIMEOUT_MS);
+      if (slot.index === 0) this.lobby = this.clock.setTimeout(() => this.reset(), this.ranked ? RANKED_LOBBY_TIMEOUT_MS : LOBBY_TIMEOUT_MS);
       this.maybeStart();
     } else if (!this.slots.some((s) => s.conn === null)) {
       this.reject(conn, "full", "match is full");
@@ -278,10 +283,22 @@ export class MatchSession {
     for (const slot of this.slots) if (slot.conn) this.drop(slot.conn, code, reason);
   }
 
-  /** Nobody joined in time: close the lone player's socket and start over, so the id can be reused. */
+  /**
+   * Nobody joined in time: close the lone player's socket and start over, so the id can be reused.
+   * A ranked room first reports the account that never came, if the other one is still here.
+   */
   private reset(): void {
     this.lobby = null;
     if (this.started) return;
+    const present = this.slots.length === 1 && this.slots[0].conn !== null ? this.slots[0].account : null;
+    const absent = present === null ? undefined : this.ranked?.accounts.find((k) => k !== present);
+    if (absent !== undefined) {
+      try {
+        void Promise.resolve(this.ranked!.noShow(absent)).catch(() => {});
+      } catch {
+        // a failed report changes nothing here
+      }
+    }
     for (const slot of this.slots) if (slot.conn) this.send(slot, "error", { code: "no-opponent", message: "nobody joined" });
     this.closeAll(1000, "no-opponent", "nobody joined");
     this.slots = [];

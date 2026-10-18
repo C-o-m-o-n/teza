@@ -146,3 +146,22 @@ describe("matchmaking: keep-alive", () => {
     expect(mm.status("alice")).toEqual({ status: "none" });
   });
 });
+
+describe("matchmaking: pair veto", () => {
+  it("skips a vetoed pair (both keep waiting) and pairs each with someone else", () => {
+    const clock = { t: 5_000_000 };
+    const capped = new Set(["alice|bob"]);
+    const mm = new Matchmaker(() => clock.t, (a, b) => !capped.has([a, b].sort().join("|")));
+    mm.join(alice, 12500);
+    mm.join(bob, 12500);
+    expect(mm.pair()).toEqual([]);
+    expect(mm.size).toBe(2);
+    mm.join(carol, 12500);
+    expect(mm.pair().map((p) => p.players.map((x) => x.key))).toEqual([["alice", "carol"]]);
+    expect(mm.status("bob")).toMatchObject({ status: "waiting" });
+
+    capped.clear(); // the cap lifted (24 h on): they pair again
+    mm.join(alice, 12500);
+    expect(mm.pair().map((p) => p.players.map((x) => x.key))).toEqual([["bob", "alice"]]);
+  });
+});
