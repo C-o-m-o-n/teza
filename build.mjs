@@ -29,12 +29,32 @@ function writeServiceWorker() {
   writeFileSync("dist/sw.js", readFileSync("sw.js", "utf8").replaceAll("__BUILD_ID__", id));
 }
 
+// Static Assets sends the headers in dist/_headers with every asset (the Worker only answers /api/*).
+// The CSP allows only same-origin files plus the one inline script in index.html (the pre-paint
+// theme), by the hash of its exact text, so editing that script can't leave a stale hash behind.
+function contentSecurityPolicy() {
+  const html = readFileSync("index.html", "utf8");
+  const inline = [...html.matchAll(/<script\b([^>]*)>([\s\S]*?)<\/script>/g)].filter((m) => !/\bsrc\s*=/.test(m[1]));
+  if (inline.length !== 1) throw new Error(`index.html must have exactly one inline <script>, found ${inline.length}`);
+  const hash = createHash("sha256").update(inline[0][2]).digest("base64");
+  return [
+    "default-src 'self'", `script-src 'self' 'sha256-${hash}'`, "style-src 'self'", "img-src 'self'", "font-src 'self'",
+    "connect-src 'self' wss://teza.comonhq.com", "worker-src 'self'", "manifest-src 'self'", "object-src 'none'",
+    "base-uri 'none'", "form-action 'none'", "frame-ancestors 'none'",
+  ].join("; ");
+}
+
+function writeHeaders() {
+  writeFileSync("dist/_headers", `/*\n  Content-Security-Policy: ${contentSecurityPolicy()}\n`);
+}
+
 const copyStatic = {
   name: "copy-static",
   setup(b) {
     b.onEnd(() => {
       for (const file of files) cpSync(file, `dist/${file}`);
       for (const dir of dirs) cpSync(dir, `dist/${dir}`, { recursive: true });
+      writeHeaders();
       writeServiceWorker();
     });
   },
@@ -56,6 +76,7 @@ if (serve) {
   await ctx.watch();
   // The static files aren't imported by the bundle, so esbuild doesn't see them change
   for (const file of files) watch(file, () => cpSync(file, `dist/${file}`));
+  watch("index.html", writeHeaders);
   for (const dir of dirs) watch(dir, () => cpSync(dir, `dist/${dir}`, { recursive: true }));
   watch("sw.js", writeServiceWorker);
   await ctx.serve({ servedir: "dist", port });

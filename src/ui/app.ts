@@ -40,6 +40,7 @@ function el<K extends keyof HTMLElementTagNameMap>(tag: K, attrs: Record<string,
   const e = document.createElement(tag);
   for (const [k, v] of Object.entries(attrs)) {
     if (k === "class") e.className = v;
+    else if (k === "style") e.style.cssText = v; // through the CSSOM: the CSP (style-src 'self') refuses a style attribute
     else e.setAttribute(k, v);
   }
   for (const c of children) e.append(c);
