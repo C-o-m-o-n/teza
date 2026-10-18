@@ -12,16 +12,17 @@ import { OnlineClient, OnlineResult } from "../net/online";
 import { mergeRecords, passwordError, usernameError } from "../profile";
 import { BoardView, formatTime, Renderer } from "../render/renderer";
 import { ROOM_CODE } from "../server/match";
+import { formatRange, INITIAL_RANGE } from "../server/matchmaking";
 import {
   BIND_LABELS, BIND_ORDER, Bind, Records, Settings, defaultSettings, loadGhost, loadRecords, loadSettings, saveGhost,
   saveRecords, saveSettings,
 } from "../settings";
-import { Profile, fetchMe, finishSession, putRecords, signIn } from "./account";
+import { Profile, PublicRating, fetchMe, finishSession, joinQueue, leaveQueue, putRecords, queueStatus, signIn } from "./account";
 import { classicWordmark, wordmark } from "./brand";
 import { newRoom, onlineAvailable } from "./rooms";
 import { THEMES, themeById } from "./themes";
 
-type Screen = "title" | "menu" | "bots" | "lobby" | "config" | "account" | "play" | "results";
+type Screen = "title" | "menu" | "bots" | "lobby" | "queue" | "config" | "account" | "play" | "results";
 
 const GAME_ACTIONS: Action[] = ["left", "right", "soft", "hard", "cw", "ccw", "180", "hold"];
 const COUNTDOWN = [
@@ -104,6 +105,8 @@ interface Session {
 }
 
 const UNAVAILABLE = "Online play isn't available here";
+const SIGN_IN_FOR_RANKED = "Sign in to play ranked";
+const QUEUE_POLL_MS = 2000; // the queue's keep-alive is 15 s (src/server/matchmaking.ts)
 const OUTCOME_TEXT: Record<OnlineResult["outcome"], [string, string]> = {
   win: ["VICTORY", "YOU WIN"], lose: ["DEFEAT", "YOU LOSE"], draw: ["DRAW", "DRAW"], lost: ["CONNECTION LOST", "NO RESULT"],
 };
@@ -115,11 +118,13 @@ export class App {
   private settings: Settings = loadSettings();
   private records: Records = loadRecords();
   private account: string | null = null; // signed-in username
+  private rating: PublicRating | null = null; // the signed-in account's TR, as `me` last said
   private renderer: Renderer;
   private root: HTMLElement;
   private screen: Screen = "menu";
   private session: Session | null = null;
   private room: OnlineClient | null = null; // the online lobby's connection, until the match starts
+  private queue: { stop: () => void } | null = null; // the ranked queue's polling, while searching
   private held = new Set<Bind>();
   private listening: { bind: Bind; slot: number; btn: HTMLButtonElement } | null = null;
   private lastFrame = performance.now();
@@ -148,6 +153,7 @@ export class App {
   /** Signed in: merge local and server records (better wins), keep the result in both places. */
   private adoptProfile(p: Profile): void {
     this.account = p.username;
+    this.rating = p.rating;
     this.records = mergeRecords(this.records, p.records);
     saveRecords(this.records);
     void putRecords(this.records);
@@ -366,7 +372,11 @@ export class App {
       garbage: (n) => this.flight(opponentView, playerView, n, player.opts.garbagespeed),
       opponentAway: (ms) => (s.away = ms === null ? null : performance.now() + ms),
       error: (_code, message) => (s.notice = { text: message.toUpperCase(), until: performance.now() + 3000 }),
-      end: (result) => this.endSession(result.outcome),
+      end: (result) => {
+        // a ranked match changed our TR: the queue screen shows it from `me` next time
+        if (result.rating) void fetchMe().then((p) => p && (this.rating = p.rating));
+        this.endSession(result.outcome);
+      },
     };
     this.mount(s);
   }
@@ -557,6 +567,10 @@ export class App {
         sfx.menu();
         this.leaveRoom();
         this.showBots();
+      } else if (this.screen === "queue") {
+        sfx.menu();
+        this.cancelQueue();
+        this.showBots();
       } else if (this.screen !== "menu") {
         sfx.menu();
         this.showMenu();
@@ -715,6 +729,7 @@ export class App {
       // Signed out. A shared device must not hand these records to the next player. After a 401 the
       // session had already ended and this last upload was refused; the server keeps every earlier one.
       this.account = null;
+      this.rating = null;
       this.records = { vs: {} };
       saveRecords(this.records);
       if (this.screen === "menu") this.showMenu(false);
@@ -813,6 +828,17 @@ export class App {
         accent: "#7a3fe0", title: "JOIN ROOM", tagline: "Enter the 6-letter code a friend sent you.",
         glyph: "CODE", meta: "ONLINE", index: bars.length + 1, onClick: () => void online(() => this.showJoin()),
       }),
+      // "RANKED 1V1", not "RANKED": that is a bot's name (its records are kept under it)
+      this.bar({
+        accent: "#e07a1f", title: "RANKED 1V1", tagline: "Signed in: a player near your TR.",
+        glyph: "TR", meta: "ONLINE", index: bars.length + 2, onClick: () => void (async () => {
+          unavailable.textContent = "";
+          const joined = await this.startQueue();
+          if (this.screen !== "bots") return;
+          if (joined === "signed-out") unavailable.textContent = SIGN_IN_FOR_RANKED;
+          else if (joined === "unavailable") unavailable.textContent = UNAVAILABLE;
+        })(),
+      }),
     );
     const page = this.subPage("VERSUS", "Pick an opponent. First to top out loses.",
       el("nav", { class: "bars dense" }, ...bars),
@@ -828,7 +854,7 @@ export class App {
    * The thin WebSocket adapter for the online client: a same-origin URL (behind the zone's rate
    * limit), never a fixed host.
    */
-  private connect(code: string, mode: "create" | "join"): OnlineClient {
+  private connect(code: string, mode: "create" | "join" | "ranked"): OnlineClient {
     const url = new URL(`/api/match/${code}?mode=${mode}`, location.href);
     url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
     const ws = new WebSocket(url);
@@ -849,6 +875,120 @@ export class App {
   private leaveRoom(): void {
     this.room?.leave();
     this.room = null;
+  }
+
+  /** Stop searching (the server is told), and drop a ranked room's socket that hasn't started. */
+  private cancelQueue(): void {
+    this.queue?.stop();
+    this.queue = null;
+    void leaveQueue();
+    this.leaveRoom();
+  }
+
+  /** RANKED MATCH: enter the queue and show the search. Signed out or without a game server, no page. */
+  private async startQueue(): Promise<"waiting" | "signed-out" | "unavailable"> {
+    if (this.queue) return "waiting";
+    const joined = await joinQueue();
+    if (joined !== "waiting") return joined;
+    if (this.screen !== "bots") {
+      void leaveQueue(); // left the page meanwhile
+      return joined;
+    }
+    this.showQueue();
+    return joined;
+  }
+
+  /**
+   * The search: elapsed time, the TR range the server accepts now, our own TR. Polls the queue every
+   * QUEUE_POLL_MS (the poll is the keep-alive); on `matched` opens the ranked socket like a room.
+   */
+  private showQueue(): void {
+    const shownAt = performance.now();
+    const stat = (label: string, value: HTMLElement) => el("div", { class: "stat" }, el("span", {}, label), value);
+    const elapsed = el("p", { class: "room-code", role: "timer", "aria-label": "Time searching" }, "0:00");
+    const range = el("strong", {}, formatRange(INITIAL_RANGE));
+    const tr = el("strong", {}, "…");
+    const status = el("p", { class: "note", role: "status" }, "Searching for an opponent… (ESC to cancel)");
+    const error = el("p", { class: "form-error", role: "alert" });
+    const back = el("button", { class: "ghost-btn", type: "button", "data-nav": "" }, "← CANCEL");
+    back.addEventListener("click", () => {
+      this.cancelQueue();
+      this.showBots();
+    });
+    const page = this.subPage("RANKED", "Matched by TR with another signed-in player. The accepted range widens every 10 seconds.",
+      el("section", { class: "account-form room queue" },
+        el("p", { class: "account-label" }, "SEARCHING"),
+        elapsed,
+        el("div", { class: "stats" }, stat("RANGE", range), stat("YOUR TR", tr)),
+        status,
+        error,
+        el("div", { class: "actions" }, back),
+      ),
+      el("footer", { class: "hint" }, "ESC to cancel"),
+    );
+    this.setScreen("queue", page);
+
+    let timer = 0;
+    const ticker = window.setInterval(() => {
+      const s = Math.floor((performance.now() - shownAt) / 1000);
+      elapsed.textContent = `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
+    }, 1000);
+    const handle = {
+      stop: () => {
+        window.clearInterval(ticker);
+        window.clearTimeout(timer);
+      },
+    };
+    this.queue = handle;
+    const live = () => this.queue === handle;
+    const end = (message: string) => {
+      handle.stop();
+      this.queue = null;
+      status.textContent = "";
+      error.textContent = message;
+    };
+    const showTR = () => (tr.textContent = !this.rating ? "—" : this.rating.tr === null ? "TR HIDDEN" : `TR ${this.rating.tr.toLocaleString("en-US")}`);
+    void fetchMe().then((p) => {
+      if (p) this.rating = p.rating;
+      if (live()) showTR();
+    });
+
+    const poll = async () => {
+      let state = await queueStatus();
+      if (!live()) return;
+      if (state !== null && state !== "signed-out" && state.status === "none") {
+        // dropped (this tab slept past the keep-alive, say): enter again
+        const again = await joinQueue();
+        if (!live()) return;
+        state = again === "signed-out" ? again : again === "waiting" ? { status: "waiting", waited: 0, range: INITIAL_RANGE } : null;
+      }
+      if (state === "signed-out") return end(`${SIGN_IN_FOR_RANKED}. Your session has ended.`);
+      if (state === null) status.textContent = "Can't reach the server. Still trying…";
+      else if (state.status === "waiting") {
+        range.textContent = formatRange(state.range);
+        status.textContent = "Searching for an opponent… (ESC to cancel)";
+      } else if (state.status === "matched") {
+        if (!ROOM_CODE.test(state.code)) return end("The match server answered strangely. Go back and search again.");
+        handle.stop();
+        this.queue = null;
+        status.textContent = "Opponent found. Starting…";
+        const client = this.connect(state.code, "ranked");
+        client.events = {
+          start: () => this.startOnline(client),
+          closed: () => {
+            if (this.room !== client) return;
+            this.room = null;
+            status.textContent = "";
+            error.textContent = client.lastError?.code === "no-opponent"
+              ? "Your opponent never arrived. Go back and search again."
+              : "Couldn't join the ranked match. Go back and search again.";
+          },
+        };
+        return;
+      }
+      timer = window.setTimeout(() => void poll(), QUEUE_POLL_MS);
+    };
+    void poll();
   }
 
   /** The lobby screens (CREATE's code, JOIN's field): one box in the VERSUS layout. */
@@ -1112,6 +1252,7 @@ export class App {
       stat("FINESSE", `${g.stats.finesse}`),
     ];
     const run = { pps: g.pps(), apm: g.apm(), pieces: g.stats.pieces, date: Date.now() };
+    let trLine: HTMLElement | "" = "";
     if (s.online) {
       // the server's word; online results are not records (no bot W-L, nothing sent to the account)
       const result = s.online.result ?? { outcome: "lost", reason: "connection" };
@@ -1119,6 +1260,12 @@ export class App {
       badge = `ONLINE · ${REASON_TEXT[result.reason] ?? result.reason.toUpperCase()}`;
       stats.splice(4, 1); // no finesse count: the online board runs the server's way
       stats.splice(2, 0, stat("APM", g.apm().toFixed(1)), stat("SENT", `${g.stats.sent}`));
+      // ranked: the server's new TR for us, and its change when both TRs were visible
+      const rating = result.rating;
+      if (rating) {
+        const delta = rating.delta === null ? "" : el("span", { class: "delta" }, rating.delta >= 0 ? `+${rating.delta}` : `-${-rating.delta}`);
+        trLine = el("p", { class: "badge tr" }, rating.tr === null ? "TR HIDDEN" : `TR ${rating.tr.toLocaleString("en-US")}`, delta);
+      }
     } else if (s.mode.id === "40l") {
       if (s.outcome === "clear") {
         const t = formatTime(g.frame);
@@ -1169,6 +1316,7 @@ export class App {
       el("p", { class: "headline" }, headline),
       el("p", { class: "big" }, big),
       badge ? el("p", { class: "badge" }, badge) : "",
+      trLine,
       el("div", { class: "stats" }, ...stats),
       el("div", { class: "actions" }, ...(s.online ? [back] : [retry, back])),
     );

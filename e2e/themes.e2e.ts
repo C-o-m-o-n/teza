@@ -170,23 +170,25 @@ test("Classic wordmark: no drop with reduced motion, from the OS or CONFIG", asy
 });
 
 for (const theme of ["classic", "poster"]) {
-  test(`${theme}: VERSUS offers CREATE ROOM and JOIN ROOM, which say so when there is no game server`, async ({ page }) => {
+  test(`${theme}: VERSUS offers CREATE ROOM, JOIN ROOM and RANKED 1V1, which say so when there is no game server`, async ({ page }) => {
     await page.setViewportSize({ width: 1280, height: 720 });
     await seedTheme(page, theme);
     await openMenu(page, server.url);
     await page.locator("button.bar", { hasText: "VERSUS" }).click();
     await expect(ui(page)).toHaveAttribute("data-screen", "bots");
     const titles = page.locator("nav.bars .bar-title");
-    await expect(titles).toHaveText(["ROOKIE", "CASUAL", "RANKED", "PRO", "CREATE ROOM", "JOIN ROOM"]);
-    // all six fit a 1280x720 screen
+    await expect(titles).toHaveText(["ROOKIE", "CASUAL", "RANKED", "PRO", "CREATE ROOM", "JOIN ROOM", "RANKED 1V1"]);
+    // all seven fit a 1280x720 screen, and nothing runs off it sideways
     for (const box of await page.locator("nav.bars .bar").evaluateAll((bars) => bars.map((b) => b.getBoundingClientRect().toJSON()))) {
       expect(box.top).toBeGreaterThanOrEqual(0);
       expect(box.bottom).toBeLessThanOrEqual(720);
+      expect(box.right).toBeLessThanOrEqual(1280);
     }
+    expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(1280);
 
-    // this static server answers /api/* with 204: no rooms here, and the page stays
+    // this static server answers /api/* with 204: no rooms or queue here, and the page stays
     const alert = page.locator(".form-error");
-    for (const bar of ["CREATE ROOM", "JOIN ROOM"]) {
+    for (const bar of ["CREATE ROOM", "JOIN ROOM", "RANKED 1V1"]) {
       await page.locator("button.bar", { hasText: bar }).click();
       await expect(alert).toHaveText("Online play isn't available here");
       await expect(ui(page)).toHaveAttribute("data-screen", "bots");
@@ -206,5 +208,64 @@ for (const theme of ["classic", "poster"]) {
     expect(box.x + box.width).toBeLessThanOrEqual(1280);
     await page.keyboard.press("Escape");
     await expect(ui(page)).toHaveAttribute("data-screen", "bots");
+  });
+}
+
+for (const theme of ["classic", "poster"]) {
+  test(`${theme}: RANKED 1V1 asks to sign in, searches with the range and own TR, and ESC leaves the queue`, async ({ page }) => {
+    await page.setViewportSize({ width: 1280, height: 720 });
+    await seedTheme(page, theme);
+    await openMenu(page, server.url);
+    await page.locator("button.bar", { hasText: "VERSUS" }).click();
+    const alert = page.locator(".form-error");
+
+    // a game server, signed out: it says so and stays on VERSUS
+    await page.route("**/api/account/queue/join", (route) => route.fulfill({ status: 401, json: { error: "Not signed in." } }));
+    await page.locator("button.bar", { hasText: "RANKED 1V1" }).click();
+    await expect(alert).toHaveText("Sign in to play ranked");
+    await expect(ui(page)).toHaveAttribute("data-screen", "bots");
+    // the browser logs the refused request itself; that one is expected here
+    problems = problems.filter((p) => !p.includes("status of 401"));
+
+    // signed in: the search screen, polling every 2 s; nobody is found, so no socket is opened
+    const calls: string[] = [];
+    let polls = 0;
+    await page.unroute("**/api/account/queue/join");
+    await page.route("**/api/account/queue/*", (route) => {
+      const path = new URL(route.request().url()).pathname;
+      calls.push(`${route.request().method()} ${path}`);
+      if (path.endsWith("/status")) {
+        polls++;
+        return route.fulfill({ json: { status: "waiting", waited: polls * 2, range: polls > 1 ? 1000 : 500 } });
+      }
+      return route.fulfill({ json: { status: path.endsWith("/join") ? "waiting" : "none" } });
+    });
+    await page.route("**/api/account/me", (route) => route.fulfill({
+      json: { username: "Alice", createdAt: 0, records: { vs: {} }, rating: { tr: null, games: 2 } },
+    }));
+    await page.locator("button.bar", { hasText: "RANKED 1V1" }).click();
+    await expect(ui(page)).toHaveAttribute("data-screen", "queue");
+    const box = page.locator(".room.queue");
+    await expect(box).toContainText("SEARCHING");
+    await expect(box.locator(".stat", { hasText: "YOUR TR" })).toContainText("TR HIDDEN");
+    await expect(box.locator(".stat", { hasText: "RANGE" })).toContainText("±500");
+    await expect(box.locator(".stat", { hasText: "RANGE" })).toContainText("±1000", { timeout: 5000 });
+    await expect(page.locator(".room-code")).not.toHaveText("0:00");
+    // legible: the theme's text colour on its background, and the box stays on screen
+    for (const sel of [".room .account-label", ".room .stat strong", ".room-code"]) {
+      const color = await page.locator(sel).first().evaluate((e) => getComputedStyle(e).color);
+      expect(color).not.toBe(await page.evaluate(() => getComputedStyle(document.body).backgroundColor));
+    }
+    const rect = (await box.boundingBox())!;
+    expect(rect.x + rect.width).toBeLessThanOrEqual(1280);
+    expect(rect.y + rect.height).toBeLessThanOrEqual(720);
+
+    await page.keyboard.press("Escape");
+    await expect(ui(page)).toHaveAttribute("data-screen", "bots");
+    await expect.poll(() => calls.filter((c) => c === "POST /api/account/queue/leave").length).toBe(1);
+    expect(calls[0]).toBe("POST /api/account/queue/join");
+    const after = polls;
+    await page.waitForTimeout(2500);
+    expect(polls).toBe(after); // polling stopped
   });
 }

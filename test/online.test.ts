@@ -411,3 +411,27 @@ describe("online: ending", () => {
     expect(a.client.result).toEqual({ outcome: "lost", reason: "connection" });
   });
 });
+
+describe("online: ranked end", () => {
+  /** A client in a match, fed `end` with `d` straight from a fake server. */
+  function endWith(d: Record<string, unknown>) {
+    const client = new OnlineClient({ send: () => {}, close: () => {} }, () => 0);
+    client.receive(JSON.stringify({ t: "welcome", s: 1, a: 0, d: { slot: 0, token: "0".repeat(32) } }));
+    client.receive(JSON.stringify({ t: "start", s: 2, a: 0, d: { seed: 7, options: {}, handling: MATCH_HANDLING } }));
+    client.receive(JSON.stringify({ t: "end", s: 3, a: 0, d: { winner: 0, reason: "topout", ...d } }));
+    return client.result;
+  }
+
+  it("exposes the rating from end", () => {
+    expect(endWith({ rating: { tr: 13120, delta: 120 } })).toEqual({ outcome: "win", reason: "topout", rating: { tr: 13120, delta: 120 } });
+    expect(endWith({ rating: { tr: 13120, delta: null } })?.rating).toEqual({ tr: 13120, delta: null });
+    expect(endWith({ rating: { tr: null, delta: null } })?.rating).toEqual({ tr: null, delta: null });
+  });
+
+  it("ignores a missing or malformed rating, keeping the outcome", () => {
+    for (const rating of [undefined, null, 5, "x", [], {}, { tr: "1", delta: null }, { tr: 1, delta: "2" }, { tr: true, delta: null }, { tr: 1 }]) {
+      const result = endWith(rating === undefined ? {} : { rating });
+      expect(result).toEqual({ outcome: "win", reason: "topout" });
+    }
+  });
+});

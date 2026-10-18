@@ -225,7 +225,7 @@ button { font: inherit; color: inherit; }
   padding: 6px 12px;
   margin-right: 90px;
 }
-/* VERSUS stacks six bars (four bots, two online rooms): tighter, so they fit a 720px screen */
+/* VERSUS stacks seven bars (four bots, two online rooms, ranked): tighter, so they fit a 720px screen */
 :where(html:not([data-theme="poster"])) .bars.dense { gap: 8px; }
 :where(html:not([data-theme="poster"])) .bars.dense .bar { min-height: 84px; padding: 12px 34px 11px 30px; }
 :where(html:not([data-theme="poster"])) .bars.dense .bar-title { font-size: 38px; }
@@ -286,6 +286,11 @@ button { font: inherit; color: inherit; }
   user-select: all;
 }
 :where(html:not([data-theme="poster"])) .room .note { margin: 0 0 6px; font-size: 16px; }
+/* the ranked search: range and own TR under the elapsed time */
+:where(html:not([data-theme="poster"])) .room .stats { display: grid; grid-template-columns: repeat(2, 1fr); gap: 0 24px; margin: 0 0 14px; }
+:where(html:not([data-theme="poster"])) .room .stat { padding: 8px 0; border-bottom: 1px solid var(--line); }
+:where(html:not([data-theme="poster"])) .room .stat span { display: block; color: var(--muted); font-size: 12px; letter-spacing: 0.16em; }
+:where(html:not([data-theme="poster"])) .room .stat strong { font-family: var(--display); font-weight: 400; font-size: 24px; }
 :where(html:not([data-theme="poster"])) .ghost-btn:disabled { opacity: 0.5; cursor: wait; }
 
 /* ------------------------------------------------------------------ config */
@@ -392,6 +397,9 @@ button { font: inherit; color: inherit; }
   font-family: var(--display);
   font-size: 16px;
 }
+/* ranked: the TR line under the outcome badge */
+:where(html:not([data-theme="poster"])) .results .badge.tr { margin-top: 8px; }
+:where(html:not([data-theme="poster"])) .results .badge .delta { margin-left: 0.8em; }
 :where(html:not([data-theme="poster"])) .results .stats {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(130px, 1fr));
@@ -583,9 +591,10 @@ button { font: inherit; color: inherit; }
   padding: 5px 10px;
   margin-right: 90px;
 }
-/* VERSUS stacks six bars (four bots, two online rooms): tighter, stepping in one column a row */
-:where(html[data-theme="poster"]) .bars.dense .bar { margin-left: calc(var(--i) * var(--col)); padding: 8px 34px 9px 34px; }
-:where(html[data-theme="poster"]) .bars.dense .bar-title { font-size: 46px; }
+/* VERSUS stacks seven bars (four bots, two online rooms, ranked): tighter, stepping in one column a row */
+:where(html[data-theme="poster"]) .bars.dense .bar { margin-left: calc(var(--i) * var(--col)); padding: 5px 34px 6px 34px; }
+:where(html[data-theme="poster"]) .bars.dense .bar-title { font-size: 40px; }
+:where(html[data-theme="poster"]) .bars.dense .bar-tagline { margin-top: 2px; }
 :where(html[data-theme="poster"]) .bars.dense .bar-glyph { font-size: 120px; }
 
 :where(html[data-theme="poster"]) .menu-foot {
@@ -786,6 +795,11 @@ button { font: inherit; color: inherit; }
   user-select: all;
 }
 :where(html[data-theme="poster"]) .room .note { margin: 0 0 6px; font-size: 16px; }
+/* the ranked search: range and own TR under the elapsed time */
+:where(html[data-theme="poster"]) .room .stats { display: grid; grid-template-columns: repeat(2, 1fr); gap: 0 24px; margin: 0 0 14px; }
+:where(html[data-theme="poster"]) .room .stat { padding: 8px 0; border-bottom: 1px solid var(--line); }
+:where(html[data-theme="poster"]) .room .stat span { display: block; color: var(--muted); font-size: 12px; letter-spacing: 0.16em; }
+:where(html[data-theme="poster"]) .room .stat strong { font-family: var(--display); font-weight: 400; font-size: 24px; }
 :where(html[data-theme="poster"]) .ghost-btn:disabled { opacity: 0.5; cursor: wait; }
 
 /* ------------------------------------------------------------------ config */
@@ -913,6 +927,9 @@ button { font: inherit; color: inherit; }
   font-family: var(--display);
   font-size: 16px;
 }
+/* ranked: the TR line under the outcome badge */
+:where(html[data-theme="poster"]) .results .badge.tr { margin-top: 8px; }
+:where(html[data-theme="poster"]) .results .badge .delta { margin-left: 0.8em; }
 :where(html[data-theme="poster"]) .results .stats {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(130px, 1fr));

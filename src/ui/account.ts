@@ -5,9 +5,16 @@
 
 import { parseRecords, Records } from "../profile";
 
+/** What the server shows of a rating: the TR (null while hidden) and the ranked games played. */
+export interface PublicRating {
+  tr: number | null;
+  games: number;
+}
+
 export interface Profile {
   username: string;
   records: Records;
+  rating: PublicRating | null; // only `me` carries it
 }
 
 export const REQUEST_TIMEOUT_MS = 8000;
@@ -39,9 +46,17 @@ async function readJson(res: Response): Promise<Record<string, unknown> | null> 
   }
 }
 
+const finite = (v: unknown): v is number => typeof v === "number" && Number.isFinite(v);
+
+function toRating(x: unknown): PublicRating | null {
+  if (typeof x !== "object" || x === null) return null;
+  const { tr, games } = x as Record<string, unknown>;
+  return (tr === null || finite(tr)) && finite(games) ? { tr, games } : null;
+}
+
 function toProfile(x: Record<string, unknown> | null): Profile | null {
   if (!x || typeof x.username !== "string") return null;
-  return { username: x.username, records: parseRecords(x.records) ?? { vs: {} } };
+  return { username: x.username, records: parseRecords(x.records) ?? { vs: {} }, rating: toRating(x.rating) };
 }
 
 /** The signed-in profile, or null when signed out or the server can't be reached. */
@@ -91,4 +106,35 @@ export async function finishSession(records: Records): Promise<boolean> {
   const upload = await uploadRecords(records);
   if (upload !== "ok") return upload === "expired";
   return (await signOut()) !== "failed";
+}
+
+/** The ranked queue's answer to a poll (README "Ratings and ranked"). */
+export type QueueState =
+  | { status: "waiting"; waited: number; range: number }
+  | { status: "matched"; code: string }
+  | { status: "none" };
+
+/**
+ * Enter the ranked queue: "waiting", "signed-out" (401), or "unavailable" when there is no game
+ * server here (the static servers answer 404 or 204) or it can't be reached.
+ */
+export async function joinQueue(): Promise<"waiting" | "signed-out" | "unavailable"> {
+  const res = await send("POST", "queue/join", {});
+  if (res?.status === 401) return "signed-out";
+  return res?.status === 200 && (await readJson(res))?.status === "waiting" ? "waiting" : "unavailable";
+}
+
+/** One poll of the queue (it also keeps the entry alive): the state, "signed-out", or null on a network or server error. */
+export async function queueStatus(): Promise<QueueState | "signed-out" | null> {
+  const res = await send("GET", "queue/status");
+  if (res?.status === 401) return "signed-out";
+  const x = res?.status === 200 ? await readJson(res) : null;
+  if (x?.status === "none") return { status: "none" };
+  if (x?.status === "matched" && typeof x.code === "string") return { status: "matched", code: x.code };
+  if (x?.status === "waiting" && finite(x.waited) && finite(x.range)) return { status: "waiting", waited: x.waited, range: x.range };
+  return null;
+}
+
+export async function leaveQueue(): Promise<void> {
+  await send("POST", "queue/leave", {});
 }
