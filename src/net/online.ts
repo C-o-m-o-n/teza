@@ -39,6 +39,7 @@ export type OnlineOutcome = "win" | "lose" | "draw" | "lost"; // lost: the conne
 export interface OnlineResult {
   outcome: OnlineOutcome;
   reason: string; // the server's (topout, disconnect, idle), or "connection"
+  rating?: { tr: number | null; delta: number | null }; // ranked: our TR after the match (null: hidden) and its change
 }
 
 /** What the client tells the screen. Every hook is optional. */
@@ -77,6 +78,12 @@ function isObject(v: unknown): v is Record<string, unknown> {
 
 function finite(v: unknown): v is number {
   return typeof v === "number" && Number.isFinite(v);
+}
+
+/** A ranked `end`'s `rating`, or undefined when it is missing or malformed (the result still stands). */
+function rating(v: unknown): OnlineResult["rating"] {
+  if (!isObject(v) || !(v.tr === null || finite(v.tr)) || !(v.delta === null || finite(v.delta))) return undefined;
+  return { tr: v.tr, delta: v.delta };
 }
 
 type Listeners = { listeners: unknown[] };
@@ -214,7 +221,10 @@ export class OnlineClient {
         if (this.phase === "over") return;
         const winner = d.winner;
         const outcome = winner === null ? "draw" : winner === this.slot ? "win" : "lose";
-        this.finish({ outcome, reason: typeof d.reason === "string" ? d.reason : "" });
+        const result: OnlineResult = { outcome, reason: typeof d.reason === "string" ? d.reason : "" };
+        const r = rating(d.rating);
+        if (r) result.rating = r;
+        this.finish(result);
         return;
       }
       case "error":
