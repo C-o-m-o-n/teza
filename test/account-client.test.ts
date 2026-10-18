@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { REQUEST_TIMEOUT_MS, finishSession, putRecords, signOut } from "../src/ui/account";
+import { REQUEST_TIMEOUT_MS, fetchMe, finishSession, joinQueue, putRecords, queueStatus, signOut } from "../src/ui/account";
 import { Records } from "../src/profile";
 
 const records: Records = { "40l": { value: 2500, pps: 2, apm: 60, pieces: 100, date: 0 }, vs: { ROOKIE: { wins: 1, losses: 4 } } };
@@ -92,5 +92,51 @@ describe("account client", () => {
     await vi.advanceTimersByTimeAsync(REQUEST_TIMEOUT_MS);
     await logout;
     expect(done).toBe(false);
+  });
+});
+
+describe("ranked queue client", () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  function stubJson(...answers: [number, unknown][]): string[] {
+    const calls: string[] = [];
+    vi.stubGlobal("fetch", (url: string, init: RequestInit) => {
+      calls.push(`${init.method} ${url} ${(init.headers as Record<string, string>)["Content-Type"] ?? ""}`.trim());
+      const [status, body] = answers.shift() ?? [500, null];
+      return Promise.resolve(new Response(body === null || status === 204 ? null : JSON.stringify(body), { status }));
+    });
+    return calls;
+  }
+
+  it("joinQueue tells waiting, signed out and no game server apart", async () => {
+    const calls = stubJson([200, { status: "waiting" }], [401, { error: "Not signed in." }], [404, null], [204, null], [500, null]);
+    expect(await joinQueue()).toBe("waiting");
+    expect(await joinQueue()).toBe("signed-out");
+    expect(await joinQueue()).toBe("unavailable"); // npm start
+    expect(await joinQueue()).toBe("unavailable"); // the e2e server
+    expect(await joinQueue()).toBe("unavailable");
+    expect(calls[0]).toBe("POST /api/account/queue/join application/json");
+  });
+
+  it("queueStatus reads waiting, matched and none, and nothing malformed", async () => {
+    stubJson(
+      [200, { status: "waiting", waited: 12, range: 1000 }], [200, { status: "matched", code: "ABCDEF" }], [200, { status: "none" }],
+      [401, {}], [200, { status: "waiting", range: "500" }], [500, null],
+    );
+    expect(await queueStatus()).toEqual({ status: "waiting", waited: 12, range: 1000 });
+    expect(await queueStatus()).toEqual({ status: "matched", code: "ABCDEF" });
+    expect(await queueStatus()).toEqual({ status: "none" });
+    expect(await queueStatus()).toBe("signed-out");
+    expect(await queueStatus()).toBeNull();
+    expect(await queueStatus()).toBeNull();
+  });
+
+  it("fetchMe keeps the public rating, if well formed", async () => {
+    stubJson(
+      [200, { username: "Alice", records: { vs: {} }, rating: { tr: null, games: 3 } }],
+      [200, { username: "Alice", records: { vs: {} }, rating: { tr: "x", games: 3 } }],
+    );
+    expect((await fetchMe())?.rating).toEqual({ tr: null, games: 3 });
+    expect((await fetchMe())?.rating).toBeNull();
   });
 });
