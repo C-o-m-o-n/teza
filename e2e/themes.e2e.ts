@@ -170,15 +170,15 @@ test("Classic wordmark: no drop with reduced motion, from the OS or CONFIG", asy
 });
 
 for (const theme of ["classic", "poster"]) {
-  test(`${theme}: VERSUS offers CREATE ROOM, JOIN ROOM and RANKED 1V1, which say so when there is no game server`, async ({ page }) => {
+  test(`${theme}: VERSUS offers CREATE ROOM, JOIN ROOM, RANKED 1V1 and LEADERBOARD, which say so when there is no game server`, async ({ page }) => {
     await page.setViewportSize({ width: 1280, height: 720 });
     await seedTheme(page, theme);
     await openMenu(page, server.url);
     await page.locator("button.bar", { hasText: "VERSUS" }).click();
     await expect(ui(page)).toHaveAttribute("data-screen", "bots");
     const titles = page.locator("nav.bars .bar-title");
-    await expect(titles).toHaveText(["ROOKIE", "CASUAL", "RANKED", "PRO", "CREATE ROOM", "JOIN ROOM", "RANKED 1V1"]);
-    // all seven fit a 1280x720 screen, and nothing runs off it sideways
+    await expect(titles).toHaveText(["ROOKIE", "CASUAL", "RANKED", "PRO", "CREATE ROOM", "JOIN ROOM", "RANKED 1V1", "LEADERBOARD"]);
+    // all eight fit a 1280x720 screen, and nothing runs off it sideways
     for (const box of await page.locator("nav.bars .bar").evaluateAll((bars) => bars.map((b) => b.getBoundingClientRect().toJSON()))) {
       expect(box.top).toBeGreaterThanOrEqual(0);
       expect(box.bottom).toBeLessThanOrEqual(720);
