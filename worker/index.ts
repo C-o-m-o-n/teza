@@ -1,6 +1,7 @@
 // The `teza` Worker. Static files in dist/ are served by Cloudflare's asset handler; only
 // /api/* (see `run_worker_first` in wrangler.jsonc) and asset misses reach this script.
-// POST /api/room issues a room code and reserves it with that code's `Match` object for 2 minutes;
+// POST /api/room issues a room code and reserves it with that code's `Match` object for 2 minutes
+// (GET /api/room only answers that online play is here, without touching any object);
 // GET /api/match/<code>?mode=create|join with `Upgrade: websocket` opens (only an issued code) or
 // joins that room's Durable Object. A player coming back offers the subprotocols `teza` and
 // `resume.<token>.<peerAck>` instead of `mode`, checked before the upgrade (the token is never in
@@ -67,8 +68,12 @@ export default {
       return env.ACCOUNTS.get(env.ACCOUNTS.idFromName("accounts")).fetch(new Request(request, { body }));
     }
     if (path === "/api/room") {
-      if (request.method !== "POST") return new Response("Method not allowed", { status: 405, headers: { Allow: "POST" } });
+      if (request.method !== "POST" && request.method !== "GET") {
+        return new Response("Method not allowed", { status: 405, headers: { Allow: "GET, POST" } });
+      }
       if (!sameOrigin(request)) return crossOrigin();
+      // GET only says online play is served here (JOIN's check before its socket), reserving nothing
+      if (request.method === "GET") return Response.json({ online: true });
       // The code's `Match` object records the claim; `mode=create` needs it (Match.fetch).
       for (let i = 0; i < ROOM_ATTEMPTS; i++) {
         const code = newRoomCode();
@@ -224,6 +229,8 @@ export class Accounts extends DurableObject<Env> {
       created_at INTEGER NOT NULL,
       records TEXT NOT NULL
     )`);
+    // For the daily registration cap (accountsCreatedSince).
+    sql.exec("CREATE INDEX IF NOT EXISTS accounts_by_created ON accounts (created_at)");
     sql.exec(`CREATE TABLE IF NOT EXISTS sessions (
       token_hash TEXT PRIMARY KEY,
       username_key TEXT NOT NULL,
@@ -266,6 +273,9 @@ export class Accounts extends DurableObject<Env> {
       },
       accountCount() {
         return sql.exec<{ n: number }>("SELECT COUNT(*) AS n FROM accounts").one().n;
+      },
+      accountsCreatedSince(since) {
+        return sql.exec<{ n: number }>("SELECT COUNT(*) AS n FROM accounts WHERE created_at >= ?", since).one().n;
       },
       setRecords(key, records) {
         sql.exec("UPDATE accounts SET records = ? WHERE username_key = ?", records, key);

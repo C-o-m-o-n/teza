@@ -5,7 +5,7 @@
 // Passwords are stored only as PBKDF2-SHA-256 (random 16-byte salt, 100000 iterations,
 // both kept inside the stored value). Sessions are a random 32-byte token in an HttpOnly
 // `__Host-` cookie; only its SHA-256 is stored. Signing in ends the account's other sessions, and
-// registration stops at MAX_ACCOUNTS.
+// registration is capped per day (MAX_REGISTRATIONS_PER_DAY) and, as a storage backstop, in total (MAX_ACCOUNTS).
 //
 // Ratings (rating.ts) are kept per account; an account without a row has the default rating.
 // The ranked queue (/api/account/queue/*, matchmaking.ts) pairs signed-in players, and each
@@ -26,7 +26,11 @@ import { calcTR, DEFAULT_RATING, Rating, tdisplay, updateGlicko2 } from "./ratin
 export const COOKIE_NAME = "__Host-teza_session";
 /** The name before `__Host-` (Path=/api). Read only, as a fallback; remove 30 days (SESSION_TTL_S) after the rename is deployed. */
 export const LEGACY_COOKIE_NAME = "teza_session";
-export const MAX_ACCOUNTS = 20_000; // registration answers 503 at this many accounts
+// Registration answers 503 once REGISTRATION_WINDOW_MS has seen MAX_REGISTRATIONS_PER_DAY new accounts, so
+// filling the cap blocks sign-ups for one window at most, not for good; MAX_ACCOUNTS only bounds storage.
+export const MAX_REGISTRATIONS_PER_DAY = 500;
+export const REGISTRATION_WINDOW_MS = 24 * 60 * 60 * 1000;
+export const MAX_ACCOUNTS = 200_000;
 export const SESSION_TTL_S = 30 * 24 * 60 * 60;
 export const PBKDF2_ITERATIONS = 100_000; // the Workers WebCrypto maximum
 export const MAX_BODY_BYTES = 4096;
@@ -72,6 +76,8 @@ export interface AccountStore {
   /** False (and nothing written) if `key` is taken. */
   insertAccount(key: string, row: AccountRow): boolean;
   accountCount(): number;
+  /** Accounts created at or after `since` (ms). */
+  accountsCreatedSince(since: number): number;
   setRecords(key: string, records: string): void;
   session(tokenHash: string): SessionRow | null;
   insertSession(tokenHash: string, row: SessionRow): void;
@@ -400,11 +406,13 @@ export async function handleAccount(
       const key = (username as string).toLowerCase();
       if (route === "register") {
         const full = () => fail(503, "Registration is full right now.");
-        if (store.accountCount() >= MAX_ACCOUNTS) return full();
+        const isFull = () => store.accountsCreatedSince(now() - REGISTRATION_WINDOW_MS) >= MAX_REGISTRATIONS_PER_DAY ||
+          store.accountCount() >= MAX_ACCOUNTS;
+        if (isFull()) return full();
         if (store.account(key)) return fail(409, "That username is taken.");
         const row = { username: username as string, passwordHash: await hashPassword(password as string), createdAt: now(), records: JSON.stringify({ vs: {} }) };
         // checked again on insert: another register may have finished while this one was hashing
-        if (store.accountCount() >= MAX_ACCOUNTS) return full();
+        if (isFull()) return full();
         if (!store.insertAccount(key, row)) return fail(409, "That username is taken.");
         return signIn(key, 201);
       }

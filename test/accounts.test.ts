@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
-  COOKIE_NAME, LEGACY_COOKIE_NAME, MAX_ACCOUNTS, MAX_BODY_BYTES, MAX_PAIR_RATED, NO_SHOW_COOLDOWN_MS, OPEN_ROOM_TIMEOUT_MS, PAIR_WINDOW_MS, QueueHost,
+  COOKIE_NAME, LEGACY_COOKIE_NAME, MAX_ACCOUNTS, MAX_BODY_BYTES, MAX_REGISTRATIONS_PER_DAY, REGISTRATION_WINDOW_MS, MAX_PAIR_RATED, NO_SHOW_COOLDOWN_MS, OPEN_ROOM_TIMEOUT_MS, PAIR_WINDOW_MS, QueueHost,
   RANKED_MATCH_TTL_MS, SESSION_TTL_S, cookieToken, handleAccount, pairAllowed, rateRankedMatch, reportNoShow, sessionKey,
 } from "../src/server/accounts";
 import { Matchmaker, QUEUE_STALE_MS } from "../src/server/matchmaking";
@@ -246,27 +246,24 @@ describe("sessions", () => {
   });
 });
 
-describe("account cap", () => {
-  /** Fills the store to `n` accounts without hashing a password for each. */
-  function fill(n: number): void {
+describe("account caps", () => {
+  /** Adds accounts up to `n` in total without hashing a password for each, created at `at`. */
+  function fill(n: number, at = clock): void {
     for (let i = store.accounts.size; i < n; i++) {
-      store.insertAccount(`filler${i}`, { username: `filler${i}`, passwordHash: "x", createdAt: 0, records: JSON.stringify({ vs: {} }) });
+      store.insertAccount(`filler${i}`, { username: `filler${i}`, passwordHash: "x", createdAt: at, records: JSON.stringify({ vs: {} }) });
     }
   }
+  const registerAs = (username: string) => call("POST", "register", { body: { username, password: PASSWORD } });
 
-  it(`refuses to register past ${MAX_ACCOUNTS} accounts with 503 and stores nothing; login still works`, async () => {
+  it(`refuses a registration past ${MAX_REGISTRATIONS_PER_DAY} new accounts in 24 h with 503 and stores nothing; login still works`, async () => {
     await register();
-    fill(MAX_ACCOUNTS - 1);
-    const last = await call("POST", "register", { body: { username: "Last", password: PASSWORD } });
-    expect(last.status).toBe(201);
-    expect(store.accounts.size).toBe(MAX_ACCOUNTS);
+    fill(MAX_REGISTRATIONS_PER_DAY);
     const sessions = store.sessions.size;
-
-    const full = await call("POST", "register", { body: { username: "Bob", password: PASSWORD } });
+    const full = await registerAs("Bob");
     expect(full.status).toBe(503);
     expect(await full.json()).toEqual({ error: "Registration is full right now." });
     expect(full.headers.get("Set-Cookie")).toBeNull();
-    expect(store.accounts.size).toBe(MAX_ACCOUNTS);
+    expect(store.accounts.size).toBe(MAX_REGISTRATIONS_PER_DAY);
     expect(store.account("bob")).toBeNull();
     expect(store.sessions.size).toBe(sessions);
 
@@ -275,14 +272,29 @@ describe("account cap", () => {
     expect((await call("GET", "me", { cookie: tokenOf(login) })).status).toBe(200);
   });
 
-  it("checks the cap again after hashing, for registrations that overlap", async () => {
-    fill(MAX_ACCOUNTS - 1);
-    const [a, b] = await Promise.all([
-      call("POST", "register", { body: { username: "Alice", password: PASSWORD } }),
-      call("POST", "register", { body: { username: "Bob", password: PASSWORD } }),
-    ]);
-    expect([a.status, b.status].sort()).toEqual([201, 503]);
+  it("a script that fills the daily cap blocks sign-ups only until the window rolls", async () => {
+    fill(MAX_REGISTRATIONS_PER_DAY); // the attack: the whole day's quota at once
+    expect((await registerAs("Bob")).status).toBe(503);
+    clock += REGISTRATION_WINDOW_MS; // the window is [now - 24 h, now]
+    expect((await registerAs("Bob")).status).toBe(503);
+    clock += 1; // the filler accounts are now older than the window
+    expect((await registerAs("Bob")).status).toBe(201);
+    expect(store.account("bob")).not.toBeNull();
+  });
+
+  it(`counts only accounts created in the window, up to the ${MAX_ACCOUNTS} storage backstop`, async () => {
+    fill(MAX_ACCOUNTS - 1, clock - REGISTRATION_WINDOW_MS - 1); // all older than a day
+    expect((await registerAs("Alice")).status).toBe(201);
     expect(store.accounts.size).toBe(MAX_ACCOUNTS);
+    expect((await registerAs("Bob")).status).toBe(503);
+    expect(store.accounts.size).toBe(MAX_ACCOUNTS);
+  });
+
+  it("checks the cap again after hashing, for registrations that overlap", async () => {
+    fill(MAX_REGISTRATIONS_PER_DAY - 1);
+    const [a, b] = await Promise.all([registerAs("Alice"), registerAs("Bob")]);
+    expect([a.status, b.status].sort()).toEqual([201, 503]);
+    expect(store.accounts.size).toBe(MAX_REGISTRATIONS_PER_DAY);
   });
 });
 

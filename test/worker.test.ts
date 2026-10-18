@@ -157,6 +157,22 @@ describe("worker: Origin", () => {
   });
 });
 
+describe("worker: GET /api/room", () => {
+  it("says online play is here without reserving anything", async () => {
+    const e = env();
+    const res = await worker.fetch(new Request("https://teza.example/api/room", { headers: { Origin: "https://teza.example" } }), e.bindings);
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ online: true });
+    expect(e.calls.issued).toEqual([]);
+    expect(e.calls.match).toEqual([]);
+    const cross = await worker.fetch(new Request("https://teza.example/api/room", { headers: { Origin: "https://evil.example" } }), e.bindings);
+    expect(cross.status).toBe(403);
+    const put = await worker.fetch(new Request("https://teza.example/api/room", { method: "PUT" }), e.bindings);
+    expect(put.status).toBe(405);
+    expect(put.headers.get("Allow")).toBe("GET, POST");
+  });
+});
+
 describe("worker: resume", () => {
   it("refuses the old resume query with 400", async () => {
     for (const query of [`resume=${TOKEN}`, `resume=${TOKEN}&ack=3`, `mode=join&ack=3`, `mode=ranked&resume=${TOKEN}`]) {

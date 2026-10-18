@@ -18,6 +18,9 @@ export class MemoryStore implements AccountStore {
   accountCount(): number {
     return this.accounts.size;
   }
+  accountsCreatedSince(since: number): number {
+    return [...this.accounts.values()].filter((a) => a.createdAt >= since).length;
+  }
   setRecords(key: string, records: string): void {
     this.accounts.get(key)!.records = records;
   }
