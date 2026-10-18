@@ -109,6 +109,7 @@ for (const theme of ["classic", "poster"]) {
       await expect(rows.nth(1).locator(".ladder-name")).toHaveText("<b>bold</b>");
       await expect(page.locator(".ladder b")).toHaveCount(0);
       await expect(rows.first()).toBeFocused();
+      await expect(page.locator(".hint")).toHaveText("ENTER for a profile · ESC to go back");
       expect(await layoutProblems(page)).toEqual([]);
       expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(size.width);
       await shot(page, `${tag}-leaderboard`);
@@ -121,7 +122,7 @@ for (const theme of ["classic", "poster"]) {
       const box = page.locator(".profile");
       await expect(box.locator(".account-name")).toHaveText("<b>bold</b>");
       const stats = box.locator(".stat strong");
-      await expect(box.locator(".stat span")).toHaveText(["RANK", "TR", "RANKED GAMES", "JOINED"]);
+      await expect(box.locator(".stat span")).toHaveText(["STANDING", "RATING", "RANKED GAMES", "JOINED"]);
       await expect(stats).toHaveText(["RANK #2", "TR 18,003", "77", "Oct 2, 2026"]);
       await expect(page.locator(".profile b")).toHaveCount(0);
       expect(await layoutProblems(page)).toEqual([]);
@@ -168,6 +169,7 @@ for (const theme of ["classic", "poster"]) {
     await expect(page.locator(".ladder-box .form-error")).toHaveText("Online play isn't available here");
     await expect(page.locator(".ladder-row")).toHaveCount(0);
     await expect(page.locator(".ladder-box .note")).toHaveText("");
+    await expect(page.locator(".hint")).toHaveText("ESC to go back");
     await shot(page, `${theme}-leaderboard-unavailable`);
     await page.keyboard.press("Escape");
     await expect(ui(page)).toHaveAttribute("data-screen", "bots");
@@ -176,6 +178,7 @@ for (const theme of ["classic", "poster"]) {
     await page.locator("button.bar", { hasText: "LEADERBOARD" }).click();
     await expect(page.locator(".ladder-box .note")).toHaveText("NO CALIBRATED PLAYERS YET");
     await expect(page.locator(".ladder-box .form-error")).toHaveText("");
+    await expect(page.locator(".hint")).toHaveText("ESC to go back");
     await shot(page, `${theme}-leaderboard-empty`);
   });
 

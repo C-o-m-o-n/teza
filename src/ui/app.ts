@@ -1049,6 +1049,7 @@ export class App {
     const error = el("p", { class: "form-error", role: "alert" });
     const back = el("button", { class: "ghost-btn", type: "button", "data-nav": "" }, "← BACK");
     back.addEventListener("click", () => this.showBots());
+    const hint = el("footer", { class: "hint" }, "ESC to go back");
     const page = this.subPage("LEADERBOARD", "Calibrated ranked players by TR. Only rated ranked matches count here.",
       el("section", { class: "account-form room ladder-box" },
         el("p", { class: "account-label" }, "TOP 50"),
@@ -1057,10 +1058,11 @@ export class App {
         error,
         el("div", { class: "actions" }, back),
       ),
-      el("footer", { class: "hint" }, "ENTER for a profile · ESC to go back"),
+      hint,
     );
     const fill = (rows: LeaderboardPlayer[]) => {
       this.ladder = rows;
+      hint.textContent = rows.length ? "ENTER for a profile · ESC to go back" : "ESC to go back";
       status.textContent = rows.length ? "" : NO_PLAYERS;
       list.hidden = rows.length === 0;
       list.replaceChildren(...rows.map((p) => {
@@ -1109,7 +1111,8 @@ export class App {
     const name = el("p", { class: "account-name" }, username);
     const status = el("p", { class: "note", role: "status" }, "Loading…");
     const error = el("p", { class: "form-error", role: "alert" });
-    const stats = el("div", { class: "stats" }, stat("RANK", rank), stat("TR", tr), stat("RANKED GAMES", games), stat("JOINED", joined));
+    // the values carry RANK and TR themselves (RANK #2, TR 12,345), so the labels say what they measure
+    const stats = el("div", { class: "stats" }, stat("STANDING", rank), stat("RATING", tr), stat("RANKED GAMES", games), stat("JOINED", joined));
     const back = el("button", { class: "ghost-btn", type: "button", "data-nav": "" }, "← BACK");
     back.addEventListener("click", () => this.showLeaderboard(this.ladder));
     const page = this.subPage("PROFILE", "A player's ranked standing. Only rated ranked matches count here.",
