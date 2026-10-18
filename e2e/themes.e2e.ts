@@ -211,6 +211,27 @@ for (const theme of ["classic", "poster"]) {
   });
 }
 
+// Classic keeps its full-size VERSUS bars (min-height 84 px, 38 px titles) wherever all eight fit beside the title, and the
+// stacked phone layout keeps them too; only shorter side-by-side screens get the tighter stack
+for (const size of [{ width: 1280, height: 900 }, { width: 1440, height: 900 }, { width: 1280, height: 899 }, { width: 390, height: 844 }]) {
+  test(`classic: VERSUS bar size at ${size.width}x${size.height}`, async ({ page }) => {
+    await page.setViewportSize(size);
+    await openMenu(page, server.url);
+    await page.locator("button.bar", { hasText: "VERSUS" }).click();
+    const full = size.height >= 900 || size.width <= 860;
+    const bars = page.locator("nav.bars .bar");
+    await expect(bars).toHaveCount(8);
+    await expect(bars.first().locator(".bar-title")).toHaveCSS("font-size", full ? "38px" : "32px");
+    const boxes = await bars.evaluateAll((els) => els.map((b) => b.getBoundingClientRect().toJSON()));
+    for (const box of boxes) expect(full ? box.height >= 84 : box.height < 84).toBe(true);
+    if (size.width > 860) {
+      const hint = (await page.locator(".hint").boundingBox())!;
+      expect(boxes[0].top).toBeGreaterThanOrEqual(0);
+      expect(boxes[7].bottom).toBeLessThanOrEqual(hint.y);
+    }
+  });
+}
+
 for (const theme of ["classic", "poster"]) {
   test(`${theme}: RANKED 1V1 asks to sign in, searches with the range and own TR, and ESC leaves the queue`, async ({ page }) => {
     await page.setViewportSize({ width: 1280, height: 720 });
