@@ -28,10 +28,11 @@ describe("account client", () => {
     vi.unstubAllGlobals();
   });
 
-  it("putRecords is true only for 2xx; signOut tells 2xx, 401 and other failures apart", async () => {
-    stubFetch(204, 401, 500, "network");
+  it("putRecords is true only for 2xx; signOut tells 2xx, 401, 400 and other failures apart", async () => {
+    stubFetch(204, 401, 400, 500, "network");
     expect(await signOut()).toBe("ok");
     expect(await signOut()).toBe("expired");
+    expect(await signOut()).toBe("invalid");
     expect(await signOut()).toBe("failed");
     expect(await signOut()).toBe("failed");
     stubFetch(200, 400, 401, 503, "network");
@@ -49,15 +50,28 @@ describe("account client", () => {
   });
 
   it("a failed records upload fails sign-out and never logs out", async () => {
-    for (const answer of [500, 400, "network"] as Answer[]) {
+    for (const answer of [500, 503, 403, "network"] as Answer[]) {
       const calls = stubFetch(answer, 204);
       expect(await finishSession(records)).toBe(false);
       expect(calls).toEqual(["PUT /api/account/records"]);
     }
   });
 
+  it("records the server refuses as invalid (400) are dropped: sign-out goes on to log out", async () => {
+    let calls = stubFetch(400, 200);
+    expect(await finishSession(records)).toBe(true);
+    expect(calls).toEqual(["PUT /api/account/records", "POST /api/account/logout"]);
+    calls = stubFetch(400, 401);
+    expect(await finishSession(records)).toBe(true);
+    for (const answer of [500, 400, "network"] as Answer[]) {
+      calls = stubFetch(400, answer);
+      expect(await finishSession(records)).toBe(false);
+      expect(calls).toEqual(["PUT /api/account/records", "POST /api/account/logout"]);
+    }
+  });
+
   it("a failed logout fails sign-out", async () => {
-    for (const answer of [500, 403, "network"] as Answer[]) {
+    for (const answer of [500, 403, 400, "network"] as Answer[]) {
       const calls = stubFetch(200, answer);
       expect(await finishSession(records)).toBe(false);
       expect(calls).toEqual(["PUT /api/account/records", "POST /api/account/logout"]);
