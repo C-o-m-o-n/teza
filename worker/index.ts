@@ -1,8 +1,10 @@
 // The `teza` Worker. Static files in dist/ are served by Cloudflare's asset handler; only
 // /api/* (see `run_worker_first` in wrangler.jsonc) and asset misses reach this script.
-// POST /api/room issues a room code; GET /api/match/<code>?mode=create|join with `Upgrade:
-// websocket` opens or joins that room's Durable Object. A player coming back adds
-// `?resume=<token>&ack=<peerAck>` instead of `mode`, which is checked before the upgrade.
+// POST /api/room issues a room code and reserves it with that code's `Match` object for 2 minutes;
+// GET /api/match/<code>?mode=create|join with `Upgrade: websocket` opens (only an issued code) or
+// joins that room's Durable Object. A player coming back offers the subprotocols `teza` and
+// `resume.<token>.<peerAck>` instead of `mode`, checked before the upgrade (the token is never in
+// the URL). Both routes refuse a browser `Origin` other than the site's own.
 // /api/account/* goes to the single `Accounts` Durable Object (src/server/accounts.ts), which
 // also hosts the ranked queue and the public /api/leaderboard and /api/profile/<username>
 // (src/server/leaderboard.ts). A ranked room (`?mode=ranked`) is registered with its `Match`
@@ -17,7 +19,8 @@ import {
 } from "../src/server/accounts";
 import { handlePublic, isPublicRoute } from "../src/server/leaderboard";
 import {
-  admission, cryptoRandom, MatchSession, newRoomCode, REPORT_TIMEOUT_MS, ResumeRequest, ROOM_CODE, SlotIndex, SlotRating,
+  admit, CLAIM_KEY, ClaimStorage, cryptoRandom, issueClaim, MatchSession, newRoomCode, REPORT_TIMEOUT_MS, resumeRequest, ROOM_CODE, SlotIndex,
+  SlotRating, upgradeHeaders,
 } from "../src/server/match";
 import { RD_HIDDEN } from "../src/server/rating";
 import { Matchmaker, QueuePlayer } from "../src/server/matchmaking";
@@ -30,16 +33,25 @@ export interface Env {
 const MATCH_ROUTE = /^\/api\/match\/([^/]*)$/;
 /** The account key of a ranked socket, set only by the Worker (incoming copies are stripped). */
 const ACCOUNT_HEADER = "X-Teza-Account";
-const TOKEN = /^[0-9a-f]{32}$/;
-const ACK = /^[0-9]{1,15}$/;
+/** The production site. With the request URL's own origin, the only `Origin` the room and match routes accept. */
+const SITE_ORIGIN = "https://teza.comonhq.com";
+const ROOM_ATTEMPTS = 5; // codes `POST /api/room` tries to reserve before giving up with 503
 
-/** `?resume=<token>&ack=<n>` (ack defaults to 0), undefined without `resume`, or null if malformed. */
-function resumeParams(url: URL): ResumeRequest | undefined | null {
-  const token = url.searchParams.get("resume");
-  if (token === null) return undefined;
-  const ack = url.searchParams.get("ack") ?? "0";
-  if (!TOKEN.test(token) || !ACK.test(ack)) return null;
-  return { token, peerAck: Number(ack) };
+/**
+ * False if the request has an `Origin` other than its own URL's or the site's. No `Origin` passes:
+ * browsers always send one on these requests, so a page elsewhere can't drive them without it.
+ */
+function sameOrigin(request: Request): boolean {
+  const origin = request.headers.get("Origin");
+  return origin === null || origin === new URL(request.url).origin || origin === SITE_ORIGIN;
+}
+
+const crossOrigin = () => new Response("Cross-origin request refused", { status: 403 });
+
+/** Why an upgrade's resume is refused before any object is called (400), or null. The resume query of old is gone. */
+function badResume(url: URL, headers: Headers): string | null {
+  if (url.searchParams.has("resume") || url.searchParams.has("ack")) return "Resume moved to the Sec-WebSocket-Protocol header";
+  return resumeRequest(headers) === null ? "Bad resume subprotocol" : null;
 }
 
 export default {
@@ -55,9 +67,14 @@ export default {
       return env.ACCOUNTS.get(env.ACCOUNTS.idFromName("accounts")).fetch(new Request(request, { body }));
     }
     if (path === "/api/room") {
-      // No storage: the room exists once its creator's socket holds a slot (Match.fetch).
       if (request.method !== "POST") return new Response("Method not allowed", { status: 405, headers: { Allow: "POST" } });
-      return Response.json({ code: newRoomCode() }, { status: 201 });
+      if (!sameOrigin(request)) return crossOrigin();
+      // The code's `Match` object records the claim; `mode=create` needs it (Match.fetch).
+      for (let i = 0; i < ROOM_ATTEMPTS; i++) {
+        const code = newRoomCode();
+        if (await env.MATCH.get(env.MATCH.idFromName(code)).issueRoom()) return Response.json({ code }, { status: 201 });
+      }
+      return new Response("No room code available, try again", { status: 503 });
     }
     const route = MATCH_ROUTE.exec(path);
     if (!route) return new Response("Not found", { status: 404 });
@@ -66,10 +83,13 @@ export default {
     if (request.headers.get("Upgrade")?.toLowerCase() !== "websocket") {
       return new Response("Expected a WebSocket upgrade", { status: 426, headers: { Upgrade: "websocket" } });
     }
+    if (!sameOrigin(request)) return crossOrigin();
+    const url = new URL(request.url);
+    const bad = badResume(url, request.headers);
+    if (bad) return new Response(bad, { status: 400 });
     const headers = new Headers(request.headers);
     headers.delete(ACCOUNT_HEADER);
-    const url = new URL(request.url);
-    if (url.searchParams.get("mode") === "ranked" && !url.searchParams.has("resume")) {
+    if (url.searchParams.get("mode") === "ranked" && resumeRequest(request.headers) === undefined) {
       const cookie = request.headers.get("Cookie");
       // no session token at all: answered here, so cookieless upgrades never reach the Accounts object
       if (cookieToken(cookie) === null) return new Response("Sign in to play ranked", { status: 401 });
@@ -94,6 +114,25 @@ const clock = {
 /** One instance per match id. Holds both sockets in memory (no hibernation) for the life of the match. */
 export class Match extends DurableObject<Env> {
   private session = new MatchSession(clock);
+
+  private claims: ClaimStorage = this.ctx.storage; // the issued-code claim (key CLAIM_KEY)
+
+  /**
+   * RPC from `POST /api/room`: reserve this room's code for ROOM_CLAIM_MS, in storage so the claim
+   * outlives an eviction. False if it is claimed already or in use. An alarm deletes it unused.
+   */
+  async issueRoom(): Promise<boolean> {
+    const expires = await issueClaim(this.session, this.claims, Date.now());
+    if (expires === null) return false;
+    await this.ctx.storage.setAlarm(expires);
+    return true;
+  }
+
+  /** Deletes an expired, unused claim, so issued codes leave nothing stored behind. */
+  async alarm(): Promise<void> {
+    const claimed = await this.ctx.storage.get(CLAIM_KEY);
+    if (typeof claimed !== "number" || claimed <= Date.now()) await this.ctx.storage.delete(CLAIM_KEY);
+  }
 
   /**
    * RPC from the matchmaker (Accounts): make this room a ranked match for `players`. False if the
@@ -127,13 +166,14 @@ export class Match extends DurableObject<Env> {
       return new Response("Expected a WebSocket upgrade", { status: 426 });
     }
     const url = new URL(request.url);
-    const resume = resumeParams(url);
-    if (resume === null) return new Response("Bad resume parameters", { status: 400 });
+    const bad = badResume(url, request.headers);
+    if (bad) return new Response(bad, { status: 400 });
+    const resume = resumeRequest(request.headers) ?? undefined;
     if (resume && !this.session.hasToken(resume.token)) return new Response("Unknown resume token", { status: 403 });
     const account = request.headers.get(ACCOUNT_HEADER);
     if (!resume) {
-      // a new player says whether they open the room, join it or take a ranked slot, so nobody takes over a live code
-      const refused = admission(this.session, url.searchParams.get("mode"), account);
+      // a new player says whether they open the room (an issued code), join it or take a ranked slot, so nobody takes over a live code
+      const refused = await admit(this.session, this.claims, url.searchParams.get("mode"), account, Date.now());
       if (refused) return new Response(refused.message, { status: refused.status });
     }
     const [client, server] = Object.values(new WebSocketPair());
@@ -164,7 +204,7 @@ export class Match extends DurableObject<Env> {
       }
     });
     server.addEventListener("error", () => this.session.disconnect(conn));
-    return new Response(null, { status: 101, webSocket: client });
+    return new Response(null, { status: 101, webSocket: client, headers: upgradeHeaders(request.headers) });
   }
 }
 
@@ -189,6 +229,9 @@ export class Accounts extends DurableObject<Env> {
       username_key TEXT NOT NULL,
       expires_at INTEGER NOT NULL
     )`);
+    // For deleteExpiredSessions and deleteSessionsFor; existing databases just gain the indexes.
+    sql.exec("CREATE INDEX IF NOT EXISTS sessions_by_expiry ON sessions (expires_at)");
+    sql.exec("CREATE INDEX IF NOT EXISTS sessions_by_account ON sessions (username_key)");
     // Ratings and the ranked rooms awaiting a result are new tables in this class: no migration needed.
     sql.exec(`CREATE TABLE IF NOT EXISTS ratings (
       username_key TEXT PRIMARY KEY,
@@ -221,6 +264,9 @@ export class Accounts extends DurableObject<Env> {
         return sql.exec("INSERT OR IGNORE INTO accounts VALUES (?, ?, ?, ?, ?)",
           key, row.username, row.passwordHash, row.createdAt, row.records).rowsWritten > 0;
       },
+      accountCount() {
+        return sql.exec<{ n: number }>("SELECT COUNT(*) AS n FROM accounts").one().n;
+      },
       setRecords(key, records) {
         sql.exec("UPDATE accounts SET records = ? WHERE username_key = ?", records, key);
       },
@@ -234,6 +280,9 @@ export class Accounts extends DurableObject<Env> {
       },
       deleteSession(tokenHash) {
         sql.exec("DELETE FROM sessions WHERE token_hash = ?", tokenHash);
+      },
+      deleteSessionsFor(key) {
+        sql.exec("DELETE FROM sessions WHERE username_key = ?", key);
       },
       deleteExpiredSessions(now) {
         sql.exec("DELETE FROM sessions WHERE expires_at <= ?", now);

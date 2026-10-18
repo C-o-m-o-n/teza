@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
-  COOKIE_NAME, MAX_BODY_BYTES, MAX_PAIR_RATED, NO_SHOW_COOLDOWN_MS, OPEN_ROOM_TIMEOUT_MS, PAIR_WINDOW_MS, QueueHost,
+  COOKIE_NAME, LEGACY_COOKIE_NAME, MAX_ACCOUNTS, MAX_BODY_BYTES, MAX_PAIR_RATED, NO_SHOW_COOLDOWN_MS, OPEN_ROOM_TIMEOUT_MS, PAIR_WINDOW_MS, QueueHost,
   RANKED_MATCH_TTL_MS, SESSION_TTL_S, cookieToken, handleAccount, pairAllowed, rateRankedMatch, reportNoShow, sessionKey,
 } from "../src/server/accounts";
 import { Matchmaker, QUEUE_STALE_MS } from "../src/server/matchmaking";
@@ -44,6 +44,7 @@ interface Opts {
   body?: unknown;
   rawBody?: string;
   cookie?: string | null;
+  rawCookie?: string; // a whole Cookie header, instead of `cookie`
   origin?: string;
   contentType?: string | null;
 }
@@ -51,6 +52,7 @@ interface Opts {
 function call(method: string, route: string, opts: Opts = {}): Promise<Response> {
   const headers: Record<string, string> = {};
   if (opts.cookie) headers.Cookie = `${COOKIE_NAME}=${opts.cookie}`;
+  if (opts.rawCookie) headers.Cookie = opts.rawCookie;
   if (opts.origin) headers.Origin = opts.origin;
   let body: string | undefined;
   if (method !== "GET") {
@@ -143,16 +145,68 @@ describe("register and login", () => {
 });
 
 describe("sessions", () => {
-  it("sets an HttpOnly, Secure, SameSite=Strict cookie on /api for 30 days and stores only its hash", async () => {
-    const res = await call("POST", "register", { body: { username: "Alice", password: PASSWORD } });
-    const cookie = res.headers.get("Set-Cookie")!;
-    for (const attr of ["HttpOnly", "Secure", "SameSite=Strict", "Path=/api", `Max-Age=${SESSION_TTL_S}`]) {
-      expect(cookie.split("; ")).toContain(attr);
+  it("sets an HttpOnly, Secure, SameSite=Strict __Host- cookie on / for 30 days, expires the legacy one, and stores only its hash", async () => {
+    for (const res of [
+      await call("POST", "register", { body: { username: "Alice", password: PASSWORD } }),
+      await call("POST", "login", { body: { username: "Alice", password: PASSWORD } }),
+    ]) {
+      const [cookie, legacy, ...rest] = res.headers.getSetCookie();
+      expect(rest).toEqual([]);
+      expect(COOKIE_NAME).toBe("__Host-teza_session");
+      expect(cookie).toMatch(/^__Host-teza_session=[0-9a-f]{64}; /);
+      const attrs = cookie.split("; ").slice(1);
+      expect(attrs.sort()).toEqual(["HttpOnly", `Max-Age=${SESSION_TTL_S}`, "Path=/", "SameSite=Strict", "Secure"]);
+      expect(cookie).not.toMatch(/domain/i);
+      expect(legacy).toBe("teza_session=; HttpOnly; Secure; SameSite=Strict; Path=/api; Max-Age=0");
     }
-    const token = tokenOf(res);
+    const token = tokenOf(await call("POST", "login", { body: { username: "Alice", password: PASSWORD } }));
     expect(token).toMatch(/^[0-9a-f]{64}$/);
     expect(store.sessions.size).toBe(1);
     expect(store.sessions.has(token)).toBe(false);
+  });
+
+  it("still takes a session in the legacy teza_session cookie; the new cookie wins over it", async () => {
+    const token = await register();
+    const legacy = `${LEGACY_COOKIE_NAME}=${token}`;
+    expect((await call("GET", "me", { rawCookie: legacy })).status).toBe(200);
+    expect(await sessionKey(legacy, store, () => clock)).toBe("alice");
+    expect(cookieToken(`${LEGACY_COOKIE_NAME}=${"b".repeat(64)}; ${COOKIE_NAME}=${token}`)).toBe(token);
+    expect((await call("GET", "me", { rawCookie: `${LEGACY_COOKIE_NAME}=${"b".repeat(64)}; ${COOKIE_NAME}=${token}` })).status).toBe(200);
+    expect((await call("GET", "me", { rawCookie: `${COOKIE_NAME}=${"b".repeat(64)}; ${LEGACY_COOKIE_NAME}=${token}` })).status).toBe(401);
+  });
+
+  it("logout expires both cookie names and deletes the sessions in either", async () => {
+    const legacyToken = await register("Bob");
+    const token = await register();
+    const out = await call("POST", "logout", { rawCookie: `${COOKIE_NAME}=${token}; ${LEGACY_COOKIE_NAME}=${legacyToken}` });
+    expect(out.status).toBe(200);
+    expect(out.headers.getSetCookie()).toEqual([
+      "__Host-teza_session=; HttpOnly; Secure; SameSite=Strict; Path=/; Max-Age=0",
+      "teza_session=; HttpOnly; Secure; SameSite=Strict; Path=/api; Max-Age=0",
+    ]);
+    expect(store.sessions.size).toBe(0);
+    const legacyOnly = await register("Carol");
+    expect((await call("POST", "logout", { rawCookie: `${LEGACY_COOKIE_NAME}=${legacyOnly}` })).status).toBe(200);
+    expect((await call("GET", "me", { rawCookie: `${LEGACY_COOKIE_NAME}=${legacyOnly}` })).status).toBe(401);
+  });
+
+  it("signing in ends the account's other sessions, and only that account's", async () => {
+    const bob = await register("Bob");
+    const first = await register();
+    expect((await call("GET", "me", { cookie: first })).status).toBe(200);
+    const second = tokenOf(await call("POST", "login", { body: { username: "alice", password: PASSWORD } }));
+    expect((await call("GET", "me", { cookie: first })).status).toBe(401);
+    expect((await call("GET", "me", { cookie: second })).status).toBe(200);
+    expect((await call("GET", "me", { cookie: bob })).status).toBe(200);
+    expect(store.sessions.size).toBe(2); // one per account
+
+    const third = tokenOf(await call("POST", "login", { body: { username: "Alice", password: PASSWORD } }));
+    expect((await call("GET", "me", { cookie: second })).status).toBe(401);
+    expect((await call("GET", "me", { cookie: third })).status).toBe(200);
+    // a failed login ends nothing
+    expect((await call("POST", "login", { body: { username: "Alice", password: "wrong password!" } })).status).toBe(401);
+    expect((await call("GET", "me", { cookie: third })).status).toBe(200);
+    expect(store.sessions.size).toBe(2);
   });
 
   it("gives 401 for me without a session, with a bad cookie, and after logout", async () => {
@@ -189,6 +243,46 @@ describe("sessions", () => {
     expect(await storedRecords()).toEqual({ vs: {} });
     // the page's own origin is fine
     expect((await call("POST", "login", { origin: ORIGIN, body: { username: "Alice", password: PASSWORD } })).status).toBe(200);
+  });
+});
+
+describe("account cap", () => {
+  /** Fills the store to `n` accounts without hashing a password for each. */
+  function fill(n: number): void {
+    for (let i = store.accounts.size; i < n; i++) {
+      store.insertAccount(`filler${i}`, { username: `filler${i}`, passwordHash: "x", createdAt: 0, records: JSON.stringify({ vs: {} }) });
+    }
+  }
+
+  it(`refuses to register past ${MAX_ACCOUNTS} accounts with 503 and stores nothing; login still works`, async () => {
+    await register();
+    fill(MAX_ACCOUNTS - 1);
+    const last = await call("POST", "register", { body: { username: "Last", password: PASSWORD } });
+    expect(last.status).toBe(201);
+    expect(store.accounts.size).toBe(MAX_ACCOUNTS);
+    const sessions = store.sessions.size;
+
+    const full = await call("POST", "register", { body: { username: "Bob", password: PASSWORD } });
+    expect(full.status).toBe(503);
+    expect(await full.json()).toEqual({ error: "Registration is full right now." });
+    expect(full.headers.get("Set-Cookie")).toBeNull();
+    expect(store.accounts.size).toBe(MAX_ACCOUNTS);
+    expect(store.account("bob")).toBeNull();
+    expect(store.sessions.size).toBe(sessions);
+
+    const login = await call("POST", "login", { body: { username: "Alice", password: PASSWORD } });
+    expect(login.status).toBe(200);
+    expect((await call("GET", "me", { cookie: tokenOf(login) })).status).toBe(200);
+  });
+
+  it("checks the cap again after hashing, for registrations that overlap", async () => {
+    fill(MAX_ACCOUNTS - 1);
+    const [a, b] = await Promise.all([
+      call("POST", "register", { body: { username: "Alice", password: PASSWORD } }),
+      call("POST", "register", { body: { username: "Bob", password: PASSWORD } }),
+    ]);
+    expect([a.status, b.status].sort()).toEqual([201, 503]);
+    expect(store.accounts.size).toBe(MAX_ACCOUNTS);
   });
 });
 
@@ -666,5 +760,7 @@ describe("ranked hardening", () => {
     expect(cookieToken("other=1")).toBeNull();
     expect(cookieToken(`${COOKIE_NAME}=short`)).toBeNull();
     expect(cookieToken(`${COOKIE_NAME}=${"G".repeat(64)}`)).toBeNull();
+    expect(cookieToken(`${LEGACY_COOKIE_NAME}=${token}`)).toBe(token);
+    expect(cookieToken(`Host-teza_session=${token}`)).toBeNull();
   });
 });

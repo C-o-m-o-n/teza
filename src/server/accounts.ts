@@ -4,7 +4,8 @@
 //
 // Passwords are stored only as PBKDF2-SHA-256 (random 16-byte salt, 100000 iterations,
 // both kept inside the stored value). Sessions are a random 32-byte token in an HttpOnly
-// cookie; only its SHA-256 is stored.
+// `__Host-` cookie; only its SHA-256 is stored. Signing in ends the account's other sessions, and
+// registration stops at MAX_ACCOUNTS.
 //
 // Ratings (rating.ts) are kept per account; an account without a row has the default rating.
 // The ranked queue (/api/account/queue/*, matchmaking.ts) pairs signed-in players, and each
@@ -21,7 +22,11 @@ import { Matchmaker, QueuePlayer } from "./matchmaking";
 import { newRoomCode } from "./match";
 import { calcTR, DEFAULT_RATING, Rating, tdisplay, updateGlicko2 } from "./rating";
 
-export const COOKIE_NAME = "teza_session";
+/** `__Host-`: the browser only takes it Secure, Path=/ and without Domain, so a sibling subdomain can't set or shadow it. */
+export const COOKIE_NAME = "__Host-teza_session";
+/** The name before `__Host-` (Path=/api). Read only, as a fallback; remove 30 days (SESSION_TTL_S) after the rename is deployed. */
+export const LEGACY_COOKIE_NAME = "teza_session";
+export const MAX_ACCOUNTS = 20_000; // registration answers 503 at this many accounts
 export const SESSION_TTL_S = 30 * 24 * 60 * 60;
 export const PBKDF2_ITERATIONS = 100_000; // the Workers WebCrypto maximum
 export const MAX_BODY_BYTES = 4096;
@@ -66,10 +71,13 @@ export interface AccountStore {
   account(key: string): AccountRow | null;
   /** False (and nothing written) if `key` is taken. */
   insertAccount(key: string, row: AccountRow): boolean;
+  accountCount(): number;
   setRecords(key: string, records: string): void;
   session(tokenHash: string): SessionRow | null;
   insertSession(tokenHash: string, row: SessionRow): void;
   deleteSession(tokenHash: string): void;
+  /** Every session of the account `key`. */
+  deleteSessionsFor(key: string): void;
   deleteExpiredSessions(now: number): void;
   /** Null for an account that has never been rated. */
   rating(key: string): RatingRow | null;
@@ -153,31 +161,38 @@ async function sha256(s: string): Promise<string> {
   return hex(new Uint8Array(await crypto.subtle.digest("SHA-256", encoder.encode(s))));
 }
 
-function json(status: number, body: unknown, headers: Record<string, string> = {}): Response {
-  return new Response(JSON.stringify(body), {
-    status,
-    headers: { "Content-Type": "application/json", "Cache-Control": "no-store", ...headers },
-  });
+/** `headers` may repeat a name (two `Set-Cookie`s). */
+function json(status: number, body: unknown, headers: [string, string][] | Record<string, string> = {}): Response {
+  const h = new Headers({ "Content-Type": "application/json", "Cache-Control": "no-store" });
+  for (const [name, value] of Array.isArray(headers) ? headers : Object.entries(headers)) h.append(name, value);
+  return new Response(JSON.stringify(body), { status, headers: h });
 }
 
 const fail = (status: number, message: string, headers?: Record<string, string>) => json(status, { error: message }, headers);
 
 function sessionCookie(token: string): string {
-  return `${COOKIE_NAME}=${token}; HttpOnly; Secure; SameSite=Strict; Path=/api; Max-Age=${SESSION_TTL_S}`;
+  return `${COOKIE_NAME}=${token}; HttpOnly; Secure; SameSite=Strict; Path=/; Max-Age=${SESSION_TTL_S}`;
 }
 
-const CLEAR_COOKIE = `${COOKIE_NAME}=; HttpOnly; Secure; SameSite=Strict; Path=/api; Max-Age=0`;
+const CLEAR_COOKIE = `${COOKIE_NAME}=; HttpOnly; Secure; SameSite=Strict; Path=/; Max-Age=0`;
+const CLEAR_LEGACY_COOKIE = `${LEGACY_COOKIE_NAME}=; HttpOnly; Secure; SameSite=Strict; Path=/api; Max-Age=0`;
 
-/**
- * The well-formed `teza_session` token in a `Cookie` header, or null. The Worker uses it to refuse
- * a ranked socket without a session before calling the `Accounts` object.
- */
-export function cookieToken(cookie: string | null): string | null {
+/** The well-formed token in the cookie `name` of a `Cookie` header, or null. */
+function cookieValue(cookie: string | null, name: string): string | null {
   for (const part of (cookie ?? "").split(";")) {
-    const [name, value] = part.trim().split("=");
-    if (name === COOKIE_NAME && value !== undefined && TOKEN.test(value)) return value;
+    const [key, value] = part.trim().split("=");
+    if (key === name && value !== undefined && TOKEN.test(value)) return value;
   }
   return null;
+}
+
+/**
+ * The well-formed session token in a `Cookie` header, or null: `__Host-teza_session`, else the legacy
+ * `teza_session`. The Worker uses it to refuse a ranked socket without a session before calling the
+ * `Accounts` object.
+ */
+export function cookieToken(cookie: string | null): string | null {
+  return cookieValue(cookie, COOKIE_NAME) ?? cookieValue(cookie, LEGACY_COOKIE_NAME);
 }
 
 /** The body as text, or null if it is over MAX_BODY_BYTES. Stops reading once over the limit. */
@@ -366,9 +381,11 @@ export async function handleAccount(
 
   const signIn = async (key: string, status: number): Promise<Response> => {
     const token = hex(crypto.getRandomValues(new Uint8Array(32)));
+    const tokenHash = await sha256(token);
     store.deleteExpiredSessions(now());
-    store.insertSession(await sha256(token), { key, expiresAt: now() + SESSION_TTL_S * 1000 });
-    return json(status, profile(store.account(key)!), { "Set-Cookie": sessionCookie(token) });
+    store.deleteSessionsFor(key); // signing in ends the account's other sessions, so it has one at most
+    store.insertSession(tokenHash, { key, expiresAt: now() + SESSION_TTL_S * 1000 });
+    return json(status, profile(store.account(key)!), [["Set-Cookie", sessionCookie(token)], ["Set-Cookie", CLEAR_LEGACY_COOKIE]]);
   };
 
   /** The signed-in account's key, or null. Expired sessions are deleted. */
@@ -382,9 +399,12 @@ export async function handleAccount(
       if (invalid) return fail(400, invalid);
       const key = (username as string).toLowerCase();
       if (route === "register") {
+        const full = () => fail(503, "Registration is full right now.");
+        if (store.accountCount() >= MAX_ACCOUNTS) return full();
         if (store.account(key)) return fail(409, "That username is taken.");
         const row = { username: username as string, passwordHash: await hashPassword(password as string), createdAt: now(), records: JSON.stringify({ vs: {} }) };
         // checked again on insert: another register may have finished while this one was hashing
+        if (store.accountCount() >= MAX_ACCOUNTS) return full();
         if (!store.insertAccount(key, row)) return fail(409, "That username is taken.");
         return signIn(key, 201);
       }
@@ -395,9 +415,11 @@ export async function handleAccount(
       return signIn(key, 200);
     }
     case "logout": {
-      const token = cookieToken(request.headers.get("Cookie"));
-      if (token) store.deleteSession(await sha256(token));
-      return json(200, {}, { "Set-Cookie": CLEAR_COOKIE });
+      for (const name of [COOKIE_NAME, LEGACY_COOKIE_NAME]) {
+        const token = cookieValue(request.headers.get("Cookie"), name);
+        if (token) store.deleteSession(await sha256(token));
+      }
+      return json(200, {}, [["Set-Cookie", CLEAR_COOKIE], ["Set-Cookie", CLEAR_LEGACY_COOKIE]]);
     }
     case "me": {
       const key = await currentKey();

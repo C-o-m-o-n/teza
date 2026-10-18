@@ -15,6 +15,9 @@ export class MemoryStore implements AccountStore {
     this.accounts.set(key, { ...row });
     return true;
   }
+  accountCount(): number {
+    return this.accounts.size;
+  }
   setRecords(key: string, records: string): void {
     this.accounts.get(key)!.records = records;
   }
@@ -26,6 +29,9 @@ export class MemoryStore implements AccountStore {
   }
   deleteSession(tokenHash: string): void {
     this.sessions.delete(tokenHash);
+  }
+  deleteSessionsFor(key: string): void {
+    for (const [k, s] of this.sessions) if (s.key === key) this.sessions.delete(k);
   }
   deleteExpiredSessions(now: number): void {
     for (const [k, s] of this.sessions) if (s.expiresAt <= now) this.sessions.delete(k);
