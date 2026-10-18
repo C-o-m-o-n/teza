@@ -303,3 +303,18 @@
 **Still open**
 - More than 20 refused messages still close the socket (`MAX_REJECTED`, per socket, never reset); a connection with more than 1 s of jitter many times over could hit it.
 - Sounds and predicted attack flights of a refused input have already played; only the board is taken back.
+
+## 2026-10-18 — Ratings and ranked matchmaking (factory job 014)
+
+**What changed**
+- `src/server/rating.ts`: Glicko-2 and the TR formula ported from v1 with its constants; `tdisplay` hides TR while RD > 100. The volatility iteration keeps `a = ln(σ²)` fixed as in Glickman's paper (v1's closure read the moving bracket end `A`).
+- `src/server/matchmaking.ts`: the in-memory queue (±500, +500 every 10 s, pair oldest first on max of both ranges, 15 s poll keep-alive, `matched` kept 30 s), hosted by the `Accounts` object behind `/api/account/queue/{join,status,leave}`.
+- `Accounts`: new `ratings` and `ranked_matches` tables (no migration), `me.rating {tr, games}`, `sessionKey` shared with the Worker (RPC `sessionAccount`), and `reportRanked` (RPC) that rates a registered match once.
+- `Match`: `registerRanked` RPC; `?mode=ranked` sockets need a session the Worker resolved (header `X-Teza-Account`, stripped from incoming requests) and must be one of the two accounts; create/join on a ranked code get 409. `MatchSession` takes an optional ranked config, reports a finished match once and holds `end` up to 3 s for the per-player `rating`.
+- Client: `OnlineResult.rating`; VERSUS gets RANKED 1V1 (RANKED is a bot), a queue screen, and a TR line on ranked results. The VERSUS stack is seven bars now; Poster Slab's dense bars are a little tighter so they still fit 1280x720.
+- Checked on `wrangler dev --local-upstream` with two Chromium profiles: paired in about 1.5 s, no countdown, TR HIDDEN on both results for new accounts; after 19 ranked games (17 played by a Node WebSocket script) the TR shows, and the next browser match read `TR 12,477 -16` and `TR 12,523 +16`. Room matches still work and show no TR line.
+
+**Still open**
+- About 17 games before a TR shows; no placement rules beyond that.
+- A player who leaves the queue while their room is being registered isn't told about it; the other waits alone until the lobby timeout (2 min).
+- If the `Match` object restarts between pairing and the sockets, the ranked room is gone (the sockets get 404, the client says it couldn't join).

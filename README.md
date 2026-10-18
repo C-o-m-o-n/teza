@@ -54,6 +54,7 @@ The `teza` Worker (`worker/index.ts`) serves `dist/` as static assets. Only `/ap
 
 - `POST /api/room` returns 201 `{code}`: a room code of 6 symbols from `ABCDEFGHJKMNPQRSTUVWXYZ23456789` (no 0/O, 1/I/L), drawn with `crypto.getRandomValues` (`newRoomCode` in `src/server/match.ts`). Nothing is stored: the room exists once its creator's socket holds a slot. Any other method gets 405 with `Allow: POST`.
 - `GET /api/match/<code>?mode=create` or `?mode=join` with `Upgrade: websocket` opens or joins the room. The room code is the match id: each gets its own `Match` Durable Object, which holds both sockets and runs one headless engine per player. A path that isn't a room code gets 400 (whatever the method), a non-GET 405, and no upgrade header 426. On the upgrade, a missing or other `mode` gets 400, `create` on a room someone already holds gets 409 (`Room code taken`, so nobody can take over a live code), and `join` on a room nobody holds gets 404 (`No such room`). A third player joining a full room is upgraded, then gets `error` (`full`) and is closed.
+- `GET /api/match/<code>?mode=ranked` with `Upgrade: websocket` takes a slot in a ranked match the queue opened (see Ratings and ranked below). It needs a session: the Worker resolves the `teza_session` cookie to an account (401 without one) and passes the account to the `Match` object in the `X-Teza-Account` header, which it sets itself and strips from every incoming request.
 - `GET /api/match/<code>?resume=<token>&ack=<peerAck>` is the same upgrade for a player coming back, without `mode`: the token is checked before the socket is accepted (malformed parameters give 400, an unknown token 403), and the socket takes its slot at once. `ack` defaults to 0.
 - `/api/account/*` is the accounts API (see Accounts below).
 - Any other `/api/*` path returns 404.
@@ -75,7 +76,7 @@ Messages are JSON envelopes `{t, s, a, d}` in both directions: type, sequence nu
 | `opponentGarbage` | `{amount, frame}`: sent to the attacker with every `garbage` the opponent gets, with the same `frame`, so the attacker's copy of the opponent's board takes it where the server did. Packets go out in the order the server applied them |
 | `opponentDisconnected` | `{grace}`: ms the opponent has to come back (15000) |
 | `opponentReconnected` | none |
-| `end` | `{winner, reason}`: reason is `topout`, `disconnect` or `idle`; `winner` is null for a draw; sent once |
+| `end` | `{winner, reason}`: reason is `topout`, `disconnect` or `idle`; `winner` is null for a draw; sent once. A ranked match adds `rating: {tr, delta}` for the recipient (see Ratings and ranked) |
 | `error` | `{code, message}`; a refused `input` adds its `s`, so the client can take it back out of its predicted board |
 | `pong` | none |
 
@@ -98,7 +99,7 @@ More than 20 rejected messages (including messages over 1 KB or not JSON) close 
 
 ### Online client
 
-VERSUS has two more bars under the bots. CREATE ROOM asks `POST /api/room` for a code, opens the socket with `mode=create` and shows the code large with `Waiting for opponent… (ESC to cancel)`. JOIN ROOM shows a field (uppercase letters and digits, 6 at most); Enter opens the socket with `mode=join`. A browser can't read the status of a refused upgrade, so a socket that closes before `welcome` without an `error` reads as `No such room`, and `full` (or a room whose free slot is waiting for its owner) as `Room is full`. JOIN first checks with `POST /api/room` (which stores nothing) that a game server is there. Without one (`npm start`, the e2e server, offline) both bars say `Online play isn't available here` and stay on the page. The socket URL is built from `location`, never a fixed host.
+VERSUS has three more bars under the bots: CREATE ROOM, JOIN ROOM and RANKED 1V1 (see Ratings and ranked). CREATE ROOM asks `POST /api/room` for a code, opens the socket with `mode=create` and shows the code large with `Waiting for opponent… (ESC to cancel)`. JOIN ROOM shows a field (uppercase letters and digits, 6 at most); Enter opens the socket with `mode=join`. A browser can't read the status of a refused upgrade, so a socket that closes before `welcome` without an `error` reads as `No such room`, and `full` (or a room whose free slot is waiting for its owner) as `Room is full`. JOIN first checks with `POST /api/room` (which stores nothing) that a game server is there. Without one (`npm start`, the e2e server, offline) both bars say `Online play isn't available here` and stay on the page. The socket URL is built from `location`, never a fixed host.
 
 `src/net/online.ts` (no DOM, tested against `MatchSession` in `test/online.test.ts`) holds the protocol and the prediction; `app.ts` only hands it a WebSocket:
 
@@ -108,7 +109,7 @@ VERSUS has two more bars under the bots. CREATE ROOM asks `POST /api/room` for a
 - The opponent's board is a second game stepped only by `opponentInput` and `opponentGarbage`, at their frames. Between packets it rests at the last relayed frame; nothing is extrapolated.
 - On window blur the client releases each held action on its own, here and on the server (not `releaseAll`), and does not press them again on focus.
 - Only the server's `end` decides the match. A local top-out stops input, shows `TOPPED OUT · WAITING` and sends one `release soft` at the clock so the server's engine reaches the top-out at once. `opponentDisconnected` shows `OPPONENT DISCONNECTED · 15s` counting down over the opponent's board; a server `error` shows over yours for 3 s. A socket that closes before `end` ends the session as `CONNECTION LOST`.
-- Results show YOU WIN, YOU LOSE or DRAW with the reason (top-out, disconnect, idle) and a single MENU action; there is no rematch. ESC in a match closes the socket, and the opponent wins after the server's 15 s grace. Online results are not saved to the bot W–L record or to the account.
+- Results show YOU WIN, YOU LOSE or DRAW with the reason (top-out, disconnect, idle) and a single MENU action; there is no rematch. ESC in a match closes the socket, and the opponent wins after the server's 15 s grace. Room matches (CREATE/JOIN) are not saved anywhere: not to the bot W–L record and not to the account. Ranked matches change the account's rating, on the server only (see Ratings and ranked).
 - No auto-reconnect: the server's `?resume=` stays, but the client does not use it yet.
 
 To try it locally, run `npm run build`, then `npx wrangler dev --local-upstream 127.0.0.1:8787 --port 8787` and open the page in two browser windows.
@@ -124,7 +125,7 @@ Signing in is optional: without an account the game keeps records in localStorag
 | `POST /api/account/register` | `{username, password}` | 201 and signed in; 409 if the name is taken (case-insensitive) |
 | `POST /api/account/login` | `{username, password}` | 200 and signed in; 401 with the same message for an unknown user or a wrong password |
 | `POST /api/account/logout` | none | 200; deletes the session and clears the cookie |
-| `GET /api/account/me` | | 200 `{username, createdAt, records}`, or 401 |
+| `GET /api/account/me` | | 200 `{username, createdAt, records, rating}`, or 401. `rating` is `{tr, games}` (see Ratings and ranked) |
 | `PUT /api/account/records` | `{records}` | 200 `{records}` after merging, or 401 without a session |
 
 Usernames are 3-16 characters of `A-Z a-z 0-9 _ -`; passwords are 8-128 characters. Anything else gives 400 with a message. Passwords are stored only as PBKDF2-SHA-256 with a random 16-byte salt and 100000 iterations (`pbkdf2-sha256$<iterations>$<salt>$<hash>`).
@@ -136,6 +137,30 @@ Records have the same shape as the client's `teza:records`. A `PUT` is merged wi
 Login and register are covered by the zone's per-IP rate-limit rule on `/api/*` (see Game server). That rule is dashboard config in the comonhq.com zone, not code in this repo.
 
 For local testing of the API, build and run `npx wrangler dev --local-upstream 127.0.0.1:8787` (with the port you use). Without `--local-upstream`, wrangler rewrites the request URL to the route host `teza.comonhq.com`, so the browser's own `Origin` doesn't match and sign-in gets 403. `npm start` serves only static files, so the account screen there says accounts aren't available.
+
+## Ratings and ranked
+
+Signed-in players can play rated 1v1 matches from VERSUS, RANKED 1V1 (not RANKED, which is a bot's name). Room matches stay unrated.
+
+Ratings are Glicko-2 (`src/server/rating.ts`, ported from the v1 server, `git show v1.0.0:server/server.js`): τ (`GLICKO_TAU`) 0.6, scale 173.7178, a new account starts at r 1500, RD 350, volatility 0.06, RD never goes below 30, and the volatility iteration stops at ε 1e-6. Each match is its own rating period: both players are updated against the other's pre-match rating, with score 1 for the winner, 0 for the loser and 0.5 each for a draw (an idle match). A disconnect forfeit is a loss. The volatility step keeps the paper's fixed `a = ln(σ²)`; v1's closure read the moving bracket end instead.
+
+The shown score is TR = 25000 / (1 + 10^((1500 − r)·π / (173.7178·√(3·ln²10·RD² + π²)))), 12500 at r 1500, rounded. It is hidden (null) while RD > 100 (`RD_HIDDEN`), which takes about 17 games for a new account. Clients only ever get the TR and the games count, never r, RD or volatility.
+
+Ratings live in the `Accounts` object's SQLite in a `ratings` table (`username_key, r, rd, vol, games`); an account without a row has the default rating. A `ranked_matches` table holds each room the queue opened until its result is rated (rows older than 6 hours are dropped), which is what makes a match rate at most once. Both are new tables in the existing class, created with `CREATE TABLE IF NOT EXISTS`: no new migration.
+
+The queue (`src/server/matchmaking.ts`, from v1) lives in memory in the `Accounts` object and is driven by polling. All three routes need a session (401 otherwise) and the POSTs run the same Origin and JSON checks as the other account routes (send `{}`):
+
+| Route | Result |
+|---|---|
+| `POST /api/account/queue/join` | 200 `{status: "waiting"}`: enters the queue with the internal TR (also while hidden, so new players are matched), replacing an earlier entry |
+| `GET /api/account/queue/status` | 200 `{status: "waiting", waited, range}` (seconds, TR range), `{status: "matched", code}` (given once, kept 30 s), or `{status: "none"}` |
+| `POST /api/account/queue/leave` | 200, with or without an entry |
+
+The accepted TR gap is ±500 and widens by 500 every 10 s waited (`INITIAL_RANGE`, `RANGE_EXPAND`, `RANGE_EXPAND_MS`). Entries pair oldest first when |trA − trB| ≤ max(rangeA, rangeB); an account never pairs with itself. Polling is the keep-alive: an entry not polled for 15 s is dropped. v1's "accept anyone after 60 s" is not ported. On a pairing the queue draws a room code (`newRoomCode`) and registers it as ranked with that code's `Match` object over RPC (`registerRanked`, not a URL; a code already in use is redrawn, up to three times), then both players get `matched`.
+
+A ranked `Match` takes `?mode=ranked` sockets from its two accounts only, each once: no session gives 401, another account 403, and `mode=ranked` on a code that isn't a ranked match 404. `mode=create` and `mode=join` on a ranked code get 409. `?resume=` works as for rooms. The registration is kept in the `Match` object's memory; if it is lost the match can't start as ranked, and nothing is rated. When a ranked match finishes (top-out, disconnect forfeit or idle), the `Match` reports the winner once to `Accounts.reportRanked` over RPC, and `end` waits for the answer (3 s at most) to carry `rating: {tr, delta}` for each player: `tr` is the TR after the match (null while hidden), `delta` the change in rounded TR, null unless both the TR before and after are visible. If the report fails or is late, `end` goes out without `rating`. A lobby that times out (`no-opponent`) reports nothing. Results are decided only on the server; the client never reports an outcome.
+
+The RANKED 1V1 bar posts `join` and shows SEARCHING with the time, the current range (`±500`, `±1000`, …) and the player's TR (`TR HIDDEN` while null), polling `status` every 2 s. ESC or CANCEL posts `leave`. On `matched` it opens the socket with `mode=ranked` and starts like a room, with no countdown. Signed out it says `Sign in to play ranked`; without a game server (`npm start`, the e2e server) `Online play isn't available here`. Ranked results add a line `TR 12,345 +120` (or `TR 12,345` when the delta is null, `TR HIDDEN` while the TR is hidden), and the TR shown on the next search comes from `me`.
 
 ## PB ghost (40 LINES)
 
