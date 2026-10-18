@@ -318,3 +318,18 @@
 - About 17 games before a TR shows; no placement rules beyond that.
 - A player who leaves the queue while their room is being registered isn't told about it; the other waits alone until the lobby timeout (2 min).
 - If the `Match` object restarts between pairing and the sockets, the ranked room is gone (the sockets get 404, the client says it couldn't join).
+
+## 2026-10-18 — Leaderboard, public profiles and ranked hardening (factory job 015)
+
+**What changed**
+- `GET /api/leaderboard` (top 50 calibrated accounts by TR, then games, then username) and `GET /api/profile/<username>` (`{username, joined, rating: {tr, games}, rank}`), public, GET only, `Cache-Control: public, max-age=30`, in `src/server/leaderboard.ts` over a new read-only `AccountStore.calibrated()`; the Worker forwards both to `Accounts`.
+- Solo PBs and the bot W–L are not shown publicly: they are an unverified client upload and `?seed=` makes a sequence replayable. The private records sync is unchanged.
+- Hardening from the job 014 review: the same two accounts pair at most 3 times per 24 h (`rated_pairs` table written with the ratings, `Matchmaker`'s injected `mayPair`); a ranked lobby waits 30 s and a one-sided no-show is reported over `Accounts.reportNoShow`, which drops the room unrated and cools the absent account down for 120 s (429 with `Retry-After` on `queue/join`); `openRoom` is bounded by 3 s and a timeout requeues the pairing; the Worker answers a ranked upgrade without a well-formed `teza_session` token with 401 before calling `Accounts`.
+- Client: VERSUS has an eighth bar, LEADERBOARD, with LEADERBOARD and PROFILE pages in both themes. Classic keeps its VERSUS bar sizes (84 px, 38 px titles) where eight fit (900 px tall and up, and the stacked phone layout); shorter side-by-side screens get a tighter stack (70 px, 32 px). Classic sets a sub-page title longer than eight letters smaller. The RANKED screen shows the cooldown instead of searching.
+- Round 2 (security review): the pair cap counts the pair's open rooms as well as rated matches and is checked again at rating time; a no-show is taken out of the queue and a cooling account is never paired; a dodger who took a slot and disconnected is reported when the other player is the only one connected.
+- Checked on `wrangler dev --local-upstream` with a Node script: a ranked lobby with only one socket ended `no-opponent` after 30.0 s, the absent account's join got 429 `Retry-After: 120` and the present one 200; three idle-draw ranked matches between the same two accounts, then the fourth search left both waiting.
+
+**Still open**
+- A verified solo leaderboard (server-issued seeds or replay verification).
+- The no-show cooldown is in memory and resets when the `Accounts` object restarts; there are no escalating penalties.
+- With the pair cap, two friends alone in the queue get 3 rated games a day together; calibrating (about 17 games) needs other opponents.

@@ -170,15 +170,15 @@ test("Classic wordmark: no drop with reduced motion, from the OS or CONFIG", asy
 });
 
 for (const theme of ["classic", "poster"]) {
-  test(`${theme}: VERSUS offers CREATE ROOM, JOIN ROOM and RANKED 1V1, which say so when there is no game server`, async ({ page }) => {
+  test(`${theme}: VERSUS offers CREATE ROOM, JOIN ROOM, RANKED 1V1 and LEADERBOARD, which say so when there is no game server`, async ({ page }) => {
     await page.setViewportSize({ width: 1280, height: 720 });
     await seedTheme(page, theme);
     await openMenu(page, server.url);
     await page.locator("button.bar", { hasText: "VERSUS" }).click();
     await expect(ui(page)).toHaveAttribute("data-screen", "bots");
     const titles = page.locator("nav.bars .bar-title");
-    await expect(titles).toHaveText(["ROOKIE", "CASUAL", "RANKED", "PRO", "CREATE ROOM", "JOIN ROOM", "RANKED 1V1"]);
-    // all seven fit a 1280x720 screen, and nothing runs off it sideways
+    await expect(titles).toHaveText(["ROOKIE", "CASUAL", "RANKED", "PRO", "CREATE ROOM", "JOIN ROOM", "RANKED 1V1", "LEADERBOARD"]);
+    // all eight fit a 1280x720 screen, and nothing runs off it sideways
     for (const box of await page.locator("nav.bars .bar").evaluateAll((bars) => bars.map((b) => b.getBoundingClientRect().toJSON()))) {
       expect(box.top).toBeGreaterThanOrEqual(0);
       expect(box.bottom).toBeLessThanOrEqual(720);
@@ -208,6 +208,27 @@ for (const theme of ["classic", "poster"]) {
     expect(box.x + box.width).toBeLessThanOrEqual(1280);
     await page.keyboard.press("Escape");
     await expect(ui(page)).toHaveAttribute("data-screen", "bots");
+  });
+}
+
+// Classic keeps its full-size VERSUS bars (min-height 84 px, 38 px titles) wherever all eight fit beside the title, and the
+// stacked phone layout keeps them too; only shorter side-by-side screens get the tighter stack
+for (const size of [{ width: 1280, height: 900 }, { width: 1440, height: 900 }, { width: 1280, height: 899 }, { width: 390, height: 844 }]) {
+  test(`classic: VERSUS bar size at ${size.width}x${size.height}`, async ({ page }) => {
+    await page.setViewportSize(size);
+    await openMenu(page, server.url);
+    await page.locator("button.bar", { hasText: "VERSUS" }).click();
+    const full = size.height >= 900 || size.width <= 860;
+    const bars = page.locator("nav.bars .bar");
+    await expect(bars).toHaveCount(8);
+    await expect(bars.first().locator(".bar-title")).toHaveCSS("font-size", full ? "38px" : "32px");
+    const boxes = await bars.evaluateAll((els) => els.map((b) => b.getBoundingClientRect().toJSON()));
+    for (const box of boxes) expect(full ? box.height >= 84 : box.height < 84).toBe(true);
+    if (size.width > 860) {
+      const hint = (await page.locator(".hint").boundingBox())!;
+      expect(boxes[0].top).toBeGreaterThanOrEqual(0);
+      expect(boxes[7].bottom).toBeLessThanOrEqual(hint.y);
+    }
   });
 }
 

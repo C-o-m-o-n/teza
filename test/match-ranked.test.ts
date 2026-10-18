@@ -1,9 +1,12 @@
 // Ranked matches: who may take a slot, and the one rating report a finished match makes.
 import { describe, expect, it } from "vitest";
+import { COOKIE_NAME, QueueHost, handleAccount, reportNoShow } from "../src/server/accounts";
 import {
-  IDLE_TIMEOUT_MS, LOBBY_TIMEOUT_MS, MatchSession, RECONNECT_GRACE_MS, REPORT_TIMEOUT_MS, RankedConfig, SlotIndex, SlotRating,
-  admission,
+  IDLE_TIMEOUT_MS, LOBBY_TIMEOUT_MS, MatchSession, RANKED_LOBBY_TIMEOUT_MS, RECONNECT_GRACE_MS, REPORT_TIMEOUT_MS, RankedConfig,
+  SlotIndex, SlotRating, admission,
 } from "../src/server/match";
+import { Matchmaker } from "../src/server/matchmaking";
+import { MemoryStore } from "./account-store";
 import { FakeClock, FakePeer, Player, input, join, lastError, setup } from "./match-harness";
 
 const flush = () => new Promise<void>((resolve) => setTimeout(resolve, 0));
@@ -12,14 +15,18 @@ type Report = (winner: SlotIndex | null) => Promise<readonly [SlotRating, SlotRa
 
 const RATINGS: [SlotRating, SlotRating] = [{ tr: 13120, delta: 120 }, { tr: 11915, delta: -85 }];
 
-function ranked(report: Report = async () => RATINGS) {
-  const clock = new FakeClock();
+function ranked(report: Report = async () => RATINGS, noShow: (absent: string) => Promise<unknown> = async () => true, clock = new FakeClock()) {
   const calls: (SlotIndex | null)[] = [];
+  const noShows: string[] = [];
   const config: RankedConfig = {
     accounts: ["alice", "bob"],
     report: (winner) => {
       calls.push(winner);
       return report(winner);
+    },
+    noShow: (absent) => {
+      noShows.push(absent);
+      return noShow(absent);
     },
   };
   const session = new MatchSession(clock, undefined, config);
@@ -27,7 +34,7 @@ function ranked(report: Report = async () => RATINGS) {
     const peer = new FakePeer();
     return { peer, conn: session.connect(peer, undefined, account) };
   };
-  return { clock, session, calls, take };
+  return { clock, session, calls, noShows, take };
 }
 
 /** p0 stacks hard drops until the server's engine tops out. */
@@ -124,7 +131,7 @@ describe("ranked: reporting", () => {
     expect(a.peer.of("end")).toEqual([expect.objectContaining({ d: { winner: null, reason: "idle", rating: RATINGS[0] } })]);
   });
 
-  it("reports nothing when nobody joins (the lobby's no-opponent reset)", async () => {
+  it("rates nothing when the opponent never joins (the lobby's no-opponent reset)", async () => {
     const { clock, calls, take } = ranked();
     const a = take("alice");
     clock.advance(LOBBY_TIMEOUT_MS);
@@ -183,5 +190,102 @@ describe("ranked: reporting", () => {
     expect(session.isRanked).toBe(false);
     topOut(clock, session, p0);
     for (const p of [p0, p1]) expect(p.peer.of("end")).toEqual([expect.objectContaining({ d: { winner: 1, reason: "topout" } })]);
+  });
+});
+
+describe("ranked: no-shows", () => {
+  const ORIGIN = "https://teza.example";
+
+  /** Accounts alice and bob with sessions, a queue host, and a ranked room registered for them as the matchmaker would. */
+  async function world(clock: FakeClock) {
+    const store = new MemoryStore();
+    const host: QueueHost = { matchmaker: new Matchmaker(() => clock.t), openRoom: async () => true, cooldowns: new Map() };
+    const call = (method: string, route: string, cookie?: string, body?: unknown) => handleAccount(new Request(`${ORIGIN}/api/account/${route}`, {
+      method,
+      headers: { ...(cookie ? { Cookie: `${COOKIE_NAME}=${cookie}` } : {}), ...(body ? { "Content-Type": "application/json" } : {}) },
+      body: body ? JSON.stringify(body) : undefined,
+    }), store, () => clock.t, host);
+    const tokens: Record<string, string> = {};
+    for (const name of ["alice", "bob"]) {
+      const res = await call("POST", "register", undefined, { username: name, password: "correct horse battery" });
+      tokens[name] = /=([0-9a-f]+);/.exec(res.headers.get("Set-Cookie")!)![1];
+    }
+    store.insertRankedMatch("ABCDEF", { keys: ["alice", "bob"], createdAt: clock.t });
+    const join = (name: string) => call("POST", "queue/join", tokens[name], {});
+    return { store, host, join };
+  }
+
+  it("after 30 s with only A there: A gets no-opponent, B is reported once, nobody is rated, and B cools down 120 s", async () => {
+    const clock = new FakeClock();
+    const w = await world(clock);
+    const { calls, noShows, take } = ranked(undefined, async (absent) => reportNoShow(w.host, w.store, "ABCDEF", absent, () => clock.t), clock);
+    const a = take("alice");
+    clock.advance(RANKED_LOBBY_TIMEOUT_MS - 1);
+    expect(lastError(a)).toBeUndefined();
+    clock.advance(1);
+    expect(lastError(a)).toBe("no-opponent");
+    expect(a.peer.closed).toMatchObject({ code: 1000, reason: "no-opponent" });
+    expect(noShows).toEqual(["bob"]);
+    await flush();
+    expect(calls).toEqual([]);
+    expect(w.store.ratings.size).toBe(0);
+    expect(w.store.rankedMatch("ABCDEF")).toBeNull();
+
+    const refused = await w.join("bob");
+    expect(refused.status).toBe(429);
+    expect((await refused.json()).retryAfter).toBeGreaterThan(0);
+    expect(Number(refused.headers.get("Retry-After"))).toBeGreaterThan(0);
+    expect((await w.join("alice")).status).toBe(200); // the present player may search again at once
+
+    clock.advance(120_000);
+    expect((await w.join("bob")).status).toBe(200);
+    clock.advance(LOBBY_TIMEOUT_MS * 2);
+    expect(noShows).toEqual(["bob"]);
+  });
+
+  it("reports nobody when neither account connects, or when the one there left before the timeout", async () => {
+    const { clock, noShows, session, take } = ranked();
+    clock.advance(LOBBY_TIMEOUT_MS * 2);
+    expect(noShows).toEqual([]);
+    const a = take("alice");
+    session.disconnect(a.conn);
+    clock.advance(RANKED_LOBBY_TIMEOUT_MS);
+    expect(noShows).toEqual([]);
+  });
+
+  it("reports the account that connected and left when the other is the only one connected", () => {
+    const { clock, noShows, session, take } = ranked();
+    const a = take("alice");
+    session.disconnect(a.conn); // slot 0 stays taken, without a socket
+    const b = take("bob");
+    expect(b.peer.of("start")).toEqual([]);
+    clock.advance(RANKED_LOBBY_TIMEOUT_MS);
+    expect(lastError(b)).toBe("no-opponent");
+    expect(noShows).toEqual(["alice"]);
+  });
+
+  it("ignores a report that fails or throws", async () => {
+    for (const noShow of [async () => Promise.reject(new Error("down")), () => {
+      throw new Error("sync");
+    }]) {
+      const { clock, noShows, take } = ranked(undefined, noShow as () => Promise<unknown>);
+      const a = take("bob");
+      clock.advance(RANKED_LOBBY_TIMEOUT_MS);
+      await flush();
+      expect(noShows).toEqual(["alice"]);
+      expect(lastError(a)).toBe("no-opponent");
+    }
+  });
+
+  it("an ordinary room still waits 120 s for its opponent", () => {
+    const clock = new FakeClock();
+    const session = new MatchSession(clock);
+    const p0 = join(session);
+    clock.advance(RANKED_LOBBY_TIMEOUT_MS);
+    expect(lastError(p0)).toBeUndefined();
+    clock.advance(LOBBY_TIMEOUT_MS - RANKED_LOBBY_TIMEOUT_MS - 1);
+    expect(lastError(p0)).toBeUndefined();
+    clock.advance(1);
+    expect(lastError(p0)).toBe("no-opponent");
   });
 });

@@ -9,6 +9,12 @@
 // Ratings (rating.ts) are kept per account; an account without a row has the default rating.
 // The ranked queue (/api/account/queue/*, matchmaking.ts) pairs signed-in players, and each
 // pairing's room is recorded so that its result can be rated once (`rateRankedMatch`).
+//
+// Hardening for a public ranked ladder: the same two accounts get at most MAX_PAIR_RATED rooms
+// per PAIR_WINDOW_MS, counting rated matches and rooms still open (`pairAllowed`, checked again
+// when a match is rated), an account that never connects to its ranked room is taken out of the
+// queue and kept out for NO_SHOW_COOLDOWN_MS (`reportNoShow`), and registering a room with its
+// `Match` object is bounded by OPEN_ROOM_TIMEOUT_MS.
 
 import { mergeRecords, MAX_BOT_NAMES, passwordError, Records, recordsError, usernameError } from "../profile";
 import { Matchmaker, QueuePlayer } from "./matchmaking";
@@ -39,6 +45,16 @@ export interface RatingRow extends Rating {
   games: number; // ranked matches rated
 }
 
+/** A calibrated account (RD <= RD_HIDDEN) as the public leaderboard reads it (leaderboard.ts). */
+export interface CalibratedRow {
+  key: string; // lower-cased username
+  username: string; // original case
+  createdAt: number; // ms
+  r: number;
+  rd: number;
+  games: number;
+}
+
 /** A room the matchmaker opened, until its result is rated. `keys` in pairing order. */
 export interface RankedMatchRow {
   keys: [string, string];
@@ -57,24 +73,39 @@ export interface AccountStore {
   deleteExpiredSessions(now: number): void;
   /** Null for an account that has never been rated. */
   rating(key: string): RatingRow | null;
+  /** Read-only: every account whose rating has RD <= RD_HIDDEN, in no particular order. */
+  calibrated(): CalibratedRow[];
   rankedMatch(code: string): RankedMatchRow | null;
   insertRankedMatch(code: string, row: RankedMatchRow): void;
+  /** False if there was no such match. */
+  deleteRankedMatch(code: string): boolean;
   deleteRankedMatchesBefore(createdAt: number): void;
   /**
-   * In one transaction: delete the ranked match `code` and write the new ratings. False (and
+   * In one transaction: delete the ranked match `code`, write the new ratings, record the pair of
+   * accounts as rated at `at`, and prune pair records older than PAIR_WINDOW_MS. False (and
    * nothing written) if the match is no longer there, so a match is rated at most once.
    */
-  rateMatch(code: string, ratings: [string, RatingRow][]): boolean;
+  rateMatch(code: string, ratings: [string, RatingRow][], at: number): boolean;
+  /** Rated matches between the two accounts (either order) at or after `since`. */
+  pairCount(keyA: string, keyB: string, since: number): number;
+  /** Unrated ranked matches between the two accounts (either order) created at or after `since`. */
+  openMatchCount(keyA: string, keyB: string, since: number): number;
 }
 
 export const RANKED_MATCH_TTL_MS = 6 * 60 * 60 * 1000; // an unrated ranked room is forgotten after this
 const ROOM_ATTEMPTS = 3; // codes tried before a pairing goes back into the queue
+export const OPEN_ROOM_TIMEOUT_MS = 3000; // one room registration (RPC to `Match`) may take this long
+export const MAX_PAIR_RATED = 3; // rated matches the same two accounts may play per PAIR_WINDOW_MS
+export const PAIR_WINDOW_MS = 24 * 60 * 60 * 1000;
+export const NO_SHOW_COOLDOWN_MS = 120_000; // an account that skipped its ranked room waits this long to queue again
 
 /** How the accounts API reaches the ranked queue and the match rooms (the Accounts Durable Object). */
 export interface QueueHost {
   matchmaker: Matchmaker;
   /** Register `code` as a ranked room for the two players. False if that code is already in use. */
   openRoom(code: string, players: [QueuePlayer, QueuePlayer]): Promise<boolean>;
+  /** Account key to the time (ms) its no-show cooldown ends. In memory: a restart forgets it. */
+  cooldowns: Map<string, number>;
 }
 
 const ROUTES: Record<string, string> = {
@@ -137,7 +168,11 @@ function sessionCookie(token: string): string {
 
 const CLEAR_COOKIE = `${COOKIE_NAME}=; HttpOnly; Secure; SameSite=Strict; Path=/api; Max-Age=0`;
 
-function cookieToken(cookie: string | null): string | null {
+/**
+ * The well-formed `teza_session` token in a `Cookie` header, or null. The Worker uses it to refuse
+ * a ranked socket without a session before calling the `Accounts` object.
+ */
+export function cookieToken(cookie: string | null): string | null {
   for (const part of (cookie ?? "").split(";")) {
     const [name, value] = part.trim().split("=");
     if (name === COOKIE_NAME && value !== undefined && TOKEN.test(value)) return value;
@@ -213,15 +248,21 @@ export interface RatingChange {
  * draw (0.5 each). Each player is updated against the other's pre-match rating. Null if `code`
  * is not an unrated ranked match or `winnerKey` is not one of its players; nothing changes then.
  */
-export function rateRankedMatch(store: AccountStore, code: string, winnerKey: string | null): [RatingChange, RatingChange] | null {
+export function rateRankedMatch(
+  store: AccountStore, code: string, winnerKey: string | null, now: () => number = Date.now,
+): [RatingChange, RatingChange] | null {
   const match = store.rankedMatch(code);
   if (!match || (winnerKey !== null && !match.keys.includes(winnerKey))) return null;
+  if (store.pairCount(match.keys[0], match.keys[1], now() - PAIR_WINDOW_MS) >= MAX_PAIR_RATED) {
+    store.deleteRankedMatch(code); // over the pair cap however the room was opened: nobody is rated
+    return null;
+  }
   const before = match.keys.map((k) => ratingOf(store, k));
   const after = match.keys.map((k, i): RatingRow => {
     const score = winnerKey === null ? 0.5 : winnerKey === k ? 1 : 0;
     return { ...updateGlicko2(before[i], before[1 - i], score), games: before[i].games + 1 };
   });
-  if (!store.rateMatch(code, match.keys.map((k, i): [string, RatingRow] => [k, after[i]]))) return null;
+  if (!store.rateMatch(code, match.keys.map((k, i): [string, RatingRow] => [k, after[i]]), now())) return null;
   const change = (i: number): RatingChange => {
     const was = tdisplay(before[i].r, before[i].rd);
     const tr = tdisplay(after[i].r, after[i].rd);
@@ -230,14 +271,55 @@ export function rateRankedMatch(store: AccountStore, code: string, winnerKey: st
   return [change(0), change(1)];
 }
 
-/** Open a room for every pairing the queue has now; a pairing without a room goes back into the queue. */
+/**
+ * The matchmaker's pair predicate (`Matchmaker`'s `mayPair`): false while either account is on a
+ * no-show cooldown, or once the two accounts' rated matches in the last PAIR_WINDOW_MS plus their
+ * rooms still open reach MAX_PAIR_RATED (so opening rooms faster than they are rated can't pass it).
+ */
+export function pairAllowed(
+  store: AccountStore, cooldowns: Map<string, number>, now: () => number = Date.now,
+): (a: string, b: string) => boolean {
+  const cooling = (key: string) => (cooldowns.get(key) ?? 0) > now();
+  return (a, b) => !cooling(a) && !cooling(b) &&
+    store.pairCount(a, b, now() - PAIR_WINDOW_MS) + store.openMatchCount(a, b, now() - RANKED_MATCH_TTL_MS) < MAX_PAIR_RATED;
+}
+
+/**
+ * RPC from a ranked `Match` whose lobby timed out with only one of its accounts connected: forget
+ * the room without rating anyone, take the absent account out of the queue (it may have joined
+ * again meanwhile) and keep it out for NO_SHOW_COOLDOWN_MS. False (nothing changes) if `code` is
+ * not an unrated ranked match or `absentKey` is not one of its players.
+ */
+export function reportNoShow(host: QueueHost, store: AccountStore, code: string, absentKey: string, now: () => number = Date.now): boolean {
+  const match = store.rankedMatch(code);
+  if (!match || !match.keys.includes(absentKey)) return false;
+  if (!store.deleteRankedMatch(code)) return false;
+  host.cooldowns.set(absentKey, now() + NO_SHOW_COOLDOWN_MS);
+  host.matchmaker.leave(absentKey);
+  return true;
+}
+
+/** `promise`, or a rejection once `ms` pass first. The timer is cleared when the promise settles. */
+export function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
+  let clear = () => {};
+  const timeout = new Promise<never>((_, reject) => {
+    const timer = setTimeout(() => reject(new Error(`timed out after ${ms} ms`)), ms);
+    clear = () => clearTimeout(timer);
+  });
+  return Promise.race([promise, timeout]).finally(clear);
+}
+
+/**
+ * Open a room for every pairing the queue has now; a pairing without a room goes back into the
+ * queue. A registration that throws or takes over OPEN_ROOM_TIMEOUT_MS ends the pairing's attempts.
+ */
 async function openPairings(host: QueueHost, store: AccountStore, now: () => number): Promise<void> {
   for (const pairing of host.matchmaker.pair()) {
     let code: string | null = null;
     for (let i = 0; i < ROOM_ATTEMPTS && code === null; i++) {
       const candidate = newRoomCode();
       try {
-        if (await host.openRoom(candidate, pairing.players)) code = candidate;
+        if (await withTimeout(host.openRoom(candidate, pairing.players), OPEN_ROOM_TIMEOUT_MS)) code = candidate;
       } catch {
         break;
       }
@@ -333,6 +415,14 @@ export async function handleAccount(
         return json(200, { status: "none" });
       }
       if (route === "queue/join") {
+        const until = queue!.cooldowns.get(key) ?? 0;
+        if (until > now()) {
+          const retryAfter = Math.ceil((until - now()) / 1000);
+          return json(429, { error: `You missed a ranked match. You can search again in ${retryAfter} s.`, retryAfter }, {
+            "Retry-After": String(retryAfter),
+          });
+        }
+        queue!.cooldowns.delete(key);
         // the internal TR, hidden or not, so new players are matched too
         const r = ratingOf(store, key);
         mm.join({ key, username: store.account(key)!.username }, calcTR(r.r, r.rd));

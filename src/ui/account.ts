@@ -1,4 +1,5 @@
-// Same-origin calls to the accounts API (/api/account/*, see README "Accounts"). Every call
+// Same-origin calls to the accounts API (/api/account/*, see README "Accounts") and the public
+// ranked pages (/api/leaderboard, /api/profile/<username>, README "Leaderboard and profiles"). Every call
 // swallows network errors: without a server (offline, or the static dev server) the game
 // just stays anonymous and keeps its records in localStorage. A request that hasn't answered
 // within REQUEST_TIMEOUT_MS is aborted and counts as a network error.
@@ -20,10 +21,14 @@ export interface Profile {
 export const REQUEST_TIMEOUT_MS = 8000;
 
 async function send(method: string, route: string, body?: unknown): Promise<Response | null> {
+  return request(method, `/api/account/${route}`, body);
+}
+
+async function request(method: string, path: string, body?: unknown): Promise<Response | null> {
   const abort = new AbortController();
   const timer = setTimeout(() => abort.abort(), REQUEST_TIMEOUT_MS);
   try {
-    return await fetch(`/api/account/${route}`, {
+    return await fetch(path, {
       method,
       credentials: "same-origin",
       headers: body === undefined ? {} : { "Content-Type": "application/json" },
@@ -114,13 +119,24 @@ export type QueueState =
   | { status: "matched"; code: string }
   | { status: "none" };
 
+/** A 429 from queue/join: this account skipped its last ranked match and may search again in `retryAfter` seconds. */
+export interface Cooldown {
+  retryAfter: number;
+}
+
+export type JoinResult = "waiting" | "signed-out" | "unavailable" | Cooldown;
+
 /**
- * Enter the ranked queue: "waiting", "signed-out" (401), or "unavailable" when there is no game
- * server here (the static servers answer 404 or 204) or it can't be reached.
+ * Enter the ranked queue: "waiting", "signed-out" (401), a cooldown (429), or "unavailable" when
+ * there is no game server here (the static servers answer 404 or 204) or it can't be reached.
  */
-export async function joinQueue(): Promise<"waiting" | "signed-out" | "unavailable"> {
+export async function joinQueue(): Promise<JoinResult> {
   const res = await send("POST", "queue/join", {});
   if (res?.status === 401) return "signed-out";
+  if (res?.status === 429) {
+    const retryAfter = (await readJson(res))?.retryAfter ?? Number(res.headers.get("Retry-After"));
+    return { retryAfter: finite(retryAfter) && retryAfter > 0 ? Math.ceil(retryAfter) : 1 };
+  }
   return res?.status === 200 && (await readJson(res))?.status === "waiting" ? "waiting" : "unavailable";
 }
 
@@ -137,4 +153,47 @@ export async function queueStatus(): Promise<QueueState | "signed-out" | null> {
 
 export async function leaveQueue(): Promise<void> {
   await send("POST", "queue/leave", {});
+}
+
+/** One row of the public leaderboard: only calibrated players are listed, so `tr` is never hidden. */
+export interface LeaderboardPlayer {
+  rank: number;
+  username: string;
+  tr: number;
+  games: number;
+}
+
+/** A player's public profile. `rank` and `rating.tr` are null until the player is calibrated. */
+export interface PlayerProfile {
+  username: string;
+  joined: number; // ms
+  rating: PublicRating;
+  rank: number | null;
+}
+
+const count = (v: unknown): v is number => Number.isSafeInteger(v) && (v as number) >= 0;
+
+function toPlayer(x: unknown): LeaderboardPlayer | null {
+  if (typeof x !== "object" || x === null) return null;
+  const { rank, username, tr, games } = x as Record<string, unknown>;
+  return count(rank) && rank > 0 && typeof username === "string" && finite(tr) && finite(games) ? { rank, username, tr, games } : null;
+}
+
+/** The top players by TR, or null when there is no server here or it can't be reached. Malformed rows are dropped. */
+export async function fetchLeaderboard(): Promise<LeaderboardPlayer[] | null> {
+  const res = await request("GET", "/api/leaderboard");
+  const x = res?.status === 200 ? await readJson(res) : null;
+  if (!x || !Array.isArray(x.players)) return null;
+  return x.players.map(toPlayer).filter((p): p is LeaderboardPlayer => p !== null);
+}
+
+/** A player's profile, "not-found" for a 404, or null when it can't be read (no server, network, or a malformed answer). */
+export async function fetchProfile(username: string): Promise<PlayerProfile | "not-found" | null> {
+  const res = await request("GET", `/api/profile/${encodeURIComponent(username)}`);
+  if (res?.status === 404 && (await readJson(res))?.error !== undefined) return "not-found";
+  const x = res?.status === 200 ? await readJson(res) : null;
+  const rating = toRating(x?.rating);
+  if (!x || typeof x.username !== "string" || !finite(x.joined) || !rating) return null;
+  if (x.rank !== null && !(count(x.rank) && x.rank > 0)) return null;
+  return { username: x.username, joined: x.joined, rating, rank: x.rank };
 }

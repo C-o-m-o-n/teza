@@ -17,12 +17,15 @@ import {
   BIND_LABELS, BIND_ORDER, Bind, Records, Settings, defaultSettings, loadGhost, loadRecords, loadSettings, saveGhost,
   saveRecords, saveSettings,
 } from "../settings";
-import { Profile, PublicRating, fetchMe, finishSession, joinQueue, leaveQueue, putRecords, queueStatus, signIn } from "./account";
+import {
+  Cooldown, LeaderboardPlayer, Profile, PublicRating, fetchLeaderboard, fetchMe, fetchProfile, finishSession, joinQueue, leaveQueue,
+  putRecords, queueStatus, signIn,
+} from "./account";
 import { classicWordmark, wordmark } from "./brand";
 import { newRoom, onlineAvailable } from "./rooms";
 import { THEMES, themeById } from "./themes";
 
-type Screen = "title" | "menu" | "bots" | "lobby" | "queue" | "config" | "account" | "play" | "results";
+type Screen = "title" | "menu" | "bots" | "lobby" | "queue" | "leaderboard" | "profile" | "config" | "account" | "play" | "results";
 
 const GAME_ACTIONS: Action[] = ["left", "right", "soft", "hard", "cw", "ccw", "180", "hold"];
 const COUNTDOWN = [
@@ -107,6 +110,17 @@ interface Session {
 const UNAVAILABLE = "Online play isn't available here";
 const SIGN_IN_FOR_RANKED = "Sign in to play ranked";
 const QUEUE_POLL_MS = 2000; // the queue's keep-alive is 15 s (src/server/matchmaking.ts)
+const NO_PLAYERS = "NO CALIBRATED PLAYERS YET";
+const NO_SUCH_PLAYER = "No such player";
+
+/** `TR 12,345`, or `TR HIDDEN` while the rating is still being calibrated. */
+const trText = (tr: number | null) => (tr === null ? "TR HIDDEN" : `TR ${tr.toLocaleString("en-US")}`);
+
+/** The queue screen's answer to a cooldown (a 429 from queue/join). */
+function cooldownText(c: Cooldown): string {
+  const wait = `${Math.floor(c.retryAfter / 60)}:${String(c.retryAfter % 60).padStart(2, "0")}`;
+  return `You didn't join your last ranked match, so you can search again in ${wait}.`;
+}
 const OUTCOME_TEXT: Record<OnlineResult["outcome"], [string, string]> = {
   win: ["VICTORY", "YOU WIN"], lose: ["DEFEAT", "YOU LOSE"], draw: ["DRAW", "DRAW"], lost: ["CONNECTION LOST", "NO RESULT"],
 };
@@ -125,6 +139,7 @@ export class App {
   private session: Session | null = null;
   private room: OnlineClient | null = null; // the online lobby's connection, until the match starts
   private queue: { stop: () => void } | null = null; // the ranked queue's polling, while searching
+  private ladder: LeaderboardPlayer[] | null = null; // the LEADERBOARD as last fetched, so BACK from a profile is instant
   private held = new Set<Bind>();
   private listening: { bind: Bind; slot: number; btn: HTMLButtonElement } | null = null;
   private lastFrame = performance.now();
@@ -571,6 +586,12 @@ export class App {
         sfx.menu();
         this.cancelQueue();
         this.showBots();
+      } else if (this.screen === "profile") {
+        sfx.menu();
+        this.showLeaderboard(this.ladder);
+      } else if (this.screen === "leaderboard") {
+        sfx.menu();
+        this.showBots();
       } else if (this.screen !== "menu") {
         sfx.menu();
         this.showMenu();
@@ -700,7 +721,9 @@ export class App {
   /** A sub-screen (VERSUS, ACCOUNT): Poster's title slab beside the column, or Classic's small header above it. */
   private subPage(title: string, lede: string, ...main: HTMLElement[]): HTMLElement {
     if (this.poster) return this.splitPage(this.titleSlab(title), el("p", { class: "lede" }, lede), ...main);
-    return el("div", { class: "menu" }, el("header", { class: "brand small" }, el("h1", {}, el("span", {}, title)), el("p", {}, lede)), ...main);
+    // a title longer than ACCOUNT (LEADERBOARD) is set smaller so it stays in its column
+    const h1 = el("h1", title.length > 8 ? { class: "long" } : {}, el("span", {}, title));
+    return el("div", { class: "menu" }, el("header", { class: "brand small" }, h1, el("p", {}, lede)), ...main);
   }
 
   /** Menu corner: SIGN IN when anonymous; username, profile stats and SIGN OUT when signed in. */
@@ -839,6 +862,10 @@ export class App {
           else if (joined === "unavailable") unavailable.textContent = UNAVAILABLE;
         })(),
       }),
+      this.bar({
+        accent: "#c9a227", title: "LEADERBOARD", tagline: "The top 50 ranked players by TR.",
+        glyph: "#1", index: bars.length + 3, onClick: () => this.showLeaderboard(),
+      }),
     );
     const page = this.subPage("VERSUS", "Pick an opponent. First to top out loses.",
       el("nav", { class: "bars dense" }, ...bars),
@@ -885,10 +912,17 @@ export class App {
     this.leaveRoom();
   }
 
-  /** RANKED MATCH: enter the queue and show the search. Signed out or without a game server, no page. */
+  /**
+   * RANKED MATCH: enter the queue and show the search. Signed out or without a game server, no page.
+   * On a cooldown the queue screen says so instead of searching.
+   */
   private async startQueue(): Promise<"waiting" | "signed-out" | "unavailable"> {
     if (this.queue) return "waiting";
     const joined = await joinQueue();
+    if (typeof joined === "object") {
+      if (this.screen === "bots") this.showQueue(joined);
+      return "waiting";
+    }
     if (joined !== "waiting") return joined;
     if (this.screen !== "bots") {
       void leaveQueue(); // left the page meanwhile
@@ -901,8 +935,9 @@ export class App {
   /**
    * The search: elapsed time, the TR range the server accepts now, our own TR. Polls the queue every
    * QUEUE_POLL_MS (the poll is the keep-alive); on `matched` opens the ranked socket like a room.
+   * With `cooldown` (the server refused the join) it only says when searching is possible again.
    */
-  private showQueue(): void {
+  private showQueue(cooldown?: Cooldown): void {
     const shownAt = performance.now();
     const stat = (label: string, value: HTMLElement) => el("div", { class: "stat" }, el("span", {}, label), value);
     const elapsed = el("p", { class: "room-code", role: "timer", "aria-label": "Time searching" }, "0:00");
@@ -910,23 +945,33 @@ export class App {
     const tr = el("strong", {}, "…");
     const status = el("p", { class: "note", role: "status" }, "Searching for an opponent… (ESC to cancel)");
     const error = el("p", { class: "form-error", role: "alert" });
-    const back = el("button", { class: "ghost-btn", type: "button", "data-nav": "" }, "← CANCEL");
+    const back = el("button", { class: "ghost-btn", type: "button", "data-nav": "" }, cooldown ? "← BACK" : "← CANCEL");
     back.addEventListener("click", () => {
       this.cancelQueue();
       this.showBots();
     });
     const page = this.subPage("RANKED", "Matched by TR with another signed-in player. The accepted range widens every 10 seconds.",
-      el("section", { class: "account-form room queue" },
-        el("p", { class: "account-label" }, "SEARCHING"),
-        elapsed,
-        el("div", { class: "stats" }, stat("RANGE", range), stat("YOUR TR", tr)),
-        status,
-        error,
-        el("div", { class: "actions" }, back),
-      ),
-      el("footer", { class: "hint" }, "ESC to cancel"),
+      cooldown
+        ? el("section", { class: "account-form room queue" },
+          el("p", { class: "account-label" }, "NOT SEARCHING"),
+          error,
+          el("div", { class: "actions" }, back),
+        )
+        : el("section", { class: "account-form room queue" },
+          el("p", { class: "account-label" }, "SEARCHING"),
+          elapsed,
+          el("div", { class: "stats" }, stat("RANGE", range), stat("YOUR TR", tr)),
+          status,
+          error,
+          el("div", { class: "actions" }, back),
+        ),
+      el("footer", { class: "hint" }, cooldown ? "ESC to go back" : "ESC to cancel"),
     );
     this.setScreen("queue", page);
+    if (cooldown) {
+      error.textContent = cooldownText(cooldown);
+      return;
+    }
 
     let timer = 0;
     const ticker = window.setInterval(() => {
@@ -960,6 +1005,7 @@ export class App {
         // dropped (this tab slept past the keep-alive, say): enter again
         const again = await joinQueue();
         if (!live()) return;
+        if (typeof again === "object") return end(cooldownText(again));
         state = again === "signed-out" ? again : again === "waiting" ? { status: "waiting", waited: 0, range: INITIAL_RANGE } : null;
       }
       if (state === "signed-out") return end(`${SIGN_IN_FOR_RANKED}. Your session has ended.`);
@@ -989,6 +1035,113 @@ export class App {
       timer = window.setTimeout(() => void poll(), QUEUE_POLL_MS);
     };
     void poll();
+  }
+
+  // ------------------------------------------------------------------ leaderboard and profiles
+
+  /**
+   * LEADERBOARD: the top players by TR, each row opening their PROFILE. `players` (the list as last
+   * fetched) shows at once; without it the list is fetched. Server text only ever goes in as text.
+   */
+  private showLeaderboard(players: LeaderboardPlayer[] | null = null): void {
+    const list = el("ol", { class: "ladder", "aria-label": "Top players by TR" });
+    const status = el("p", { class: "note", role: "status" });
+    const error = el("p", { class: "form-error", role: "alert" });
+    const back = el("button", { class: "ghost-btn", type: "button", "data-nav": "" }, "← BACK");
+    back.addEventListener("click", () => this.showBots());
+    const hint = el("footer", { class: "hint" }, "ESC to go back");
+    const page = this.subPage("LEADERBOARD", "Calibrated ranked players by TR. Only rated ranked matches count here.",
+      el("section", { class: "account-form room ladder-box" },
+        el("p", { class: "account-label" }, "TOP 50"),
+        list,
+        status,
+        error,
+        el("div", { class: "actions" }, back),
+      ),
+      hint,
+    );
+    const fill = (rows: LeaderboardPlayer[]) => {
+      this.ladder = rows;
+      hint.textContent = rows.length ? "ENTER for a profile · ESC to go back" : "ESC to go back";
+      status.textContent = rows.length ? "" : NO_PLAYERS;
+      list.hidden = rows.length === 0;
+      list.replaceChildren(...rows.map((p) => {
+        const row = el("button", { class: "ladder-row", type: "button", "data-nav": "" },
+          el("span", { class: "ladder-rank" }, `#${p.rank}`),
+          el("span", { class: "ladder-name" }, p.username),
+          el("span", { class: "ladder-tr" }, trText(p.tr)),
+          el("span", { class: "ladder-games" }, `${p.games} GAMES`),
+        );
+        row.addEventListener("click", () => {
+          sfx.confirm();
+          this.showProfile(p.username);
+        });
+        row.addEventListener("mouseenter", () => sfx.menu());
+        return el("li", {}, row);
+      }));
+    };
+    this.setScreen("leaderboard", page);
+    if (players) {
+      fill(players);
+      list.querySelector<HTMLElement>("[data-nav]")?.focus();
+      return;
+    }
+    list.hidden = true;
+    status.textContent = "Loading…";
+    void fetchLeaderboard().then((rows) => {
+      if (!page.isConnected) return; // left the page meanwhile
+      if (!rows) {
+        status.textContent = "";
+        error.textContent = UNAVAILABLE;
+        return;
+      }
+      const focused = document.activeElement === back;
+      fill(rows);
+      if (focused) list.querySelector<HTMLElement>("[data-nav]")?.focus();
+    });
+  }
+
+  /** PROFILE: a player's public ranked numbers. BACK returns to the LEADERBOARD. */
+  private showProfile(username: string): void {
+    const stat = (label: string, value: HTMLElement) => el("div", { class: "stat" }, el("span", {}, label), value);
+    const rank = el("strong", {}, "…");
+    const tr = el("strong", {}, "…");
+    const games = el("strong", {}, "…");
+    const joined = el("strong", {}, "…");
+    const name = el("p", { class: "account-name" }, username);
+    const status = el("p", { class: "note", role: "status" }, "Loading…");
+    const error = el("p", { class: "form-error", role: "alert" });
+    // the values carry RANK and TR themselves (RANK #2, TR 12,345), so the labels say what they measure
+    const stats = el("div", { class: "stats" }, stat("STANDING", rank), stat("RATING", tr), stat("RANKED GAMES", games), stat("JOINED", joined));
+    const back = el("button", { class: "ghost-btn", type: "button", "data-nav": "" }, "← BACK");
+    back.addEventListener("click", () => this.showLeaderboard(this.ladder));
+    const page = this.subPage("PROFILE", "A player's ranked standing. Only rated ranked matches count here.",
+      el("section", { class: "account-form room profile" },
+        el("p", { class: "account-label" }, "PLAYER"),
+        name,
+        stats,
+        status,
+        error,
+        el("div", { class: "actions" }, back),
+      ),
+      el("footer", { class: "hint" }, "ESC to go back"),
+    );
+    this.setScreen("profile", page);
+    void fetchProfile(username).then((p) => {
+      if (!page.isConnected) return;
+      status.textContent = "";
+      if (p === null || p === "not-found") {
+        stats.remove();
+        error.textContent = p === null ? UNAVAILABLE : NO_SUCH_PLAYER;
+        return;
+      }
+      name.textContent = p.username;
+      rank.textContent = p.rank === null ? "UNRANKED" : `RANK #${p.rank}`;
+      tr.textContent = trText(p.rating.tr);
+      games.textContent = p.rating.games.toLocaleString("en-US");
+      joined.textContent = new Date(p.joined).toLocaleDateString("en-US", { year: "numeric", month: "short", day: "numeric" });
+      if (p.rating.tr === null) status.textContent = "Placed on the leaderboard after calibration: TR shows after enough rated ranked matches.";
+    });
   }
 
   /** The lobby screens (CREATE's code, JOIN's field): one box in the VERSUS layout. */
