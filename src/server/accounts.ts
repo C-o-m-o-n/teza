@@ -31,6 +31,10 @@ export const LEGACY_COOKIE_NAME = "teza_session";
 export const MAX_REGISTRATIONS_PER_DAY = 500;
 export const REGISTRATION_WINDOW_MS = 24 * 60 * 60 * 1000;
 export const MAX_ACCOUNTS = 200_000;
+// In front of the daily cap, each client IP (`CF-Connecting-IP`, set by Cloudflare) may register this many
+// accounts per REGISTRATION_WINDOW_MS (429 past it), so one machine can't use up the whole day's quota.
+// Only a SHA-256 of the IP is stored. Without the header (never on Cloudflare) the per-IP check is skipped.
+export const MAX_REGISTRATIONS_PER_IP = 5;
 export const SESSION_TTL_S = 30 * 24 * 60 * 60;
 export const PBKDF2_ITERATIONS = 100_000; // the Workers WebCrypto maximum
 export const MAX_BODY_BYTES = 4096;
@@ -78,6 +82,10 @@ export interface AccountStore {
   accountCount(): number;
   /** Accounts created at or after `since` (ms). */
   accountsCreatedSince(since: number): number;
+  /** When accounts were registered from the IP hash `ipHash` at or after `since` (ms), oldest first. */
+  registrationsFrom(ipHash: string, since: number): number[];
+  /** Records a registration from `ipHash` at `at`, and deletes records older than REGISTRATION_WINDOW_MS. */
+  insertRegistration(ipHash: string, at: number): void;
   setRecords(key: string, records: string): void;
   session(tokenHash: string): SessionRow | null;
   insertSession(tokenHash: string, row: SessionRow): void;
@@ -408,12 +416,32 @@ export async function handleAccount(
         const full = () => fail(503, "Registration is full right now.");
         const isFull = () => store.accountsCreatedSince(now() - REGISTRATION_WINDOW_MS) >= MAX_REGISTRATIONS_PER_DAY ||
           store.accountCount() >= MAX_ACCOUNTS;
-        if (isFull()) return full();
+        const ip = request.headers.get("CF-Connecting-IP");
+        const ipHash = ip === null ? null : await sha256(ip);
+        /** Seconds until this IP may register again, or null if it may now. */
+        const ipWait = (): number | null => {
+          if (ipHash === null) return null;
+          const times = store.registrationsFrom(ipHash, now() - REGISTRATION_WINDOW_MS);
+          if (times.length < MAX_REGISTRATIONS_PER_IP) return null;
+          // the window is [now - 24 h, now]: a registration stops counting 1 ms after it is 24 h old
+          return Math.ceil((times[times.length - MAX_REGISTRATIONS_PER_IP] + REGISTRATION_WINDOW_MS + 1 - now()) / 1000);
+        };
+        const refused = (): Response | null => {
+          const wait = ipWait();
+          if (wait !== null) {
+            return json(429, { error: "Too many new accounts from this network today. Try again later.", retryAfter: wait }, { "Retry-After": String(wait) });
+          }
+          return isFull() ? full() : null;
+        };
+        const before = refused();
+        if (before) return before;
         if (store.account(key)) return fail(409, "That username is taken.");
         const row = { username: username as string, passwordHash: await hashPassword(password as string), createdAt: now(), records: JSON.stringify({ vs: {} }) };
         // checked again on insert: another register may have finished while this one was hashing
-        if (isFull()) return full();
+        const after = refused();
+        if (after) return after;
         if (!store.insertAccount(key, row)) return fail(409, "That username is taken.");
+        if (ipHash !== null) store.insertRegistration(ipHash, now());
         return signIn(key, 201);
       }
       const row = store.account(key);

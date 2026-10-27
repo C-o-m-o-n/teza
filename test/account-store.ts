@@ -1,5 +1,5 @@
 // The in-memory AccountStore the accounts, leaderboard and ranked tests share (the Durable Object's is SQLite).
-import { AccountRow, AccountStore, CalibratedRow, PAIR_WINDOW_MS, RankedMatchRow, RatingRow, SessionRow } from "../src/server/accounts";
+import { AccountRow, AccountStore, CalibratedRow, PAIR_WINDOW_MS, REGISTRATION_WINDOW_MS, RankedMatchRow, RatingRow, SessionRow } from "../src/server/accounts";
 import { RD_HIDDEN } from "../src/server/rating";
 
 const sorted = (a: string, b: string): [string, string] => (a < b ? [a, b] : [b, a]);
@@ -17,6 +17,14 @@ export class MemoryStore implements AccountStore {
   }
   accountCount(): number {
     return this.accounts.size;
+  }
+  registrations: { ipHash: string; at: number }[] = [];
+  registrationsFrom(ipHash: string, since: number): number[] {
+    return this.registrations.filter((r) => r.ipHash === ipHash && r.at >= since).map((r) => r.at).sort((a, b) => a - b);
+  }
+  insertRegistration(ipHash: string, at: number): void {
+    this.registrations = this.registrations.filter((r) => r.at >= at - REGISTRATION_WINDOW_MS);
+    this.registrations.push({ ipHash, at });
   }
   accountsCreatedSince(since: number): number {
     return [...this.accounts.values()].filter((a) => a.createdAt >= since).length;

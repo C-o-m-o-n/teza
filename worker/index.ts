@@ -15,7 +15,7 @@
 
 import { DurableObject } from "cloudflare:workers";
 import {
-  AccountRow, AccountStore, CalibratedRow, cookieToken, handleAccount, MAX_BODY_BYTES, PAIR_WINDOW_MS, pairAllowed, RankedMatchRow,
+  AccountRow, AccountStore, CalibratedRow, cookieToken, handleAccount, MAX_BODY_BYTES, PAIR_WINDOW_MS, REGISTRATION_WINDOW_MS, pairAllowed, RankedMatchRow,
   QueueHost, RatingChange, rateRankedMatch, RatingRow, readBody, reportNoShow, sessionKey, SessionRow, withTimeout,
 } from "../src/server/accounts";
 import { handlePublic, isPublicRoute } from "../src/server/leaderboard";
@@ -231,6 +231,10 @@ export class Accounts extends DurableObject<Env> {
     )`);
     // For the daily registration cap (accountsCreatedSince).
     sql.exec("CREATE INDEX IF NOT EXISTS accounts_by_created ON accounts (created_at)");
+    // The per-IP registration quota: a SHA-256 of `CF-Connecting-IP` per registration, pruned after 24 h.
+    sql.exec("CREATE TABLE IF NOT EXISTS registrations (ip_hash TEXT NOT NULL, at INTEGER NOT NULL)");
+    sql.exec("CREATE INDEX IF NOT EXISTS registrations_by_ip ON registrations (ip_hash, at)");
+    sql.exec("CREATE INDEX IF NOT EXISTS registrations_by_time ON registrations (at)");
     sql.exec(`CREATE TABLE IF NOT EXISTS sessions (
       token_hash TEXT PRIMARY KEY,
       username_key TEXT NOT NULL,
@@ -276,6 +280,14 @@ export class Accounts extends DurableObject<Env> {
       },
       accountsCreatedSince(since) {
         return sql.exec<{ n: number }>("SELECT COUNT(*) AS n FROM accounts WHERE created_at >= ?", since).one().n;
+      },
+      registrationsFrom(ipHash, since) {
+        return sql.exec<{ at: number }>(
+          "SELECT at FROM registrations WHERE ip_hash = ? AND at >= ? ORDER BY at", ipHash, since).toArray().map((r) => r.at);
+      },
+      insertRegistration(ipHash, at) {
+        sql.exec("DELETE FROM registrations WHERE at < ?", at - REGISTRATION_WINDOW_MS);
+        sql.exec("INSERT INTO registrations VALUES (?, ?)", ipHash, at);
       },
       setRecords(key, records) {
         sql.exec("UPDATE accounts SET records = ? WHERE username_key = ?", records, key);

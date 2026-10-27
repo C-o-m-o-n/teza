@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
-  COOKIE_NAME, LEGACY_COOKIE_NAME, MAX_ACCOUNTS, MAX_BODY_BYTES, MAX_REGISTRATIONS_PER_DAY, REGISTRATION_WINDOW_MS, MAX_PAIR_RATED, NO_SHOW_COOLDOWN_MS, OPEN_ROOM_TIMEOUT_MS, PAIR_WINDOW_MS, QueueHost,
+  COOKIE_NAME, LEGACY_COOKIE_NAME, MAX_ACCOUNTS, MAX_BODY_BYTES, MAX_REGISTRATIONS_PER_DAY, MAX_REGISTRATIONS_PER_IP, REGISTRATION_WINDOW_MS, MAX_PAIR_RATED, NO_SHOW_COOLDOWN_MS, OPEN_ROOM_TIMEOUT_MS, PAIR_WINDOW_MS, QueueHost,
   RANKED_MATCH_TTL_MS, SESSION_TTL_S, cookieToken, handleAccount, pairAllowed, rateRankedMatch, reportNoShow, sessionKey,
 } from "../src/server/accounts";
 import { Matchmaker, QUEUE_STALE_MS } from "../src/server/matchmaking";
@@ -45,6 +45,7 @@ interface Opts {
   rawBody?: string;
   cookie?: string | null;
   rawCookie?: string; // a whole Cookie header, instead of `cookie`
+  ip?: string; // CF-Connecting-IP
   origin?: string;
   contentType?: string | null;
 }
@@ -53,6 +54,7 @@ function call(method: string, route: string, opts: Opts = {}): Promise<Response>
   const headers: Record<string, string> = {};
   if (opts.cookie) headers.Cookie = `${COOKIE_NAME}=${opts.cookie}`;
   if (opts.rawCookie) headers.Cookie = opts.rawCookie;
+  if (opts.ip) headers["CF-Connecting-IP"] = opts.ip;
   if (opts.origin) headers.Origin = opts.origin;
   let body: string | undefined;
   if (method !== "GET") {
@@ -288,6 +290,34 @@ describe("account caps", () => {
     expect(store.accounts.size).toBe(MAX_ACCOUNTS);
     expect((await registerAs("Bob")).status).toBe(503);
     expect(store.accounts.size).toBe(MAX_ACCOUNTS);
+  });
+
+  it(`lets one IP register ${MAX_REGISTRATIONS_PER_IP} accounts per 24 h, then answers 429 with Retry-After`, async () => {
+    const from = (username: string, ip: string) => call("POST", "register", { body: { username, password: PASSWORD }, ip });
+    for (let i = 0; i < MAX_REGISTRATIONS_PER_IP; i++) {
+      expect((await from(`user${i}`, "203.0.113.7")).status).toBe(201);
+      clock += 1000;
+    }
+    const sixth = await from("user5", "203.0.113.7");
+    expect(sixth.status).toBe(429);
+    const wait = Math.ceil((REGISTRATION_WINDOW_MS + 1 - MAX_REGISTRATIONS_PER_IP * 1000) / 1000);
+    expect(sixth.headers.get("Retry-After")).toBe(String(wait));
+    expect(await sixth.json()).toMatchObject({ retryAfter: wait });
+    expect(store.account("user5")).toBeNull();
+    expect((await from("other", "198.51.100.2")).status).toBe(201); // another IP is not affected
+    expect([...store.registrations].map((r) => r.ipHash).some((h) => h.includes("203.0.113.7"))).toBe(false); // hashed
+
+    clock += REGISTRATION_WINDOW_MS - MAX_REGISTRATIONS_PER_IP * 1000 + 1; // the first one is now older than the window
+    expect((await from("user5", "203.0.113.7")).status).toBe(201);
+    expect((await from("user6", "203.0.113.7")).status).toBe(429);
+    expect(store.registrations.every((r) => r.at >= clock - REGISTRATION_WINDOW_MS)).toBe(true); // older rows pruned
+  });
+
+  it("checks the per-IP quota again after hashing", async () => {
+    const from = (username: string) => call("POST", "register", { body: { username, password: PASSWORD }, ip: "203.0.113.7" });
+    for (let i = 0; i < MAX_REGISTRATIONS_PER_IP - 1; i++) expect((await from(`user${i}`)).status).toBe(201);
+    const [a, b] = await Promise.all([from("Alice"), from("Bob")]);
+    expect([a.status, b.status].sort()).toEqual([201, 429]);
   });
 
   it("checks the cap again after hashing, for registrations that overlap", async () => {
