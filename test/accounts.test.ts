@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   COOKIE_NAME, LEGACY_COOKIE_NAME, MAX_ACCOUNTS, MAX_BODY_BYTES, MAX_REGISTRATIONS_PER_DAY, MAX_REGISTRATIONS_PER_IP, REGISTRATION_WINDOW_MS, MAX_PAIR_RATED, NO_SHOW_COOLDOWN_MS, OPEN_ROOM_TIMEOUT_MS, PAIR_WINDOW_MS, QueueHost,
-  RANKED_MATCH_TTL_MS, SESSION_TTL_S, cookieToken, handleAccount, pairAllowed, rateRankedMatch, reportNoShow, sessionKey,
+  RANKED_MATCH_TTL_MS, SESSION_TTL_S, cookieToken, handleAccount, pairAllowed, ipBucket, rateRankedMatch, reportNoShow, sessionKey,
 } from "../src/server/accounts";
 import { Matchmaker, QUEUE_STALE_MS } from "../src/server/matchmaking";
 import { ROOM_CODE } from "../src/server/match";
@@ -311,6 +311,36 @@ describe("account caps", () => {
     expect((await from("user5", "203.0.113.7")).status).toBe(201);
     expect((await from("user6", "203.0.113.7")).status).toBe(429);
     expect(store.registrations.every((r) => r.at >= clock - REGISTRATION_WINDOW_MS)).toBe(true); // older rows pruned
+  });
+
+  it("counts IPv6 sign-ups per /64", async () => {
+    const from = (username: string, ip: string) => call("POST", "register", { body: { username, password: PASSWORD }, ip });
+    for (let i = 0; i < MAX_REGISTRATIONS_PER_IP; i++) {
+      expect((await from(`user${i}`, i % 2 ? "2001:db8:1:2:ffff::b" : "2001:db8:1:2::a")).status).toBe(201);
+    }
+    expect((await from("user5", "2001:db8:1:2::c")).status).toBe(429);
+    expect((await from("user6", "2001:0DB8:0001:0002:0:0:0:d")).status).toBe(429); // the same /64, written longhand
+    expect((await from("other", "2001:db8:1:3::a")).status).toBe(201); // the next /64
+  });
+
+  it("counts an IPv4-mapped IPv6 address as its IPv4 address", async () => {
+    const from = (username: string, ip: string) => call("POST", "register", { body: { username, password: PASSWORD }, ip });
+    for (let i = 0; i < MAX_REGISTRATIONS_PER_IP; i++) {
+      expect((await from(`user${i}`, i % 2 ? "::ffff:203.0.113.7" : "203.0.113.7")).status).toBe(201);
+    }
+    expect((await from("user5", "::ffff:203.0.113.7")).status).toBe(429);
+    expect((await from("user6", "203.0.113.7")).status).toBe(429);
+  });
+
+  it("ipBucket normalises addresses to their quota bucket", () => {
+    expect(ipBucket("203.0.113.7")).toBe("203.0.113.7");
+    expect(ipBucket("2001:db8::1")).toBe("2001:0db8:0000:0000::/64");
+    expect(ipBucket("2001:0DB8:0:0::1")).toBe("2001:0db8:0000:0000::/64");
+    expect(ipBucket("2001:db8:1:2:3:4:5:6")).toBe("2001:0db8:0001:0002::/64");
+    expect(ipBucket("::1")).toBe("0000:0000:0000:0000::/64");
+    expect(ipBucket("::ffff:203.0.113.7")).toBe("203.0.113.7");
+    expect(ipBucket("::FFFF:cb00:7107")).toBe("203.0.113.7");
+    expect(ipBucket("fe80::1%eth0")).toBe("fe80:0000:0000:0000::/64");
   });
 
   it("checks the per-IP quota again after hashing", async () => {
