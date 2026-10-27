@@ -33,9 +33,15 @@ export const REGISTRATION_WINDOW_MS = 24 * 60 * 60 * 1000;
 export const MAX_ACCOUNTS = 200_000;
 // In front of the daily cap, each client IP (`CF-Connecting-IP`, set by Cloudflare) may register this many
 // accounts per REGISTRATION_WINDOW_MS (429 past it), so one machine can't use up the whole day's quota.
-// IPv6 clients are counted per /64 (ipBucket), since one host usually holds a whole /64. Only a SHA-256 of the
-// bucket is stored. Without the header (never on Cloudflare) the per-IP check is skipped.
+// IPv6 clients are counted per /64, since one host usually holds a whole /64, and also per /48 up to
+// MAX_REGISTRATIONS_PER_PREFIX, since a free tunnel or a home line can hand one person a /48 or /56 (ipBuckets).
+// Only a SHA-256 of each bucket is stored. Without the header (never on Cloudflare) the per-IP check is skipped.
+// Keep Cloudflare's "Pseudo IPv4" (Overwrite Headers) off: it rewrites `CF-Connecting-IP` for IPv6 clients to a
+// Class E IPv4 derived from the full address, which would give every address its own bucket again.
 export const MAX_REGISTRATIONS_PER_IP = 5;
+export const MAX_REGISTRATIONS_PER_PREFIX = 20;
+/** The one bucket every unparseable `CF-Connecting-IP` shares. */
+export const INVALID_IP_BUCKET = "invalid";
 export const SESSION_TTL_S = 30 * 24 * 60 * 60;
 export const PBKDF2_ITERATIONS = 100_000; // the Workers WebCrypto maximum
 export const MAX_BODY_BYTES = 4096;
@@ -172,32 +178,50 @@ export async function verifyPassword(password: string, stored: string): Promise<
 // Unknown usernames are checked against this, so they take as long as a wrong password.
 let dummyHash: Promise<string> | null = null;
 
+const IPV4 = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/;
+
+/** `a.b.c.d` with each octet 0-255 as numbers, or null. */
+function ipv4Octets(s: string): number[] | null {
+  const m = IPV4.exec(s);
+  const b = m ? m.slice(1).map(Number) : [];
+  return m && b.every((o) => o <= 255) ? b : null;
+}
+
 /**
- * The per-IP quota's bucket for `ip`: IPv4 as is, IPv6 as its /64 (`2001:0db8:0001:0002::/64`, expanded,
- * lowercase, zero-padded), and IPv4-mapped IPv6 (`::ffff:a.b.c.d`) as the plain IPv4. Anything unparseable is
- * returned as is.
+ * The per-IP quota's buckets for `ip`, each with its limit per REGISTRATION_WINDOW_MS. IPv4 (and IPv4-mapped
+ * IPv6, `::ffff:a.b.c.d`) has one: the plain address. IPv6 has two: its /64 (`2001:0db8:0001:0002::/64`) and its
+ * /48 (`2001:0db8:0001::/48`), expanded, lowercase and zero-padded. Anything unparseable is INVALID_IP_BUCKET.
  */
-export function ipBucket(ip: string): string {
-  if (!ip.includes(":")) return ip;
+export function ipBuckets(ip: string): { key: string; limit: number }[] {
+  const one = (key: string) => [{ key, limit: MAX_REGISTRATIONS_PER_IP }];
   let s = ip.trim().toLowerCase().replace(/%.*$/, ""); // drop a zone id
-  const dotted = /^(.*:)(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(s);
-  if (dotted) {
-    const b = dotted.slice(2).map(Number);
+  if (!s.includes(":")) {
+    const b = ipv4Octets(s);
+    return one(b ? b.join(".") : INVALID_IP_BUCKET);
+  }
+  const dotted = /^(.*:)([^:]+)$/.exec(s);
+  if (dotted && dotted[2].includes(".")) {
+    const b = ipv4Octets(dotted[2]);
+    if (!b) return one(INVALID_IP_BUCKET);
     s = dotted[1] + ((b[0] << 8) | b[1]).toString(16) + ":" + ((b[2] << 8) | b[3]).toString(16);
   }
   const halves = s.split("::");
-  if (halves.length > 2) return ip;
+  if (halves.length > 2) return one(INVALID_IP_BUCKET);
   const head = halves[0] ? halves[0].split(":") : [];
   const tail = halves.length === 2 && halves[1] ? halves[1].split(":") : [];
   const missing = 8 - head.length - tail.length;
-  if (halves.length === 2 ? missing < 1 : missing !== 0) return ip;
+  if (halves.length === 2 ? missing < 1 : missing !== 0) return one(INVALID_IP_BUCKET);
   const groups = [...head, ...Array<string>(missing).fill("0"), ...tail];
-  if (!groups.every((g) => /^[0-9a-f]{1,4}$/.test(g))) return ip;
+  if (!groups.every((g) => /^[0-9a-f]{1,4}$/.test(g))) return one(INVALID_IP_BUCKET);
   const n = groups.map((g) => parseInt(g, 16));
   if (n.slice(0, 5).every((g) => g === 0) && n[5] === 0xffff) {
-    return [n[6] >> 8, n[6] & 255, n[7] >> 8, n[7] & 255].join(".");
+    return one([n[6] >> 8, n[6] & 255, n[7] >> 8, n[7] & 255].join("."));
   }
-  return groups.slice(0, 4).map((g) => g.padStart(4, "0")).join(":") + "::/64";
+  const prefix = (len: number) => groups.slice(0, len).map((g) => g.padStart(4, "0")).join(":");
+  return [
+    { key: `${prefix(4)}::/64`, limit: MAX_REGISTRATIONS_PER_IP },
+    { key: `${prefix(3)}::/48`, limit: MAX_REGISTRATIONS_PER_PREFIX },
+  ];
 }
 
 async function sha256(s: string): Promise<string> {
@@ -446,14 +470,19 @@ export async function handleAccount(
         const isFull = () => store.accountsCreatedSince(now() - REGISTRATION_WINDOW_MS) >= MAX_REGISTRATIONS_PER_DAY ||
           store.accountCount() >= MAX_ACCOUNTS;
         const ip = request.headers.get("CF-Connecting-IP");
-        const ipHash = ip === null ? null : await sha256(ipBucket(ip));
-        /** Seconds until this IP may register again, or null if it may now. */
+        const buckets = ip === null ? [] :
+          await Promise.all(ipBuckets(ip).map(async ({ key, limit }) => ({ hash: await sha256(key), limit })));
+        /** Seconds until this IP may register again (the longest wait over its buckets), or null if it may now. */
         const ipWait = (): number | null => {
-          if (ipHash === null) return null;
-          const times = store.registrationsFrom(ipHash, now() - REGISTRATION_WINDOW_MS);
-          if (times.length < MAX_REGISTRATIONS_PER_IP) return null;
-          // the window is [now - 24 h, now]: a registration stops counting 1 ms after it is 24 h old
-          return Math.ceil((times[times.length - MAX_REGISTRATIONS_PER_IP] + REGISTRATION_WINDOW_MS + 1 - now()) / 1000);
+          let wait: number | null = null;
+          for (const { hash, limit } of buckets) {
+            const times = store.registrationsFrom(hash, now() - REGISTRATION_WINDOW_MS);
+            if (times.length < limit) continue;
+            // the window is [now - 24 h, now]: a registration stops counting 1 ms after it is 24 h old
+            const w = Math.ceil((times[times.length - limit] + REGISTRATION_WINDOW_MS + 1 - now()) / 1000);
+            wait = Math.max(wait ?? 0, w);
+          }
+          return wait;
         };
         const refused = (): Response | null => {
           const wait = ipWait();
@@ -470,7 +499,7 @@ export async function handleAccount(
         const after = refused();
         if (after) return after;
         if (!store.insertAccount(key, row)) return fail(409, "That username is taken.");
-        if (ipHash !== null) store.insertRegistration(ipHash, now());
+        for (const { hash } of buckets) store.insertRegistration(hash, now());
         return signIn(key, 201);
       }
       const row = store.account(key);
