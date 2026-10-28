@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
-  COOKIE_NAME, LEGACY_COOKIE_NAME, MAX_ACCOUNTS, MAX_BODY_BYTES, MAX_REGISTRATIONS_PER_DAY, MAX_REGISTRATIONS_PER_IP, MAX_REGISTRATIONS_PER_PREFIX, REGISTRATION_WINDOW_MS, MAX_PAIR_RATED, NO_SHOW_COOLDOWN_MS, OPEN_ROOM_TIMEOUT_MS, PAIR_WINDOW_MS, QueueHost,
+  COOKIE_NAME, LEGACY_COOKIE_NAME, ACCOUNTS_WARN_AT, ACCOUNTS_WARN_EVERY, MAX_ACCOUNTS, MAX_BODY_BYTES, MAX_REGISTRATIONS_PER_IP, MAX_REGISTRATIONS_PER_PREFIX, REGISTRATION_WINDOW_MS, MAX_PAIR_RATED, NO_SHOW_COOLDOWN_MS, OPEN_ROOM_TIMEOUT_MS, PAIR_WINDOW_MS, QueueHost,
   RANKED_MATCH_TTL_MS, SESSION_TTL_S, cookieToken, handleAccount, pairAllowed, INVALID_IP_BUCKET, ipBuckets, rateRankedMatch, reportNoShow, sessionKey,
 } from "../src/server/accounts";
 import { Matchmaker, QUEUE_STALE_MS } from "../src/server/matchmaking";
@@ -249,23 +249,37 @@ describe("sessions", () => {
 });
 
 describe("account caps", () => {
-  /** Adds accounts up to `n` in total without hashing a password for each, created at `at`. */
-  function fill(n: number, at = clock): void {
-    for (let i = store.accounts.size; i < n; i++) {
-      store.insertAccount(`filler${i}`, { username: `filler${i}`, passwordHash: "x", createdAt: at, records: JSON.stringify({ vs: {} }) });
-    }
-  }
   const registerAs = (username: string) => call("POST", "register", { body: { username, password: PASSWORD } });
+  let warn: ReturnType<typeof vi.spyOn>;
+  beforeEach(() => {
+    warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+  });
+  afterEach(() => warn.mockRestore());
 
-  it(`refuses a registration past ${MAX_REGISTRATIONS_PER_DAY} new accounts in 24 h with 503 and stores nothing; login still works`, async () => {
+  it("sizes the ceiling for 10 GB of storage and warns from 80%", () => {
+    // 6708 bytes is a measured account with the largest valid records, its session, rating and indexes
+    expect(MAX_ACCOUNTS * 6708).toBeLessThan(10e9);
+    expect(ACCOUNTS_WARN_AT).toBe(MAX_ACCOUNTS * 0.8);
+    expect((MAX_ACCOUNTS - ACCOUNTS_WARN_AT) % ACCOUNTS_WARN_EVERY).toBe(0); // the last account warns too
+  });
+
+  it("has no daily cap: with 1000 accounts created in the last hour, one more registers", async () => {
+    for (let i = 0; i < 1000; i++) {
+      store.insertAccount(`filler${i}`, { username: `filler${i}`, passwordHash: "x", createdAt: clock - i * 1000, records: JSON.stringify({ vs: {} }) });
+    }
+    expect((await registerAs("Bob")).status).toBe(201);
+    expect(store.accounts.size).toBe(1001);
+    expect(warn).not.toHaveBeenCalled();
+  });
+
+  it(`refuses a registration at ${MAX_ACCOUNTS} accounts with 503 and stores nothing; login still works`, async () => {
     await register();
-    fill(MAX_REGISTRATIONS_PER_DAY);
+    store.uncounted = MAX_ACCOUNTS - 1;
     const sessions = store.sessions.size;
     const full = await registerAs("Bob");
     expect(full.status).toBe(503);
     expect(await full.json()).toEqual({ error: "Registration is full right now." });
     expect(full.headers.get("Set-Cookie")).toBeNull();
-    expect(store.accounts.size).toBe(MAX_REGISTRATIONS_PER_DAY);
     expect(store.account("bob")).toBeNull();
     expect(store.sessions.size).toBe(sessions);
 
@@ -274,22 +288,27 @@ describe("account caps", () => {
     expect((await call("GET", "me", { cookie: tokenOf(login) })).status).toBe(200);
   });
 
-  it("a script that fills the daily cap blocks sign-ups only until the window rolls", async () => {
-    fill(MAX_REGISTRATIONS_PER_DAY); // the attack: the whole day's quota at once
-    expect((await registerAs("Bob")).status).toBe(503);
-    clock += REGISTRATION_WINDOW_MS; // the window is [now - 24 h, now]
-    expect((await registerAs("Bob")).status).toBe(503);
-    clock += 1; // the filler accounts are now older than the window
-    expect((await registerAs("Bob")).status).toBe(201);
-    expect(store.account("bob")).not.toBeNull();
-  });
+  it(`logs one structured warning at ${ACCOUNTS_WARN_AT} accounts and every ${ACCOUNTS_WARN_EVERY} after, not per request`, async () => {
+    store.uncounted = ACCOUNTS_WARN_AT - 2;
+    expect((await registerAs("User1")).status).toBe(201); // account ACCOUNTS_WARN_AT - 1
+    expect(warn).not.toHaveBeenCalled();
+    expect((await registerAs("User2")).status).toBe(201); // account ACCOUNTS_WARN_AT
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(warn).toHaveBeenCalledWith({
+      message: "Accounts near capacity", event: "accounts_near_capacity",
+      accounts: ACCOUNTS_WARN_AT, max: MAX_ACCOUNTS, remaining: MAX_ACCOUNTS - ACCOUNTS_WARN_AT,
+    });
+    expect((await registerAs("User3")).status).toBe(201);
+    expect((await call("POST", "login", { body: { username: "User3", password: PASSWORD } })).status).toBe(200);
+    expect((await registerAs("User3")).status).toBe(409);
+    expect(warn).toHaveBeenCalledTimes(1);
 
-  it(`counts only accounts created in the window, up to the ${MAX_ACCOUNTS} storage backstop`, async () => {
-    fill(MAX_ACCOUNTS - 1, clock - REGISTRATION_WINDOW_MS - 1); // all older than a day
-    expect((await registerAs("Alice")).status).toBe(201);
-    expect(store.accounts.size).toBe(MAX_ACCOUNTS);
-    expect((await registerAs("Bob")).status).toBe(503);
-    expect(store.accounts.size).toBe(MAX_ACCOUNTS);
+    store.uncounted = MAX_ACCOUNTS - 4; // 3 held, so the next is the last account
+    expect((await registerAs("User4")).status).toBe(201);
+    expect(warn).toHaveBeenCalledTimes(2);
+    expect(warn).toHaveBeenLastCalledWith(expect.objectContaining({ accounts: MAX_ACCOUNTS, remaining: 0 }));
+    expect((await registerAs("User5")).status).toBe(503);
+    expect(warn).toHaveBeenCalledTimes(2);
   });
 
   it(`lets one IP register ${MAX_REGISTRATIONS_PER_IP} accounts per 24 h, then answers 429 with Retry-After`, async () => {
@@ -383,10 +402,10 @@ describe("account caps", () => {
   });
 
   it("checks the cap again after hashing, for registrations that overlap", async () => {
-    fill(MAX_REGISTRATIONS_PER_DAY - 1);
+    store.uncounted = MAX_ACCOUNTS - 1;
     const [a, b] = await Promise.all([registerAs("Alice"), registerAs("Bob")]);
     expect([a.status, b.status].sort()).toEqual([201, 503]);
-    expect(store.accounts.size).toBe(MAX_REGISTRATIONS_PER_DAY);
+    expect(store.accounts.size).toBe(1);
   });
 });
 

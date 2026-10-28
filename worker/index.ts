@@ -229,8 +229,6 @@ export class Accounts extends DurableObject<Env> {
       created_at INTEGER NOT NULL,
       records TEXT NOT NULL
     )`);
-    // For the daily registration cap (accountsCreatedSince).
-    sql.exec("CREATE INDEX IF NOT EXISTS accounts_by_created ON accounts (created_at)");
     // The per-IP registration quota: a SHA-256 of `CF-Connecting-IP` per registration, pruned after 24 h.
     sql.exec("CREATE TABLE IF NOT EXISTS registrations (ip_hash TEXT NOT NULL, at INTEGER NOT NULL)");
     sql.exec("CREATE INDEX IF NOT EXISTS registrations_by_ip ON registrations (ip_hash, at)");
@@ -277,9 +275,6 @@ export class Accounts extends DurableObject<Env> {
       },
       accountCount() {
         return sql.exec<{ n: number }>("SELECT COUNT(*) AS n FROM accounts").one().n;
-      },
-      accountsCreatedSince(since) {
-        return sql.exec<{ n: number }>("SELECT COUNT(*) AS n FROM accounts WHERE created_at >= ?", since).one().n;
       },
       registrationsFrom(ipHash, since) {
         return sql.exec<{ at: number }>(

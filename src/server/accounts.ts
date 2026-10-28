@@ -5,7 +5,7 @@
 // Passwords are stored only as PBKDF2-SHA-256 (random 16-byte salt, 100000 iterations,
 // both kept inside the stored value). Sessions are a random 32-byte token in an HttpOnly
 // `__Host-` cookie; only its SHA-256 is stored. Signing in ends the account's other sessions, and
-// registration is capped per day (MAX_REGISTRATIONS_PER_DAY) and, as a storage backstop, in total (MAX_ACCOUNTS).
+// registration is limited per client IP and, so the one object's storage can't fill, in total (MAX_ACCOUNTS).
 //
 // Ratings (rating.ts) are kept per account; an account without a row has the default rating.
 // The ranked queue (/api/account/queue/*, matchmaking.ts) pairs signed-in players, and each
@@ -26,13 +26,17 @@ import { calcTR, DEFAULT_RATING, Rating, tdisplay, updateGlicko2 } from "./ratin
 export const COOKIE_NAME = "__Host-teza_session";
 /** The name before `__Host-` (Path=/api). Read only, as a fallback; remove 30 days (SESSION_TTL_S) after the rename is deployed. */
 export const LEGACY_COOKIE_NAME = "teza_session";
-// Registration answers 503 once REGISTRATION_WINDOW_MS has seen MAX_REGISTRATIONS_PER_DAY new accounts, so
-// filling the cap blocks sign-ups for one window at most, not for good; MAX_ACCOUNTS only bounds storage.
-export const MAX_REGISTRATIONS_PER_DAY = 500;
+// Registration answers 503 at MAX_ACCOUNTS, a ceiling sized by the Durable Object's 10 GB SQLite limit: an account
+// with the largest records the validator allows (20 bot names of 32 escaped control characters, 23-digit numbers),
+// its session and rating takes 6708 bytes with indexes (measured; 522 with empty records), so 1,000,000 is 6.7 GB
+// (1,490,000 would fill it; 200,000,000 would need 104 GB even with empty records).
+// From ACCOUNTS_WARN_AT (80%) every ACCOUNTS_WARN_EVERY-th account logs one console.warn, well before it closes.
+export const MAX_ACCOUNTS = 1_000_000;
+export const ACCOUNTS_WARN_AT = 800_000;
+export const ACCOUNTS_WARN_EVERY = 10_000;
 export const REGISTRATION_WINDOW_MS = 24 * 60 * 60 * 1000;
-export const MAX_ACCOUNTS = 200_000;
-// In front of the daily cap, each client IP (`CF-Connecting-IP`, set by Cloudflare) may register this many
-// accounts per REGISTRATION_WINDOW_MS (429 past it), so one machine can't use up the whole day's quota.
+// Each client IP (`CF-Connecting-IP`, set by Cloudflare) may register this many
+// accounts per REGISTRATION_WINDOW_MS (429 past it), so one machine can't create accounts in bulk.
 // IPv6 clients are counted per /64, since one host usually holds a whole /64, and also per /48 up to
 // MAX_REGISTRATIONS_PER_PREFIX, since a free tunnel or a home line can hand one person a /48 or /56 (ipBuckets).
 // Only a SHA-256 of each bucket is stored. Without the header (never on Cloudflare) the per-IP check is skipped.
@@ -87,8 +91,6 @@ export interface AccountStore {
   /** False (and nothing written) if `key` is taken. */
   insertAccount(key: string, row: AccountRow): boolean;
   accountCount(): number;
-  /** Accounts created at or after `since` (ms). */
-  accountsCreatedSince(since: number): number;
   /** When accounts were registered from the IP hash `ipHash` at or after `since` (ms), oldest first. */
   registrationsFrom(ipHash: string, since: number): number[];
   /** Records a registration from `ipHash` at `at`, and deletes records older than REGISTRATION_WINDOW_MS. */
@@ -466,9 +468,7 @@ export async function handleAccount(
       if (invalid) return fail(400, invalid);
       const key = (username as string).toLowerCase();
       if (route === "register") {
-        const full = () => fail(503, "Registration is full right now.");
-        const isFull = () => store.accountsCreatedSince(now() - REGISTRATION_WINDOW_MS) >= MAX_REGISTRATIONS_PER_DAY ||
-          store.accountCount() >= MAX_ACCOUNTS;
+        let accounts = 0;
         const ip = request.headers.get("CF-Connecting-IP");
         const buckets = ip === null ? [] :
           await Promise.all(ipBuckets(ip).map(async ({ key, limit }) => ({ hash: await sha256(key), limit })));
@@ -489,7 +489,8 @@ export async function handleAccount(
           if (wait !== null) {
             return json(429, { error: "Too many new accounts from this network today. Try again later.", retryAfter: wait }, { "Retry-After": String(wait) });
           }
-          return isFull() ? full() : null;
+          accounts = store.accountCount();
+          return accounts >= MAX_ACCOUNTS ? fail(503, "Registration is full right now.") : null;
         };
         const before = refused();
         if (before) return before;
@@ -500,6 +501,10 @@ export async function handleAccount(
         if (after) return after;
         if (!store.insertAccount(key, row)) return fail(409, "That username is taken.");
         for (const { hash } of buckets) store.insertRegistration(hash, now());
+        accounts++; // nothing ran between the count in `refused` and the insert
+        if (accounts >= ACCOUNTS_WARN_AT && (accounts - ACCOUNTS_WARN_AT) % ACCOUNTS_WARN_EVERY === 0) {
+          console.warn({ message: "Accounts near capacity", event: "accounts_near_capacity", accounts, max: MAX_ACCOUNTS, remaining: MAX_ACCOUNTS - accounts });
+        }
         return signIn(key, 201);
       }
       const row = store.account(key);

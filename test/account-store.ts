@@ -15,8 +15,10 @@ export class MemoryStore implements AccountStore {
     this.accounts.set(key, { ...row });
     return true;
   }
+  /** Accounts counted but not held, so cap tests needn't create a million rows. */
+  uncounted = 0;
   accountCount(): number {
-    return this.accounts.size;
+    return this.accounts.size + this.uncounted;
   }
   registrations: { ipHash: string; at: number }[] = [];
   registrationsFrom(ipHash: string, since: number): number[] {
@@ -25,9 +27,6 @@ export class MemoryStore implements AccountStore {
   insertRegistration(ipHash: string, at: number): void {
     this.registrations = this.registrations.filter((r) => r.at >= at - REGISTRATION_WINDOW_MS);
     this.registrations.push({ ipHash, at });
-  }
-  accountsCreatedSince(since: number): number {
-    return [...this.accounts.values()].filter((a) => a.createdAt >= since).length;
   }
   setRecords(key: string, records: string): void {
     this.accounts.get(key)!.records = records;
