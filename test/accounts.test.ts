@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
-  COOKIE_NAME, MAX_BODY_BYTES, MAX_PAIR_RATED, NO_SHOW_COOLDOWN_MS, OPEN_ROOM_TIMEOUT_MS, PAIR_WINDOW_MS, QueueHost,
-  RANKED_MATCH_TTL_MS, SESSION_TTL_S, cookieToken, handleAccount, pairAllowed, rateRankedMatch, reportNoShow, sessionKey,
+  COOKIE_NAME, LEGACY_COOKIE_NAME, ACCOUNTS_WARN_AT, ACCOUNTS_WARN_EVERY, MAX_ACCOUNTS, MAX_BODY_BYTES, MAX_REGISTRATIONS_PER_IP, MAX_REGISTRATIONS_PER_PREFIX, REGISTRATION_WINDOW_MS, MAX_PAIR_RATED, NO_SHOW_COOLDOWN_MS, OPEN_ROOM_TIMEOUT_MS, PAIR_WINDOW_MS, QueueHost,
+  RANKED_MATCH_TTL_MS, SESSION_TTL_S, cookieToken, handleAccount, pairAllowed, INVALID_IP_BUCKET, ipBuckets, rateRankedMatch, reportNoShow, sessionKey,
 } from "../src/server/accounts";
 import { Matchmaker, QUEUE_STALE_MS } from "../src/server/matchmaking";
 import { ROOM_CODE } from "../src/server/match";
@@ -44,6 +44,8 @@ interface Opts {
   body?: unknown;
   rawBody?: string;
   cookie?: string | null;
+  rawCookie?: string; // a whole Cookie header, instead of `cookie`
+  ip?: string; // CF-Connecting-IP
   origin?: string;
   contentType?: string | null;
 }
@@ -51,6 +53,8 @@ interface Opts {
 function call(method: string, route: string, opts: Opts = {}): Promise<Response> {
   const headers: Record<string, string> = {};
   if (opts.cookie) headers.Cookie = `${COOKIE_NAME}=${opts.cookie}`;
+  if (opts.rawCookie) headers.Cookie = opts.rawCookie;
+  if (opts.ip) headers["CF-Connecting-IP"] = opts.ip;
   if (opts.origin) headers.Origin = opts.origin;
   let body: string | undefined;
   if (method !== "GET") {
@@ -143,16 +147,68 @@ describe("register and login", () => {
 });
 
 describe("sessions", () => {
-  it("sets an HttpOnly, Secure, SameSite=Strict cookie on /api for 30 days and stores only its hash", async () => {
-    const res = await call("POST", "register", { body: { username: "Alice", password: PASSWORD } });
-    const cookie = res.headers.get("Set-Cookie")!;
-    for (const attr of ["HttpOnly", "Secure", "SameSite=Strict", "Path=/api", `Max-Age=${SESSION_TTL_S}`]) {
-      expect(cookie.split("; ")).toContain(attr);
+  it("sets an HttpOnly, Secure, SameSite=Strict __Host- cookie on / for 30 days, expires the legacy one, and stores only its hash", async () => {
+    for (const res of [
+      await call("POST", "register", { body: { username: "Alice", password: PASSWORD } }),
+      await call("POST", "login", { body: { username: "Alice", password: PASSWORD } }),
+    ]) {
+      const [cookie, legacy, ...rest] = res.headers.getSetCookie();
+      expect(rest).toEqual([]);
+      expect(COOKIE_NAME).toBe("__Host-teza_session");
+      expect(cookie).toMatch(/^__Host-teza_session=[0-9a-f]{64}; /);
+      const attrs = cookie.split("; ").slice(1);
+      expect(attrs.sort()).toEqual(["HttpOnly", `Max-Age=${SESSION_TTL_S}`, "Path=/", "SameSite=Strict", "Secure"]);
+      expect(cookie).not.toMatch(/domain/i);
+      expect(legacy).toBe("teza_session=; HttpOnly; Secure; SameSite=Strict; Path=/api; Max-Age=0");
     }
-    const token = tokenOf(res);
+    const token = tokenOf(await call("POST", "login", { body: { username: "Alice", password: PASSWORD } }));
     expect(token).toMatch(/^[0-9a-f]{64}$/);
     expect(store.sessions.size).toBe(1);
     expect(store.sessions.has(token)).toBe(false);
+  });
+
+  it("still takes a session in the legacy teza_session cookie; the new cookie wins over it", async () => {
+    const token = await register();
+    const legacy = `${LEGACY_COOKIE_NAME}=${token}`;
+    expect((await call("GET", "me", { rawCookie: legacy })).status).toBe(200);
+    expect(await sessionKey(legacy, store, () => clock)).toBe("alice");
+    expect(cookieToken(`${LEGACY_COOKIE_NAME}=${"b".repeat(64)}; ${COOKIE_NAME}=${token}`)).toBe(token);
+    expect((await call("GET", "me", { rawCookie: `${LEGACY_COOKIE_NAME}=${"b".repeat(64)}; ${COOKIE_NAME}=${token}` })).status).toBe(200);
+    expect((await call("GET", "me", { rawCookie: `${COOKIE_NAME}=${"b".repeat(64)}; ${LEGACY_COOKIE_NAME}=${token}` })).status).toBe(401);
+  });
+
+  it("logout expires both cookie names and deletes the sessions in either", async () => {
+    const legacyToken = await register("Bob");
+    const token = await register();
+    const out = await call("POST", "logout", { rawCookie: `${COOKIE_NAME}=${token}; ${LEGACY_COOKIE_NAME}=${legacyToken}` });
+    expect(out.status).toBe(200);
+    expect(out.headers.getSetCookie()).toEqual([
+      "__Host-teza_session=; HttpOnly; Secure; SameSite=Strict; Path=/; Max-Age=0",
+      "teza_session=; HttpOnly; Secure; SameSite=Strict; Path=/api; Max-Age=0",
+    ]);
+    expect(store.sessions.size).toBe(0);
+    const legacyOnly = await register("Carol");
+    expect((await call("POST", "logout", { rawCookie: `${LEGACY_COOKIE_NAME}=${legacyOnly}` })).status).toBe(200);
+    expect((await call("GET", "me", { rawCookie: `${LEGACY_COOKIE_NAME}=${legacyOnly}` })).status).toBe(401);
+  });
+
+  it("signing in ends the account's other sessions, and only that account's", async () => {
+    const bob = await register("Bob");
+    const first = await register();
+    expect((await call("GET", "me", { cookie: first })).status).toBe(200);
+    const second = tokenOf(await call("POST", "login", { body: { username: "alice", password: PASSWORD } }));
+    expect((await call("GET", "me", { cookie: first })).status).toBe(401);
+    expect((await call("GET", "me", { cookie: second })).status).toBe(200);
+    expect((await call("GET", "me", { cookie: bob })).status).toBe(200);
+    expect(store.sessions.size).toBe(2); // one per account
+
+    const third = tokenOf(await call("POST", "login", { body: { username: "Alice", password: PASSWORD } }));
+    expect((await call("GET", "me", { cookie: second })).status).toBe(401);
+    expect((await call("GET", "me", { cookie: third })).status).toBe(200);
+    // a failed login ends nothing
+    expect((await call("POST", "login", { body: { username: "Alice", password: "wrong password!" } })).status).toBe(401);
+    expect((await call("GET", "me", { cookie: third })).status).toBe(200);
+    expect(store.sessions.size).toBe(2);
   });
 
   it("gives 401 for me without a session, with a bad cookie, and after logout", async () => {
@@ -189,6 +245,167 @@ describe("sessions", () => {
     expect(await storedRecords()).toEqual({ vs: {} });
     // the page's own origin is fine
     expect((await call("POST", "login", { origin: ORIGIN, body: { username: "Alice", password: PASSWORD } })).status).toBe(200);
+  });
+});
+
+describe("account caps", () => {
+  const registerAs = (username: string) => call("POST", "register", { body: { username, password: PASSWORD } });
+  let warn: ReturnType<typeof vi.spyOn>;
+  beforeEach(() => {
+    warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+  });
+  afterEach(() => warn.mockRestore());
+
+  it("sizes the ceiling for 10 GB of storage and warns from 80%", () => {
+    // 6708 bytes is a measured account with the largest valid records, its session, rating and indexes
+    expect(MAX_ACCOUNTS * 6708).toBeLessThan(10e9);
+    expect(ACCOUNTS_WARN_AT).toBe(MAX_ACCOUNTS * 0.8);
+    expect((MAX_ACCOUNTS - ACCOUNTS_WARN_AT) % ACCOUNTS_WARN_EVERY).toBe(0); // the last account warns too
+  });
+
+  it("has no daily cap: with 1000 accounts created in the last hour, one more registers", async () => {
+    for (let i = 0; i < 1000; i++) {
+      store.insertAccount(`filler${i}`, { username: `filler${i}`, passwordHash: "x", createdAt: clock - i * 1000, records: JSON.stringify({ vs: {} }) });
+    }
+    expect((await registerAs("Bob")).status).toBe(201);
+    expect(store.accounts.size).toBe(1001);
+    expect(warn).not.toHaveBeenCalled();
+  });
+
+  it(`refuses a registration at ${MAX_ACCOUNTS} accounts with 503 and stores nothing; login still works`, async () => {
+    await register();
+    store.uncounted = MAX_ACCOUNTS - 1;
+    const sessions = store.sessions.size;
+    const full = await registerAs("Bob");
+    expect(full.status).toBe(503);
+    expect(await full.json()).toEqual({ error: "Registration is full right now." });
+    expect(full.headers.get("Set-Cookie")).toBeNull();
+    expect(store.account("bob")).toBeNull();
+    expect(store.sessions.size).toBe(sessions);
+
+    const login = await call("POST", "login", { body: { username: "Alice", password: PASSWORD } });
+    expect(login.status).toBe(200);
+    expect((await call("GET", "me", { cookie: tokenOf(login) })).status).toBe(200);
+  });
+
+  it(`logs one structured warning at ${ACCOUNTS_WARN_AT} accounts and every ${ACCOUNTS_WARN_EVERY} after, not per request`, async () => {
+    store.uncounted = ACCOUNTS_WARN_AT - 2;
+    expect((await registerAs("User1")).status).toBe(201); // account ACCOUNTS_WARN_AT - 1
+    expect(warn).not.toHaveBeenCalled();
+    expect((await registerAs("User2")).status).toBe(201); // account ACCOUNTS_WARN_AT
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(warn).toHaveBeenCalledWith({
+      message: "Accounts near capacity", event: "accounts_near_capacity",
+      accounts: ACCOUNTS_WARN_AT, max: MAX_ACCOUNTS, remaining: MAX_ACCOUNTS - ACCOUNTS_WARN_AT,
+    });
+    expect((await registerAs("User3")).status).toBe(201);
+    expect((await call("POST", "login", { body: { username: "User3", password: PASSWORD } })).status).toBe(200);
+    expect((await registerAs("User3")).status).toBe(409);
+    expect(warn).toHaveBeenCalledTimes(1);
+
+    store.uncounted = MAX_ACCOUNTS - 4; // 3 held, so the next is the last account
+    expect((await registerAs("User4")).status).toBe(201);
+    expect(warn).toHaveBeenCalledTimes(2);
+    expect(warn).toHaveBeenLastCalledWith(expect.objectContaining({ accounts: MAX_ACCOUNTS, remaining: 0 }));
+    expect((await registerAs("User5")).status).toBe(503);
+    expect(warn).toHaveBeenCalledTimes(2);
+  });
+
+  it(`lets one IP register ${MAX_REGISTRATIONS_PER_IP} accounts per 24 h, then answers 429 with Retry-After`, async () => {
+    const from = (username: string, ip: string) => call("POST", "register", { body: { username, password: PASSWORD }, ip });
+    for (let i = 0; i < MAX_REGISTRATIONS_PER_IP; i++) {
+      expect((await from(`user${i}`, "203.0.113.7")).status).toBe(201);
+      clock += 1000;
+    }
+    const sixth = await from("user5", "203.0.113.7");
+    expect(sixth.status).toBe(429);
+    const wait = Math.ceil((REGISTRATION_WINDOW_MS + 1 - MAX_REGISTRATIONS_PER_IP * 1000) / 1000);
+    expect(sixth.headers.get("Retry-After")).toBe(String(wait));
+    expect(await sixth.json()).toMatchObject({ retryAfter: wait });
+    expect(store.account("user5")).toBeNull();
+    expect((await from("other", "198.51.100.2")).status).toBe(201); // another IP is not affected
+    expect([...store.registrations].map((r) => r.ipHash).some((h) => h.includes("203.0.113.7"))).toBe(false); // hashed
+
+    clock += REGISTRATION_WINDOW_MS - MAX_REGISTRATIONS_PER_IP * 1000 + 1; // the first one is now older than the window
+    expect((await from("user5", "203.0.113.7")).status).toBe(201);
+    expect((await from("user6", "203.0.113.7")).status).toBe(429);
+    expect(store.registrations.every((r) => r.at >= clock - REGISTRATION_WINDOW_MS)).toBe(true); // older rows pruned
+  });
+
+  it("counts IPv6 sign-ups per /64", async () => {
+    const from = (username: string, ip: string) => call("POST", "register", { body: { username, password: PASSWORD }, ip });
+    for (let i = 0; i < MAX_REGISTRATIONS_PER_IP; i++) {
+      expect((await from(`user${i}`, i % 2 ? "2001:db8:1:2:ffff::b" : "2001:db8:1:2::a")).status).toBe(201);
+    }
+    expect((await from("user5", "2001:db8:1:2::c")).status).toBe(429);
+    expect((await from("user6", "2001:0DB8:0001:0002:0:0:0:d")).status).toBe(429); // the same /64, written longhand
+    expect((await from("other", "2001:db8:1:3::a")).status).toBe(201); // the next /64
+  });
+
+  it("counts an IPv4-mapped IPv6 address as its IPv4 address", async () => {
+    const from = (username: string, ip: string) => call("POST", "register", { body: { username, password: PASSWORD }, ip });
+    for (let i = 0; i < MAX_REGISTRATIONS_PER_IP; i++) {
+      expect((await from(`user${i}`, i % 2 ? "::ffff:203.0.113.7" : "203.0.113.7")).status).toBe(201);
+    }
+    expect((await from("user5", "::ffff:203.0.113.7")).status).toBe(429);
+    expect((await from("user6", "203.0.113.7")).status).toBe(429);
+  });
+
+  it(`counts IPv6 sign-ups per /48 too, up to ${MAX_REGISTRATIONS_PER_PREFIX}`, async () => {
+    const from = (username: string, ip: string) => call("POST", "register", { body: { username, password: PASSWORD }, ip });
+    for (let net = 0; net < MAX_REGISTRATIONS_PER_PREFIX / MAX_REGISTRATIONS_PER_IP; net++) {
+      for (let i = 0; i < MAX_REGISTRATIONS_PER_IP; i++) {
+        expect((await from(`user${net}_${i}`, `2001:db8:1:${net}::${i + 1}`)).status).toBe(201);
+      }
+    }
+    expect((await from("fresh", "2001:db8:1:ff::1")).status).toBe(429); // a fresh /64 in the full /48
+    expect(store.account("fresh")).toBeNull();
+    expect((await from("other", "2001:db8:2::a")).status).toBe(201); // another /48
+  });
+
+  it("answers Retry-After with the longer of the /64 and /48 waits", async () => {
+    const from = (username: string, ip: string) => call("POST", "register", { body: { username, password: PASSWORD }, ip });
+    for (let i = 0; i < MAX_REGISTRATIONS_PER_PREFIX - MAX_REGISTRATIONS_PER_IP; i++) {
+      expect((await from(`early${i}`, `2001:db8:1:${1 + (i % 3)}::${i + 1}`)).status).toBe(201);
+    }
+    clock += 3_600_000;
+    for (let i = 0; i < MAX_REGISTRATIONS_PER_IP; i++) expect((await from(`late${i}`, `2001:db8:1:a::${i + 1}`)).status).toBe(201);
+    const prefixWait = Math.ceil((REGISTRATION_WINDOW_MS + 1 - 3_600_000) / 1000); // the /48 frees up first
+    const sameNet = await from("sameNet", "2001:db8:1:a::99");
+    expect(sameNet.headers.get("Retry-After")).toBe(String(Math.ceil((REGISTRATION_WINDOW_MS + 1) / 1000)));
+    expect((await from("freshNet", "2001:db8:1:b::1")).headers.get("Retry-After")).toBe(String(prefixWait));
+  });
+
+  it("ipBuckets normalises addresses to their quota buckets", () => {
+    const keys = (ip: string) => ipBuckets(ip).map((b) => `${b.key} ${b.limit}`);
+    const v6 = (k64: string, k48: string) => [`${k64} ${MAX_REGISTRATIONS_PER_IP}`, `${k48} ${MAX_REGISTRATIONS_PER_PREFIX}`];
+    expect(keys("203.0.113.7")).toEqual([`203.0.113.7 ${MAX_REGISTRATIONS_PER_IP}`]);
+    expect(keys("2001:db8::1")).toEqual(v6("2001:0db8:0000:0000::/64", "2001:0db8:0000::/48"));
+    expect(keys("2001:0DB8:0:0::1")).toEqual(keys("2001:db8::1"));
+    expect(keys("2001:db8:1:2:3:4:5:6")).toEqual(v6("2001:0db8:0001:0002::/64", "2001:0db8:0001::/48"));
+    expect(keys("::1")).toEqual(v6("0000:0000:0000:0000::/64", "0000:0000:0000::/48"));
+    expect(keys("::")).toEqual(keys("::1"));
+    expect(keys("2001:db8:1:2::")).toEqual(keys("2001:db8:1:2:3:4:5:6"));
+    expect(keys("::ffff:203.0.113.7")).toEqual(keys("203.0.113.7"));
+    expect(keys("::FFFF:cb00:7107")).toEqual(keys("203.0.113.7"));
+    expect(keys("fe80::1%eth0")).toEqual(v6("fe80:0000:0000:0000::/64", "fe80:0000:0000::/48"));
+    for (const bad of ["", "nope", "1.2.3", "1.2.3.256", "1::2::3", "1:2:3:4:5:6:7:8:9", "1:2:3:4::5:6:7:8", "12345::1", "::ffff:999.1.1.1", "::ffff:1.256.0.0"]) {
+      expect(ipBuckets(bad), bad).toEqual([{ key: INVALID_IP_BUCKET, limit: MAX_REGISTRATIONS_PER_IP }]);
+    }
+  });
+
+  it("checks the per-IP quota again after hashing", async () => {
+    const from = (username: string) => call("POST", "register", { body: { username, password: PASSWORD }, ip: "203.0.113.7" });
+    for (let i = 0; i < MAX_REGISTRATIONS_PER_IP - 1; i++) expect((await from(`user${i}`)).status).toBe(201);
+    const [a, b] = await Promise.all([from("Alice"), from("Bob")]);
+    expect([a.status, b.status].sort()).toEqual([201, 429]);
+  });
+
+  it("checks the cap again after hashing, for registrations that overlap", async () => {
+    store.uncounted = MAX_ACCOUNTS - 1;
+    const [a, b] = await Promise.all([registerAs("Alice"), registerAs("Bob")]);
+    expect([a.status, b.status].sort()).toEqual([201, 503]);
+    expect(store.accounts.size).toBe(1);
   });
 });
 
@@ -666,5 +883,7 @@ describe("ranked hardening", () => {
     expect(cookieToken("other=1")).toBeNull();
     expect(cookieToken(`${COOKIE_NAME}=short`)).toBeNull();
     expect(cookieToken(`${COOKIE_NAME}=${"G".repeat(64)}`)).toBeNull();
+    expect(cookieToken(`${LEGACY_COOKIE_NAME}=${token}`)).toBe(token);
+    expect(cookieToken(`Host-teza_session=${token}`)).toBeNull();
   });
 });

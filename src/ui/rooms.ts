@@ -32,9 +32,16 @@ export async function newRoom(): Promise<string | null> {
 
 /**
  * Whether online play is served here. A browser can't read the status of a refused WebSocket
- * upgrade, so JOIN asks first, with the one call that answers 201 on the Worker: issuing a code
- * stores nothing (a room exists once its creator's socket holds a slot).
+ * upgrade, so JOIN asks first with `GET /api/room`, which only the Worker answers 200 `{online: true}`
+ * and which reserves nothing (`POST /api/room` reserves a code for its caller to create).
  */
 export async function onlineAvailable(): Promise<boolean> {
-  return (await newRoom()) !== null;
+  const res = await send("GET", "/api/room");
+  if (res?.status !== 200) return false;
+  try {
+    const x: unknown = await res.json();
+    return typeof x === "object" && x !== null && (x as Record<string, unknown>).online === true;
+  } catch {
+    return false;
+  }
 }

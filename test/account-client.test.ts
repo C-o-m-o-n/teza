@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { REQUEST_TIMEOUT_MS, fetchMe, finishSession, joinQueue, putRecords, queueStatus, signOut } from "../src/ui/account";
 import { Records } from "../src/profile";
+import { onlineAvailable } from "../src/ui/rooms";
 
 const records: Records = { "40l": { value: 2500, pps: 2, apm: 60, pieces: 100, date: 0 }, vs: { ROOKIE: { wins: 1, losses: 4 } } };
 
@@ -28,10 +29,11 @@ describe("account client", () => {
     vi.unstubAllGlobals();
   });
 
-  it("putRecords is true only for 2xx; signOut tells 2xx, 401 and other failures apart", async () => {
-    stubFetch(204, 401, 500, "network");
+  it("putRecords is true only for 2xx; signOut tells 2xx, 401, 400 and other failures apart", async () => {
+    stubFetch(204, 401, 400, 500, "network");
     expect(await signOut()).toBe("ok");
     expect(await signOut()).toBe("expired");
+    expect(await signOut()).toBe("invalid");
     expect(await signOut()).toBe("failed");
     expect(await signOut()).toBe("failed");
     stubFetch(200, 400, 401, 503, "network");
@@ -49,15 +51,28 @@ describe("account client", () => {
   });
 
   it("a failed records upload fails sign-out and never logs out", async () => {
-    for (const answer of [500, 400, "network"] as Answer[]) {
+    for (const answer of [500, 503, 403, "network"] as Answer[]) {
       const calls = stubFetch(answer, 204);
       expect(await finishSession(records)).toBe(false);
       expect(calls).toEqual(["PUT /api/account/records"]);
     }
   });
 
+  it("records the server refuses as invalid (400) are dropped: sign-out goes on to log out", async () => {
+    let calls = stubFetch(400, 200);
+    expect(await finishSession(records)).toBe(true);
+    expect(calls).toEqual(["PUT /api/account/records", "POST /api/account/logout"]);
+    calls = stubFetch(400, 401);
+    expect(await finishSession(records)).toBe(true);
+    for (const answer of [500, 400, "network"] as Answer[]) {
+      calls = stubFetch(400, answer);
+      expect(await finishSession(records)).toBe(false);
+      expect(calls).toEqual(["PUT /api/account/records", "POST /api/account/logout"]);
+    }
+  });
+
   it("a failed logout fails sign-out", async () => {
-    for (const answer of [500, 403, "network"] as Answer[]) {
+    for (const answer of [500, 403, 400, "network"] as Answer[]) {
       const calls = stubFetch(200, answer);
       expect(await finishSession(records)).toBe(false);
       expect(calls).toEqual(["PUT /api/account/records", "POST /api/account/logout"]);
@@ -138,5 +153,25 @@ describe("ranked queue client", () => {
     );
     expect((await fetchMe())?.rating).toEqual({ tr: null, games: 3 });
     expect((await fetchMe())?.rating).toBeNull();
+  });
+});
+
+describe("rooms client", () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  it("onlineAvailable asks GET /api/room and takes only the Worker's 200 {online: true}", async () => {
+    const calls: string[] = [];
+    const answers: [number, unknown][] = [[200, { online: true }], [204, null], [404, null], [201, { code: "ABCDEF" }], [200, { online: "yes" }]];
+    vi.stubGlobal("fetch", (url: string, init: RequestInit) => {
+      calls.push(`${init.method} ${url}`);
+      const [status, body] = answers.shift()!;
+      return Promise.resolve(new Response(body === null ? null : JSON.stringify(body), { status }));
+    });
+    expect(await onlineAvailable()).toBe(true);
+    expect(await onlineAvailable()).toBe(false); // the e2e server
+    expect(await onlineAvailable()).toBe(false); // npm start
+    expect(await onlineAvailable()).toBe(false);
+    expect(await onlineAvailable()).toBe(false);
+    expect(new Set(calls)).toEqual(new Set(["GET /api/room"]));
   });
 });

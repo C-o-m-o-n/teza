@@ -1,4 +1,6 @@
-// Serves dist/ on a free localhost port, so the e2e runs need no dev server and no network.
+// Serves dist/ on a free localhost port, so the e2e runs need no dev server and no network. Every
+// file goes out with the headers dist/_headers gives `/*` (the CSP), as Workers Static Assets sends
+// them, so a CSP violation shows up as a console error in the e2e runs.
 import { readFile } from "node:fs/promises";
 import { createServer, Server } from "node:http";
 import { AddressInfo } from "node:net";
@@ -16,7 +18,24 @@ const TYPES: Record<string, string> = {
   ".txt": "text/plain; charset=utf-8",
 };
 
+/** The `/*` rule of a Static Assets `_headers` file: its `Name: value` lines. Throws if it has none. */
+async function assetHeaders(root: string): Promise<Record<string, string>> {
+  const headers: Record<string, string> = {};
+  let rule = "";
+  for (const line of (await readFile(join(root, "_headers"), "utf8")).split("\n")) {
+    if (line.trim() === "" || line.trim().startsWith("#")) continue;
+    if (!/^\s/.test(line)) rule = line.trim();
+    else if (rule === "/*") {
+      const at = line.indexOf(":");
+      headers[line.slice(0, at).trim()] = line.slice(at + 1).trim();
+    }
+  }
+  if (!headers["Content-Security-Policy"]) throw new Error("dist/_headers has no Content-Security-Policy for /*");
+  return headers;
+}
+
 export async function serveDist(root: string): Promise<{ url: string; close: () => Promise<void> }> {
+  const headers = await assetHeaders(root);
   const server: Server = createServer(async (req, res) => {
     const path = decodeURIComponent(new URL(req.url ?? "/", "http://localhost").pathname);
     // No accounts server here: answer /api/* with an empty 204 so the game stays signed out
@@ -26,7 +45,7 @@ export async function serveDist(root: string): Promise<{ url: string; close: () 
     if (!file.startsWith(root)) return res.writeHead(403).end();
     try {
       const body = await readFile(file);
-      res.writeHead(200, { "Content-Type": TYPES[extname(file)] ?? "application/octet-stream" }).end(body);
+      res.writeHead(200, { ...headers, "Content-Type": TYPES[extname(file)] ?? "application/octet-stream" }).end(body);
     } catch {
       res.writeHead(404).end();
     }

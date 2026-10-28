@@ -4,7 +4,8 @@
 //
 // Passwords are stored only as PBKDF2-SHA-256 (random 16-byte salt, 100000 iterations,
 // both kept inside the stored value). Sessions are a random 32-byte token in an HttpOnly
-// cookie; only its SHA-256 is stored.
+// `__Host-` cookie; only its SHA-256 is stored. Signing in ends the account's other sessions, and
+// registration is limited per client IP and, so the one object's storage can't fill, in total (MAX_ACCOUNTS).
 //
 // Ratings (rating.ts) are kept per account; an account without a row has the default rating.
 // The ranked queue (/api/account/queue/*, matchmaking.ts) pairs signed-in players, and each
@@ -21,7 +22,30 @@ import { Matchmaker, QueuePlayer } from "./matchmaking";
 import { newRoomCode } from "./match";
 import { calcTR, DEFAULT_RATING, Rating, tdisplay, updateGlicko2 } from "./rating";
 
-export const COOKIE_NAME = "teza_session";
+/** `__Host-`: the browser only takes it Secure, Path=/ and without Domain, so a sibling subdomain can't set or shadow it. */
+export const COOKIE_NAME = "__Host-teza_session";
+/** The name before `__Host-` (Path=/api). Read only, as a fallback; remove 30 days (SESSION_TTL_S) after the rename is deployed. */
+export const LEGACY_COOKIE_NAME = "teza_session";
+// Registration answers 503 at MAX_ACCOUNTS, a ceiling sized by the Durable Object's 10 GB SQLite limit: an account
+// with the largest records the validator allows (20 bot names of 32 escaped control characters, 23-digit numbers),
+// its session and rating takes 6708 bytes with indexes (measured; 522 with empty records), so 1,000,000 is 6.7 GB
+// (1,490,000 would fill it; 200,000,000 would need 104 GB even with empty records).
+// From ACCOUNTS_WARN_AT (80%) every ACCOUNTS_WARN_EVERY-th account logs one console.warn, well before it closes.
+export const MAX_ACCOUNTS = 1_000_000;
+export const ACCOUNTS_WARN_AT = 800_000;
+export const ACCOUNTS_WARN_EVERY = 10_000;
+export const REGISTRATION_WINDOW_MS = 24 * 60 * 60 * 1000;
+// Each client IP (`CF-Connecting-IP`, set by Cloudflare) may register this many
+// accounts per REGISTRATION_WINDOW_MS (429 past it), so one machine can't create accounts in bulk.
+// IPv6 clients are counted per /64, since one host usually holds a whole /64, and also per /48 up to
+// MAX_REGISTRATIONS_PER_PREFIX, since a free tunnel or a home line can hand one person a /48 or /56 (ipBuckets).
+// Only a SHA-256 of each bucket is stored. Without the header (never on Cloudflare) the per-IP check is skipped.
+// Keep Cloudflare's "Pseudo IPv4" (Overwrite Headers) off: it rewrites `CF-Connecting-IP` for IPv6 clients to a
+// Class E IPv4 derived from the full address, which would give every address its own bucket again.
+export const MAX_REGISTRATIONS_PER_IP = 5;
+export const MAX_REGISTRATIONS_PER_PREFIX = 20;
+/** The one bucket every unparseable `CF-Connecting-IP` shares. */
+export const INVALID_IP_BUCKET = "invalid";
 export const SESSION_TTL_S = 30 * 24 * 60 * 60;
 export const PBKDF2_ITERATIONS = 100_000; // the Workers WebCrypto maximum
 export const MAX_BODY_BYTES = 4096;
@@ -66,10 +90,17 @@ export interface AccountStore {
   account(key: string): AccountRow | null;
   /** False (and nothing written) if `key` is taken. */
   insertAccount(key: string, row: AccountRow): boolean;
+  accountCount(): number;
+  /** When accounts were registered from the IP hash `ipHash` at or after `since` (ms), oldest first. */
+  registrationsFrom(ipHash: string, since: number): number[];
+  /** Records a registration from `ipHash` at `at`, and deletes records older than REGISTRATION_WINDOW_MS. */
+  insertRegistration(ipHash: string, at: number): void;
   setRecords(key: string, records: string): void;
   session(tokenHash: string): SessionRow | null;
   insertSession(tokenHash: string, row: SessionRow): void;
   deleteSession(tokenHash: string): void;
+  /** Every session of the account `key`. */
+  deleteSessionsFor(key: string): void;
   deleteExpiredSessions(now: number): void;
   /** Null for an account that has never been rated. */
   rating(key: string): RatingRow | null;
@@ -149,35 +180,88 @@ export async function verifyPassword(password: string, stored: string): Promise<
 // Unknown usernames are checked against this, so they take as long as a wrong password.
 let dummyHash: Promise<string> | null = null;
 
+const IPV4 = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/;
+
+/** `a.b.c.d` with each octet 0-255 as numbers, or null. */
+function ipv4Octets(s: string): number[] | null {
+  const m = IPV4.exec(s);
+  const b = m ? m.slice(1).map(Number) : [];
+  return m && b.every((o) => o <= 255) ? b : null;
+}
+
+/**
+ * The per-IP quota's buckets for `ip`, each with its limit per REGISTRATION_WINDOW_MS. IPv4 (and IPv4-mapped
+ * IPv6, `::ffff:a.b.c.d`) has one: the plain address. IPv6 has two: its /64 (`2001:0db8:0001:0002::/64`) and its
+ * /48 (`2001:0db8:0001::/48`), expanded, lowercase and zero-padded. Anything unparseable is INVALID_IP_BUCKET.
+ */
+export function ipBuckets(ip: string): { key: string; limit: number }[] {
+  const one = (key: string) => [{ key, limit: MAX_REGISTRATIONS_PER_IP }];
+  let s = ip.trim().toLowerCase().replace(/%.*$/, ""); // drop a zone id
+  if (!s.includes(":")) {
+    const b = ipv4Octets(s);
+    return one(b ? b.join(".") : INVALID_IP_BUCKET);
+  }
+  const dotted = /^(.*:)([^:]+)$/.exec(s);
+  if (dotted && dotted[2].includes(".")) {
+    const b = ipv4Octets(dotted[2]);
+    if (!b) return one(INVALID_IP_BUCKET);
+    s = dotted[1] + ((b[0] << 8) | b[1]).toString(16) + ":" + ((b[2] << 8) | b[3]).toString(16);
+  }
+  const halves = s.split("::");
+  if (halves.length > 2) return one(INVALID_IP_BUCKET);
+  const head = halves[0] ? halves[0].split(":") : [];
+  const tail = halves.length === 2 && halves[1] ? halves[1].split(":") : [];
+  const missing = 8 - head.length - tail.length;
+  if (halves.length === 2 ? missing < 1 : missing !== 0) return one(INVALID_IP_BUCKET);
+  const groups = [...head, ...Array<string>(missing).fill("0"), ...tail];
+  if (!groups.every((g) => /^[0-9a-f]{1,4}$/.test(g))) return one(INVALID_IP_BUCKET);
+  const n = groups.map((g) => parseInt(g, 16));
+  if (n.slice(0, 5).every((g) => g === 0) && n[5] === 0xffff) {
+    return one([n[6] >> 8, n[6] & 255, n[7] >> 8, n[7] & 255].join("."));
+  }
+  const prefix = (len: number) => groups.slice(0, len).map((g) => g.padStart(4, "0")).join(":");
+  return [
+    { key: `${prefix(4)}::/64`, limit: MAX_REGISTRATIONS_PER_IP },
+    { key: `${prefix(3)}::/48`, limit: MAX_REGISTRATIONS_PER_PREFIX },
+  ];
+}
+
 async function sha256(s: string): Promise<string> {
   return hex(new Uint8Array(await crypto.subtle.digest("SHA-256", encoder.encode(s))));
 }
 
-function json(status: number, body: unknown, headers: Record<string, string> = {}): Response {
-  return new Response(JSON.stringify(body), {
-    status,
-    headers: { "Content-Type": "application/json", "Cache-Control": "no-store", ...headers },
-  });
+/** `headers` may repeat a name (two `Set-Cookie`s). */
+function json(status: number, body: unknown, headers: [string, string][] | Record<string, string> = {}): Response {
+  const h = new Headers({ "Content-Type": "application/json", "Cache-Control": "no-store" });
+  for (const [name, value] of Array.isArray(headers) ? headers : Object.entries(headers)) h.append(name, value);
+  return new Response(JSON.stringify(body), { status, headers: h });
 }
 
 const fail = (status: number, message: string, headers?: Record<string, string>) => json(status, { error: message }, headers);
 
 function sessionCookie(token: string): string {
-  return `${COOKIE_NAME}=${token}; HttpOnly; Secure; SameSite=Strict; Path=/api; Max-Age=${SESSION_TTL_S}`;
+  return `${COOKIE_NAME}=${token}; HttpOnly; Secure; SameSite=Strict; Path=/; Max-Age=${SESSION_TTL_S}`;
 }
 
-const CLEAR_COOKIE = `${COOKIE_NAME}=; HttpOnly; Secure; SameSite=Strict; Path=/api; Max-Age=0`;
+const CLEAR_COOKIE = `${COOKIE_NAME}=; HttpOnly; Secure; SameSite=Strict; Path=/; Max-Age=0`;
+const CLEAR_LEGACY_COOKIE = `${LEGACY_COOKIE_NAME}=; HttpOnly; Secure; SameSite=Strict; Path=/api; Max-Age=0`;
 
-/**
- * The well-formed `teza_session` token in a `Cookie` header, or null. The Worker uses it to refuse
- * a ranked socket without a session before calling the `Accounts` object.
- */
-export function cookieToken(cookie: string | null): string | null {
+/** The well-formed token in the cookie `name` of a `Cookie` header, or null. */
+function cookieValue(cookie: string | null, name: string): string | null {
   for (const part of (cookie ?? "").split(";")) {
-    const [name, value] = part.trim().split("=");
-    if (name === COOKIE_NAME && value !== undefined && TOKEN.test(value)) return value;
+    const [key, value] = part.trim().split("=");
+    if (key === name && value !== undefined && TOKEN.test(value)) return value;
   }
   return null;
+}
+
+/**
+ * The well-formed session token in a `Cookie` header, or null: `__Host-teza_session`, else the legacy
+ * `teza_session`. The Worker uses it to refuse a ranked socket without a session before calling the
+ * `Accounts` object.
+ */
+export function cookieToken(cookie: string | null): string | null {
+  return cookieValue(cookie, COOKIE_NAME) ?? cookieValue(cookie, LEGACY_COOKIE_NAME);
 }
 
 /** The body as text, or null if it is over MAX_BODY_BYTES. Stops reading once over the limit. */
@@ -366,9 +450,11 @@ export async function handleAccount(
 
   const signIn = async (key: string, status: number): Promise<Response> => {
     const token = hex(crypto.getRandomValues(new Uint8Array(32)));
+    const tokenHash = await sha256(token);
     store.deleteExpiredSessions(now());
-    store.insertSession(await sha256(token), { key, expiresAt: now() + SESSION_TTL_S * 1000 });
-    return json(status, profile(store.account(key)!), { "Set-Cookie": sessionCookie(token) });
+    store.deleteSessionsFor(key); // signing in ends the account's other sessions, so it has one at most
+    store.insertSession(tokenHash, { key, expiresAt: now() + SESSION_TTL_S * 1000 });
+    return json(status, profile(store.account(key)!), [["Set-Cookie", sessionCookie(token)], ["Set-Cookie", CLEAR_LEGACY_COOKIE]]);
   };
 
   /** The signed-in account's key, or null. Expired sessions are deleted. */
@@ -382,10 +468,43 @@ export async function handleAccount(
       if (invalid) return fail(400, invalid);
       const key = (username as string).toLowerCase();
       if (route === "register") {
+        let accounts = 0;
+        const ip = request.headers.get("CF-Connecting-IP");
+        const buckets = ip === null ? [] :
+          await Promise.all(ipBuckets(ip).map(async ({ key, limit }) => ({ hash: await sha256(key), limit })));
+        /** Seconds until this IP may register again (the longest wait over its buckets), or null if it may now. */
+        const ipWait = (): number | null => {
+          let wait: number | null = null;
+          for (const { hash, limit } of buckets) {
+            const times = store.registrationsFrom(hash, now() - REGISTRATION_WINDOW_MS);
+            if (times.length < limit) continue;
+            // the window is [now - 24 h, now]: a registration stops counting 1 ms after it is 24 h old
+            const w = Math.ceil((times[times.length - limit] + REGISTRATION_WINDOW_MS + 1 - now()) / 1000);
+            wait = Math.max(wait ?? 0, w);
+          }
+          return wait;
+        };
+        const refused = (): Response | null => {
+          const wait = ipWait();
+          if (wait !== null) {
+            return json(429, { error: "Too many new accounts from this network today. Try again later.", retryAfter: wait }, { "Retry-After": String(wait) });
+          }
+          accounts = store.accountCount();
+          return accounts >= MAX_ACCOUNTS ? fail(503, "Registration is full right now.") : null;
+        };
+        const before = refused();
+        if (before) return before;
         if (store.account(key)) return fail(409, "That username is taken.");
         const row = { username: username as string, passwordHash: await hashPassword(password as string), createdAt: now(), records: JSON.stringify({ vs: {} }) };
         // checked again on insert: another register may have finished while this one was hashing
+        const after = refused();
+        if (after) return after;
         if (!store.insertAccount(key, row)) return fail(409, "That username is taken.");
+        for (const { hash } of buckets) store.insertRegistration(hash, now());
+        accounts++; // nothing ran between the count in `refused` and the insert
+        if (accounts >= ACCOUNTS_WARN_AT && (accounts - ACCOUNTS_WARN_AT) % ACCOUNTS_WARN_EVERY === 0) {
+          console.warn({ message: "Accounts near capacity", event: "accounts_near_capacity", accounts, max: MAX_ACCOUNTS, remaining: MAX_ACCOUNTS - accounts });
+        }
         return signIn(key, 201);
       }
       const row = store.account(key);
@@ -395,9 +514,11 @@ export async function handleAccount(
       return signIn(key, 200);
     }
     case "logout": {
-      const token = cookieToken(request.headers.get("Cookie"));
-      if (token) store.deleteSession(await sha256(token));
-      return json(200, {}, { "Set-Cookie": CLEAR_COOKIE });
+      for (const name of [COOKIE_NAME, LEGACY_COOKIE_NAME]) {
+        const token = cookieValue(request.headers.get("Cookie"), name);
+        if (token) store.deleteSession(await sha256(token));
+      }
+      return json(200, {}, [["Set-Cookie", CLEAR_COOKIE], ["Set-Cookie", CLEAR_LEGACY_COOKIE]]);
     }
     case "me": {
       const key = await currentKey();

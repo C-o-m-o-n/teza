@@ -80,15 +80,16 @@ export async function signIn(kind: "login" | "register", username: string, passw
   return res.status === 404 ? "Accounts aren't available on this server." : `Account server error (${res.status}).`;
 }
 
-/** The outcome of a sign-out step: 2xx, 401 (the session is already gone), or anything else. */
-export type Outcome = "ok" | "expired" | "failed";
+/** The outcome of a sign-out step: 2xx, 401 (the session is already gone), 400 (the server refused the body), or anything else. */
+export type Outcome = "ok" | "expired" | "invalid" | "failed";
 
 function outcome(res: Response | null): Outcome {
   if (res?.ok) return "ok";
-  return res?.status === 401 ? "expired" : "failed";
+  if (res?.status === 401) return "expired";
+  return res?.status === 400 ? "invalid" : "failed";
 }
 
-/** "failed" on a network error or any status other than 2xx and 401. */
+/** "failed" on a network error or any status other than 2xx, 400 and 401. */
 export async function signOut(): Promise<Outcome> {
   return outcome(await send("POST", "logout", {}));
 }
@@ -103,14 +104,16 @@ async function uploadRecords(records: Records): Promise<Outcome> {
 }
 
 /**
- * Uploads the records, then logs out; logout is only tried once the upload succeeded.
+ * Uploads the records, then logs out; logout is only tried once the upload succeeded, or was
+ * refused with 400 (the local records fail validation and could never be saved, so they are dropped).
  * A 401 from either means the server session has already ended, so that counts as signed out.
  * False means the caller must stay signed in and keep its local records.
  */
 export async function finishSession(records: Records): Promise<boolean> {
   const upload = await uploadRecords(records);
-  if (upload !== "ok") return upload === "expired";
-  return (await signOut()) !== "failed";
+  if (upload !== "ok" && upload !== "invalid") return upload === "expired";
+  const logout = await signOut();
+  return logout === "ok" || logout === "expired";
 }
 
 /** The ranked queue's answer to a poll (README "Ratings and ranked"). */

@@ -333,3 +333,22 @@
 - A verified solo leaderboard (server-issued seeds or replay verification).
 - The no-show cooldown is in memory and resets when the `Accounts` object restarts; there are no escalating penalties.
 - With the pair cap, two friends alone in the queue get 3 rated games a day together; calibrating (about 17 games) needs other opponents.
+
+## 2026-10-18 — Server hardening: socket, accounts and CSP (factory job 016)
+
+**What changed**
+- Socket: the match upgrade and `POST /api/room` refuse an `Origin` that is neither the request URL's own nor `https://teza.comonhq.com` (403, before any Durable Object call; no `Origin` passes). The resume token moved from `?resume=&ack=` (now 400) to `Sec-WebSocket-Protocol: teza, resume.<token>.<ack>`; the 101 answers `teza` only. Tokens are compared with `timingSafeEqual` against every slot.
+- Issued room codes: `POST /api/room` reserves its code with that code's `Match` object (RPC `issueRoom`, a claim in DO storage for 2 minutes, an alarm deletes it unused; 5 tries then 503). `mode=create` needs a live claim and uses it up (404 `Room code was not issued` otherwise).
+- Accounts: cookie renamed `__Host-teza_session` (`Path=/`), with a read-only fallback to the legacy `teza_session` (remove 30 days after deploy); sign-in expires the legacy cookie and ends the account's other sessions; register answers 503 once 500 accounts were created in the last 24 h (round 2, replacing a lifetime cap a script could fill for good; 200000 stays as a storage backstop); `sessions` indexed on `expires_at` and `username_key`.
+- SIGN OUT: a 400 on the last records upload no longer keeps the player signed in.
+- CSP: `build.mjs` writes `dist/_headers` with a strict policy and the inline theme script's hash; the e2e server sends it. `el()` now sets `style` through the CSSOM (`style.cssText`), since the policy refuses `style` attributes (the `--accent`/`--i`/`--len` custom properties were being set that way).
+- Round 3: at most 5 registrations per client IP per 24 h (SHA-256 of `CF-Connecting-IP`, 429 with `Retry-After`) in front of the daily cap, so one machine can't hold sign-ups shut.
+- Round 4: IPv6 clients are counted per /64 (`ipBucket`: expand `::`, keep four groups, lowercase and zero-pad), and `::ffff:a.b.c.d` counts as its IPv4, since one VPS can rotate through a whole /64. README no longer presents the unsalted SHA-256 as anonymisation.
+- Round 5: a second IPv6 tier, 20 per /48 next to 5 per /64 (one `registrations` row per bucket, `Retry-After` the longer wait), since a free Hurricane Electric /48 or a /56 home line could still fill the cap; unparseable `CF-Connecting-IP` values share one `invalid` bucket. Keep Cloudflare's "Pseudo IPv4" off.
+- Round 6: the daily cap (500 a day) is gone; the per-IP and per-/48 quotas stay. `MAX_ACCOUNTS` is now 1,000,000, sized by the Accounts object's 10 GB SQLite limit (measured 6,708 bytes per account at the largest valid records, 522 with empty ones, so 200,000,000 would not fit), and from 800,000 every 10,000th account logs one structured `console.warn` (`accounts_near_capacity`). The `accounts_by_created` index went with the daily cap.
+- JOIN ROOM's server check is `GET /api/room` (200 `{online: true}`), which reserves nothing.
+- Checked on `wrangler dev --local-upstream` (4.150.0): `_headers` applied to `/` and assets (and not served itself); headless Chromium in both themes with zero CSP violations, theme set before the stylesheet, service worker registered and controlling after reload, fonts loaded; a room (Classic creates, Poster Slab joins) and a ranked match both reached play. A `teza_session` made by main's Worker still signed in after the switch; logging in replaced it with `__Host-teza_session`.
+
+**Still open**
+- The client still has no auto-reconnect over the resume subprotocol.
+- Remove `LEGACY_COOKIE_NAME` 30 days after this deploys.

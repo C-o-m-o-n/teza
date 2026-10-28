@@ -1,6 +1,6 @@
 // The match server driven by fake connections and a fake clock, shared by the match tests.
 import { expect } from "vitest";
-import { Clock, Conn, Envelope, MatchSession, Peer, Random, ResumeRequest } from "../src/server/match";
+import { ClaimStorage, Clock, Conn, Envelope, MatchSession, Peer, Random, ResumeRequest } from "../src/server/match";
 
 /** Manual clock: time only moves when the test says so. */
 export class FakeClock implements Clock {
@@ -81,4 +81,18 @@ export function input(session: MatchSession, p: Player, frame: number, action: s
 export function lastError(p: Player): string | undefined {
   const errors = p.peer.of("error");
   return (errors[errors.length - 1]?.d as { code: string } | undefined)?.code;
+}
+
+/** The Durable Object storage a `Match` keeps its claim in, as a Map. */
+export class MemoryClaims implements ClaimStorage {
+  map = new Map<string, unknown>();
+  async get(key: string): Promise<unknown> {
+    return this.map.get(key);
+  }
+  async put(key: string, value: number): Promise<void> {
+    this.map.set(key, value);
+  }
+  async delete(key: string): Promise<boolean> {
+    return this.map.delete(key);
+  }
 }

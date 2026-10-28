@@ -38,6 +38,7 @@ export const IDLE_TIMEOUT_MS = 60_000; // a started match where nobody sends any
 export const REPORT_TIMEOUT_MS = 3000; // a ranked `end` waits this long for the ratings at most
 
 /** Room codes (= match ids) are issued by `POST /api/room`: 6 symbols, no 0/O, 1/I/L look-alikes. */
+export const ROOM_CLAIM_MS = LOBBY_TIMEOUT_MS; // an issued code must be created within this time
 export const ROOM_ALPHABET = "ABCDEFGHJKMNPQRSTUVWXYZ23456789";
 export const ROOM_CODE = /^[ABCDEFGHJKMNPQRSTUVWXYZ23456789]{6}$/;
 
@@ -139,10 +140,50 @@ export interface Conn {
 
 type Message = { t: string; s?: unknown; d?: unknown };
 
-/** Resume credentials given at upgrade time (`?resume=<token>&ack=<peerAck>`). */
+/** Resume credentials given at upgrade time (the `resume.<token>.<peerAck>` subprotocol, see `resumeRequest`). */
 export interface ResumeRequest {
   token: string;
   peerAck: number;
+}
+
+/** The subprotocol every resume offers next to `resume.<token>.<peerAck>`, and the only one the server answers with. */
+export const PROTOCOL = "teza";
+const RESUME_PROTOCOL = /^resume\.([0-9a-f]{32})\.([0-9]{1,15})$/;
+
+function offeredProtocols(headers: Headers): string[] {
+  return (headers.get("Sec-WebSocket-Protocol") ?? "").split(",").map((p) => p.trim()).filter((p) => p !== "");
+}
+
+/**
+ * Resume credentials from an upgrade's `Sec-WebSocket-Protocol: teza, resume.<32 hex>.<ack digits>`,
+ * so the token never appears in a URL (and so not in request logs). Undefined without a `resume`
+ * subprotocol; null if it is malformed, offered twice, or offered without `teza`.
+ */
+export function resumeRequest(headers: Headers): ResumeRequest | undefined | null {
+  const offered = offeredProtocols(headers);
+  const resumes = offered.filter((p) => p.startsWith("resume"));
+  if (resumes.length === 0) return undefined;
+  const m = resumes.length === 1 ? RESUME_PROTOCOL.exec(resumes[0]) : null;
+  if (!m || !offered.includes(PROTOCOL)) return null;
+  return { token: m[1], peerAck: Number(m[2]) };
+}
+
+/** Headers for the 101: `Sec-WebSocket-Protocol: teza` if the client offered it, never the resume token. */
+export function upgradeHeaders(request: Headers): Headers {
+  const headers = new Headers();
+  if (offeredProtocols(request).includes(PROTOCOL)) headers.set("Sec-WebSocket-Protocol", PROTOCOL);
+  return headers;
+}
+
+/**
+ * Compares two strings in time that depends only on their length: every char code is XORed in,
+ * with no early exit on the first difference. False if the lengths differ.
+ */
+export function timingSafeEqual(a: string, b: string): boolean {
+  if (a.length !== b.length) return false;
+  let diff = 0;
+  for (let i = 0; i < a.length; i++) diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
+  return diff === 0;
 }
 
 export class MatchSession {
@@ -186,13 +227,20 @@ export class MatchSession {
     return this.slots.length > 0;
   }
 
-  /** Whether `token` belongs to a slot, so the adapter can refuse a bad `?resume=` before accepting. */
+  /** Whether `token` belongs to a slot, so the adapter can refuse a bad upgrade resume before accepting. */
   hasToken(token: string): boolean {
-    return this.slots.some((s) => s.token === token);
+    return this.slotFor(token) !== null;
+  }
+
+  /** The slot holding `token`, compared in constant time against every slot (no stop at the first match). */
+  private slotFor(token: string): Slot | null {
+    let found: Slot | null = null;
+    for (const slot of this.slots) if (timingSafeEqual(slot.token, token)) found = slot;
+    return found;
   }
 
   /**
-   * A new socket. With `resume` (the token from the upgrade URL) the socket rebinds that slot
+   * A new socket. With `resume` (the token from the upgrade's subprotocol) the socket rebinds that slot
    * at once and never waits among the pending sockets, so others can't crowd the owner out.
    */
   connect(peer: Peer, resume?: ResumeRequest, account?: string): Conn {
@@ -416,7 +464,7 @@ export class MatchSession {
     if (!isObject(d) || typeof d.token !== "string" || !Number.isSafeInteger(d.peerAck) || (d.peerAck as number) < 0) {
       return this.reject(conn, "bad-message", "resume needs {token, peerAck}");
     }
-    const slot = this.slots.find((s) => s.token === d.token);
+    const slot = this.slotFor(d.token);
     if (!slot) return this.reject(conn, "bad-token", "unknown resume token");
     const peerAck = d.peerAck as number;
     this.unpend(conn);
@@ -547,7 +595,7 @@ function isSlotRating(v: unknown): v is SlotRating {
 }
 
 /**
- * Whether a new socket (no `?resume=`) may open with `mode`, given the account the Worker
+ * Whether a new socket (no resume) may open with `mode`, given the account the Worker
  * resolved from its session cookie: null if so, else the refusal. Only `mode=ranked` takes a
  * ranked room's slots, and only for its two accounts; create and join can't touch it (409).
  */
@@ -563,6 +611,49 @@ export function admission(session: MatchSession, mode: string | null, account: s
   if (mode === "create" && session.hasPlayers) return { status: 409, message: "Room code taken" };
   if (mode === "join" && !session.hasPlayers) return { status: 404, message: "No such room" };
   return null;
+}
+
+/** Where a `Match` object keeps the claim on its code: its Durable Object storage (a Map in the tests). */
+export interface ClaimStorage {
+  get(key: string): Promise<unknown>;
+  put(key: string, value: number): Promise<void>;
+  delete(key: string): Promise<boolean>;
+}
+
+export const CLAIM_KEY = "claim"; // the claim's expiry time, ms
+
+/**
+ * `POST /api/room` reserving this room's code: records a claim that expires ROOM_CLAIM_MS from
+ * `now` and returns that time, or null if the code is claimed already (unexpired) or in use.
+ */
+export async function issueClaim(session: MatchSession, storage: ClaimStorage, now: number): Promise<number | null> {
+  if (session.hasPlayers || session.isRanked || session.isOver) return null;
+  const claimed = await storage.get(CLAIM_KEY);
+  if (typeof claimed === "number" && claimed > now) return null;
+  const expires = now + ROOM_CLAIM_MS;
+  await storage.put(CLAIM_KEY, expires);
+  return expires;
+}
+
+/** Consume the claim on this room's code: true if there was one and it had not expired. */
+async function takeClaim(storage: ClaimStorage, now: number): Promise<boolean> {
+  const claimed = await storage.get(CLAIM_KEY);
+  if (claimed === undefined) return false;
+  await storage.delete(CLAIM_KEY);
+  return typeof claimed === "number" && claimed > now;
+}
+
+/**
+ * `admission`, plus the issued-code rule: `mode=create` also needs a live claim from `POST /api/room`
+ * (404 without one), which it consumes, so a code is created at most once per `POST /api/room`.
+ */
+export async function admit(
+  session: MatchSession, storage: ClaimStorage, mode: string | null, account: string | null, now: number,
+): Promise<{ status: number; message: string } | null> {
+  const refused = admission(session, mode, account);
+  if (refused || mode !== "create") return refused;
+  if (!(await takeClaim(storage, now))) return { status: 404, message: "Room code was not issued" };
+  return admission(session, mode, account); // nothing else runs during the storage calls, but check again
 }
 
 /** Decode one client frame, or return an error code. Never throws. */
