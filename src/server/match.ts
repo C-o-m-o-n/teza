@@ -19,6 +19,9 @@
 // nothing but `ping`. The match keeps a log of the inputs and garbage its engines applied, in
 // engine order (MAX_SPECTATE_EVENTS at most); a spectator gets `start`'s data and the log so far in
 // one `spectate` message, then each new entry as a `specEvent`, and replays both boards from them.
+// The log is kept as JSON text, built once as it grows, so a join costs no serialization, and joins
+// are metered per match (SPECTATE_JOIN_BURST, then SPECTATE_JOINS_PER_SECOND), so opening and closing
+// spectator sockets in a loop can't keep the object busy while the players' inputs wait.
 
 import { Action, DEFAULT_HANDLING, Game, Handling } from "../engine/game";
 import { stepTo, stepToClock } from "../engine/stepping";
@@ -43,6 +46,8 @@ export const IDLE_TIMEOUT_MS = 60_000; // a started match where nobody sends any
 export const REPORT_TIMEOUT_MS = 3000; // a ranked `end` waits this long for the ratings at most
 export const MAX_SPECTATORS = 50; // sockets watching one match at once
 export const MAX_SPECTATE_EVENTS = 20_000; // log entries kept for spectators; a longer match takes no new ones
+export const SPECTATE_JOIN_BURST = 10; // spectator joins a match takes at once, then
+export const SPECTATE_JOINS_PER_SECOND = 2; // this many a second on average; more get `busy`
 
 /** Room codes (= match ids) are issued by `POST /api/room`: 6 symbols, no 0/O, 1/I/L look-alikes. */
 export const ROOM_CLAIM_MS = LOBBY_TIMEOUT_MS; // an issued code must be created within this time
@@ -216,8 +221,11 @@ export class MatchSession {
   private lastActive = 0; // clock time of the last valid message from a player
   private garbageOut: { slot: Slot; amount: number; frame: number }[] = [];
   private spectators = new Set<Conn>();
-  private log: SpectateEvent[] = []; // what the engines applied, for spectators (emptied at the end)
-  private startData: { seed: number; options: ReturnType<typeof matchOptions>; handling: Handling } | null = null;
+  private logSize = 0; // entries in the spectator log
+  private logJson = ""; // the log as JSON array items, comma-separated (emptied at the end)
+  private startJson: string | null = null; // `start`'s data as JSON object members, for `spectate`
+  private joinBudget = SPECTATE_JOIN_BURST; // spectator joins allowed now (a token bucket)
+  private joinBudgetAt = 0; // clock time `joinBudget` was last brought up to date
 
   constructor(private clock: Clock, private random: Random = cryptoRandom, private ranked: RankedConfig | null = null) {}
 
@@ -315,12 +323,18 @@ export class MatchSession {
    */
   connectSpectator(peer: Peer): Conn {
     const conn: Conn = { peer, slot: null, rejected: 0, closed: false, timer: null, spectator: true, seq: 0 };
-    if (!this.ranked || !this.isLive || !this.startData) this.refuseSpectator(conn, "not-live", "no such live match");
+    if (!this.ranked || !this.isLive || this.startJson === null) return this.refuseSpectator(conn, "not-live", "no such live match"), conn;
+    const now = this.clock.now();
+    this.joinBudget = Math.min(SPECTATE_JOIN_BURST, this.joinBudget + ((now - this.joinBudgetAt) * SPECTATE_JOINS_PER_SECOND) / 1000);
+    this.joinBudgetAt = now;
+    if (this.joinBudget < 1) this.refuseSpectator(conn, "busy", "too many spectators joining");
     else if (this.spectators.size >= MAX_SPECTATORS) this.refuseSpectator(conn, "busy", "too many spectators");
-    else if (this.log.length >= MAX_SPECTATE_EVENTS) this.refuseSpectator(conn, "too-long", "this match is too long to join");
+    else if (this.logSize >= MAX_SPECTATE_EVENTS) this.refuseSpectator(conn, "too-long", "this match is too long to join");
     else {
+      this.joinBudget--;
       this.spectators.add(conn);
-      this.sendSpectator(conn, "spectate", { ...this.startData, events: this.log, elapsed: this.wallFrame() });
+      // the envelope around the cached JSON: no serialization of the log per join
+      conn.peer.send(`{"t":"spectate","s":${++conn.seq},"a":0,"d":{${this.startJson},"events":[${this.logJson}],"elapsed":${JSON.stringify(this.wallFrame())}}}`);
     }
     return conn;
   }
@@ -405,7 +419,9 @@ export class MatchSession {
 
   /** Log what an engine applied (until the log is full) and pass it to every spectator. */
   private record(event: SpectateEvent): void {
-    if (this.log.length < MAX_SPECTATE_EVENTS) this.log.push(event);
+    if (this.logSize < MAX_SPECTATE_EVENTS) {
+      this.logJson += (this.logSize++ ? "," : "") + JSON.stringify(event);
+    }
     for (const conn of this.spectators) this.sendSpectator(conn, "specEvent", event);
   }
 
@@ -551,7 +567,7 @@ export class MatchSession {
       slot.game = game;
     }
     for (const slot of this.slots) this.send(slot, "start", { seed, options, handling: MATCH_HANDLING });
-    this.startData = { seed, options, handling: MATCH_HANDLING };
+    this.startJson = JSON.stringify({ seed, options, handling: MATCH_HANDLING }).slice(1, -1);
     this.announce(true);
   }
 
@@ -643,7 +659,7 @@ export class MatchSession {
       slot.grace = null;
       if (slot.game) slot.game.onAttack = null;
     }
-    this.log = [];
+    this.logJson = "";
     this.announce(false);
     if (this.ranked) return this.rate(this.ranked, winner, reason);
     this.end(winner, reason, null);

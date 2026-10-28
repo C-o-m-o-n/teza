@@ -8,7 +8,7 @@ import { PING_MS } from "../src/net/online";
 import { SpectatorClient } from "../src/net/spectate";
 import {
   Conn, Envelope, IDLE_TIMEOUT_MS, MAX_REJECTED, MAX_SPECTATE_EVENTS, MAX_SPECTATORS, MatchSession, Random, RankedConfig, REPORT_TIMEOUT_MS,
-  SlotRating, admission,
+  SPECTATE_JOIN_BURST, SPECTATE_JOINS_PER_SECOND, SlotRating, admission,
 } from "../src/server/match";
 import { FakeClock, FakePeer, Player, input, join, lastError, send, setup } from "./match-harness";
 
@@ -391,7 +391,10 @@ describe("spectate: spectators are inert", () => {
 
   it(`takes ${MAX_SPECTATORS} spectators, then answers busy and closes`, () => {
     const m = started();
-    const all = Array.from({ length: MAX_SPECTATORS }, () => peek(m.session));
+    const all = Array.from({ length: MAX_SPECTATORS }, () => {
+      m.clock.advance(1000 / SPECTATE_JOINS_PER_SECOND); // within the join rate
+      return peek(m.session);
+    });
     expect(all.every((s) => s.peer.of("spectate").length === 1 && s.peer.closed === null)).toBe(true);
     const extra = peek(m.session);
     expect(lastError(extra)).toBe("busy");
@@ -399,6 +402,43 @@ describe("spectate: spectators are inert", () => {
     expect(extra.peer.of("spectate")).toHaveLength(0);
     // one leaves: there is room again
     m.session.disconnect(all[0].conn);
+    m.clock.advance(1000);
+    expect(peek(m.session).peer.of("spectate")).toHaveLength(1);
+  });
+
+  it("meters joins per match: rapid open/close cycles get busy, and the players' inputs keep being accepted", () => {
+    const m = started();
+    m.clock.advance(1000);
+    let frame = 0;
+    let joined = 0;
+    let busy = 0;
+    // 1000 sockets opened and closed as fast as possible, 5 per millisecond, while both players keep playing (40 inputs each)
+    for (let i = 0; i < 1000; i++) {
+      const s = peek(m.session);
+      if (s.peer.of("spectate").length) joined++;
+      else if (lastError(s) === "busy") {
+        busy++;
+        expect(s.peer.sent).toHaveLength(1); // refused before any log is sent
+        expect(s.peer.closed?.code).toBe(1008);
+      }
+      m.session.disconnect(s.conn);
+      if (i % 5 === 4) m.clock.advance(1);
+      if (i % 50 === 49) {
+        frame = Math.floor(((m.clock.now() - m.startAt) * 60 * 256) / 1000) / 256;
+        input(m.session, m.p0, frame, "left");
+        input(m.session, m.p0, frame, "left", "release");
+        input(m.session, m.p1, frame, "right");
+        input(m.session, m.p1, frame, "right", "release");
+      }
+    }
+    // 200 ms of cycles: the burst, plus the rate's share of 0.2 s
+    expect(joined).toBe(SPECTATE_JOIN_BURST);
+    expect(busy).toBe(1000 - SPECTATE_JOIN_BURST);
+    expect(m.session.spectatorCount).toBe(0);
+    for (const p of [m.p0, m.p1]) expect(p.peer.of("error")).toEqual([]); // no frame-late, no rate-limit: every input applied
+    expect(m.p1.peer.of("opponentInput")).toHaveLength(40);
+    // after a second the rate lets new spectators in again
+    m.clock.advance(1000);
     expect(peek(m.session).peer.of("spectate")).toHaveLength(1);
   });
 

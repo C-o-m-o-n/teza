@@ -133,11 +133,15 @@ export function handleLive(request: Request, store: AccountStore, live: LiveMatc
   if (request.method !== "GET") return fail(405, "Method not allowed.", { Allow: "GET" });
   const matches: LiveMatch[] = [];
   for (const [code, entry] of [...live].sort((x, y) => y[1].startedAt - x[1].startedAt)) {
-    if (now - entry.startedAt > LIVE_MAX_AGE_MS || !store.rankedMatch(code)) {
+    if (now - entry.startedAt > LIVE_MAX_AGE_MS) {
       live.delete(code);
       continue;
     }
-    if (matches.length >= LIVE_LIST_SIZE) continue;
+    if (matches.length >= LIVE_LIST_SIZE) continue; // past the list: no storage lookups
+    if (!store.rankedMatch(code)) {
+      live.delete(code);
+      continue;
+    }
     const players = entry.keys.map((key) => {
       const account = store.account(key);
       const rating = store.rating(key);

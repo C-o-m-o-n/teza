@@ -108,7 +108,11 @@ describe("GET /api/live", () => {
       room(code, a, b);
       matchLive(live, store, code, true, NOW - 1000 * (40 - i)); // the last code started last
     });
+    const lookup = store.rankedMatch.bind(store);
+    let lookups = 0;
+    store.rankedMatch = (code) => (lookups++, lookup(code));
     const { body } = await list();
+    expect(lookups).toBe(LIVE_LIST_SIZE); // none for the entries past the list
     expect(body.matches).toHaveLength(LIVE_LIST_SIZE);
     expect(body.matches.map((m) => m.code)).toEqual(codes.slice(10).reverse());
     expect(live.size).toBe(40); // the rest stay live, just not listed
