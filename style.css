@@ -123,6 +123,40 @@ button { font: inherit; color: inherit; }
   .ladder-games { grid-column: 2 / -1; text-align: left; }
 }
 
+/* WATCH LIVE rows, in every theme: "A vs B", both TRs, how long the match has run; on a phone the names take
+   the first line. A watched match's result names the winner, set smaller than YOU WIN so a long name fits. */
+.ladder-row.live-row { grid-template-columns: minmax(0, 1fr) auto 3.4em; }
+.live-vs { color: var(--muted); font-family: var(--body); font-size: 0.7em; letter-spacing: 0.12em; }
+.ladder-row:hover .live-vs, .ladder-row:focus .live-vs { color: inherit; }
+.live-time { font-size: 14px; font-variant-numeric: tabular-nums; }
+@media (max-width: 520px) {
+  .ladder-row.live-row { grid-template-columns: minmax(0, 1fr) auto; }
+  .live-row .ladder-name { grid-column: 1 / -1; }
+  .live-row .ladder-games { grid-column: auto; text-align: right; }
+}
+.results .big.winner { font-size: clamp(44px, 7.5vw, 120px); overflow-wrap: anywhere; }
+.results .watched { margin: 14px 0 0; font-family: var(--display); font-size: 20px; overflow-wrap: anywhere; }
+/* Watching a match: #ui (hidden on the play screen) shows only the LIVE tag, top centre over the boards */
+#ui[data-screen="play"]:has(> .spectate-tag) { display: block; }
+#ui > .spectate-tag {
+  position: absolute;
+  top: 14px;
+  left: 50%;
+  transform: translateX(-50%);
+  margin: 0;
+  padding: 6px 12px;
+  border: 2px solid var(--line);
+  background: var(--bg);
+  color: var(--muted);
+  font-family: var(--display);
+  font-size: 14px;
+  letter-spacing: 0.14em;
+  white-space: nowrap;
+  pointer-events: none;
+}
+.spectate-live { color: #ff3f5f; }
+.spectate-clock { color: var(--ink); font-variant-numeric: tabular-nums; }
+
 /* the results screen's entrance, in every theme */
 @keyframes slide-in {
   from { transform: translateX(-60px); opacity: 0; }

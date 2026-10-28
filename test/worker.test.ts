@@ -4,7 +4,7 @@
 import { beforeAll, describe, expect, it, vi } from "vitest";
 import { COOKIE_NAME, LEGACY_COOKIE_NAME } from "../src/server/accounts";
 import { FakeClock, MemoryClaims } from "./match-harness";
-import { MatchSession, admit, issueClaim, resumeRequest, upgradeHeaders } from "../src/server/match";
+import { CLAIM_KEY, MatchSession, admit, issueClaim, resumeRequest, upgradeHeaders } from "../src/server/match";
 
 vi.mock("cloudflare:workers", () => ({ DurableObject: class {} }));
 
@@ -57,6 +57,7 @@ function env(account: string | null = "alice") {
   return {
     calls,
     clock,
+    rooms,
     bindings: {
       ACCOUNTS: { idFromName: (n: string) => n, get: () => accounts },
       MATCH: { idFromName: (n: string) => n, get: (code: string) => match(code) },
@@ -231,11 +232,46 @@ describe("worker: issued room codes", () => {
 });
 
 describe("worker: public routes", () => {
-  it("forwards /api/leaderboard and /api/profile/* to the Accounts object", async () => {
+  it("forwards /api/leaderboard, /api/profile/* and /api/live to the Accounts object", async () => {
     const e = env();
-    for (const path of ["/api/leaderboard", "/api/profile/Alice"]) {
+    for (const path of ["/api/leaderboard", "/api/profile/Alice", "/api/live"]) {
       expect((await worker.fetch(new Request(`https://teza.example${path}`), e.bindings)).status).toBe(200);
     }
-    expect(e.calls.accountsFetch).toEqual(["/api/leaderboard", "/api/profile/Alice"]);
+    expect((await worker.fetch(new Request("https://teza.example/api/live", { method: "POST" }), e.bindings)).status).toBe(200); // Accounts answers 405
+    expect(e.calls.accountsFetch).toEqual(["/api/leaderboard", "/api/profile/Alice", "/api/live", "/api/live"]);
+  });
+});
+
+describe("worker: spectate upgrades", () => {
+  it("refuses a foreign Origin (403), a plain GET (426) and a bad code (400) before calling Match", async () => {
+    const e = env();
+    expect((await worker.fetch(upgrade("mode=spectate", undefined, { Origin: "https://evil.example" }), e.bindings)).status).toBe(403);
+    const plain = await worker.fetch(new Request("https://teza.example/api/match/ABCDEF?mode=spectate"), e.bindings);
+    expect(plain.status).toBe(426);
+    expect((await worker.fetch(upgrade("mode=spectate", undefined, {}, undefined, "ABCDE0"), e.bindings)).status).toBe(400);
+    expect((await worker.fetch(upgrade("mode=spectate", undefined, resumeHeader(`teza, resume.${TOKEN}.0`)), e.bindings)).status).toBe(400);
+    expect(e.calls.match).toEqual([]);
+  });
+
+  it("answers 404 on an unissued code without a session lookup, a claim or a storage write", async () => {
+    const e = env();
+    const res = await worker.fetch(upgrade("mode=spectate", `${COOKIE_NAME}=${"a".repeat(64)}`), e.bindings);
+    expect(res.status).toBe(404);
+    expect(await res.text()).toBe("No such live match");
+    expect(e.calls.sessionAccount).toEqual([]);
+    expect(e.calls.match).toHaveLength(1);
+    expect(e.calls.match[0].headers.get("X-Teza-Account")).toBeNull();
+    expect(e.rooms.get("ABCDEF")!.claims.map.size).toBe(0);
+  });
+
+  it("leaves an issued code's claim alone, and drops an incoming account header", async () => {
+    const e = env();
+    const { code } = await (await newRoom(e)).json() as { code: string };
+    const claim = e.rooms.get(code)!.claims.map.get(CLAIM_KEY);
+    const res = await worker.fetch(upgrade("mode=spectate", undefined, { "X-Teza-Account": "alice" }, undefined, code), e.bindings);
+    expect(res.status).toBe(404); // an unranked room is never watchable
+    expect(e.calls.match[0].headers.get("X-Teza-Account")).toBeNull();
+    expect(e.rooms.get(code)!.claims.map.get(CLAIM_KEY)).toBe(claim);
+    expect((await worker.fetch(upgrade("mode=create", undefined, {}, undefined, code), e.bindings)).status).toBe(200); // still issued
   });
 });

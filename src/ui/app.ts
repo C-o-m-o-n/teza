@@ -8,7 +8,8 @@ import { Action, Game, GameEvent } from "../engine/game";
 import { Recorder, ReplayInput, ReplayPlayer } from "../engine/replay";
 import { stepToClock } from "../engine/stepping";
 import { MODES, Mode, ModeId, modeById } from "../modes";
-import { OnlineClient, OnlineResult } from "../net/online";
+import { OnlineClient, OnlineResult, OnlineSocket } from "../net/online";
+import { SpectatorClient, SpectatorResult } from "../net/spectate";
 import { mergeRecords, passwordError, usernameError } from "../profile";
 import { BoardView, formatTime, Renderer } from "../render/renderer";
 import { ROOM_CODE } from "../server/match";
@@ -22,10 +23,10 @@ import {
   putRecords, queueStatus, signIn,
 } from "./account";
 import { classicWordmark, wordmark } from "./brand";
-import { newRoom, onlineAvailable } from "./rooms";
+import { fetchLive, LiveMatch, LivePlayer, newRoom, onlineAvailable } from "./rooms";
 import { THEMES, themeById } from "./themes";
 
-type Screen = "title" | "menu" | "bots" | "lobby" | "queue" | "leaderboard" | "profile" | "config" | "account" | "play" | "results";
+type Screen = "title" | "menu" | "bots" | "lobby" | "queue" | "leaderboard" | "profile" | "live" | "config" | "account" | "play" | "results";
 
 const GAME_ACTIONS: Action[] = ["left", "right", "soft", "hard", "cw", "ccw", "180", "hold"];
 const COUNTDOWN = [
@@ -104,6 +105,7 @@ interface Session {
   endAt: number | null; // when to show results
   outcome: "win" | "lose" | "draw" | "lost" | "clear" | "fail" | null;
   online: OnlineClient | null; // an online match: `bot` is the opponent as the server relays it
+  spectate: { client: SpectatorClient; names: [string, string]; clock: HTMLElement } | null; // watching: `player` and `bot` are boards 0 and 1, no input
   away: number | null; // performance.now() when the absent opponent forfeits
   notice: { text: string; until: number } | null; // a server error, shown over the board for a while
 }
@@ -113,6 +115,16 @@ const SIGN_IN_FOR_RANKED = "Sign in to play ranked";
 const QUEUE_POLL_MS = 2000; // the queue's keep-alive is 15 s (src/server/matchmaking.ts)
 const NO_PLAYERS = "NO CALIBRATED PLAYERS YET";
 const NO_SUCH_PLAYER = "No such player";
+const NO_LIVE = "No ranked matches are live right now.";
+const NOT_LIVE = "That match is not live any more.";
+const LIVE_FAILED = "Couldn't load the live matches. Trying again…";
+const LIVE_POLL_MS = 10_000; // WATCH LIVE re-fetches the list this often (the server caches it 5 s)
+
+/** `4:07` from milliseconds. */
+const clockText = (ms: number) => {
+  const s = Math.max(0, Math.floor(ms / 1000));
+  return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
+};
 
 /** `TR 12,345`, or `TR HIDDEN` while the rating is still being calibrated. */
 const trText = (tr: number | null) => (tr === null ? "TR HIDDEN" : `TR ${tr.toLocaleString("en-US")}`);
@@ -139,6 +151,7 @@ export class App {
   private screen: Screen = "menu";
   private session: Session | null = null;
   private room: OnlineClient | null = null; // the online lobby's connection, until the match starts
+  private watching: SpectatorClient | null = null; // WATCH LIVE's connection, until `spectate` arrives
   private queue: { stop: () => void } | null = null; // the ranked queue's polling, while searching
   private ladder: LeaderboardPlayer[] | null = null; // the LEADERBOARD as last fetched, so BACK from a profile is instant
   private held = new Set<Bind>();
@@ -271,6 +284,7 @@ export class App {
 
   /** Apply an input to the player's game, recording it in 40 LINES; online, the client sends it too. */
   private input(s: Session, input: ReplayInput): void {
+    if (s.spectate) return; // a spectator plays nothing
     if (s.online) {
       // a blur releases each held action on its own, so the server's engine does the same
       if (input.type === "press") s.online.press(input.action);
@@ -294,6 +308,13 @@ export class App {
     s.last = now;
     if (s.endAt !== null) return;
     if (s.online) return this.advanceOnline(s, now);
+    if (s.spectate) {
+      // the boards move only with the server's events; the match clock runs on, so a resting board still looks live
+      s.spectate.client.update();
+      const text = clockText((s.spectate.client.clock * 1000) / 60);
+      if (s.spectate.clock.textContent !== text) s.spectate.clock.textContent = text;
+      return;
+    }
     s.clock += dt * 60;
     stepToClock(s.player, s.clock, input);
     if (s.ghost && s.ghostView) {
@@ -355,7 +376,7 @@ export class App {
     this.mount({
       mode, seed, player, playerView, bot, botView, botAI, botProfile: profile, botAcc: 0,
       recorder: mode.id === "40l" ? new Recorder(player) : null, clock: 0, ghost, ghostView,
-      t: 0, started: false, last: performance.now(), endAt: null, outcome: null, online: null, away: null, notice: null,
+      t: 0, started: false, last: performance.now(), endAt: null, outcome: null, online: null, spectate: null, away: null, notice: null,
     });
     if (bot && botView) {
       player.onAttack = (n) => this.sendAttack(playerView, botView!, bot!, n);
@@ -380,7 +401,7 @@ export class App {
     const s: Session = {
       mode, seed: player.opts.seed, player, playerView, bot: opponent, botView: opponentView, botAI: null, botProfile: null,
       botAcc: 0, recorder: null, clock: 0, ghost: null, ghostView: null, t: 0, started: true, last: performance.now(),
-      endAt: null, outcome: null, online: client, away: null, notice: null,
+      endAt: null, outcome: null, online: client, spectate: null, away: null, notice: null,
     };
     // garbage flights: our predicted attacks go out (the server sends the real ones); the server's come in
     client.events = {
@@ -407,7 +428,7 @@ export class App {
     this.renderer.layoutViews();
     this.applySettings();
     this.syncMusic(true); // crossfade into the mode's song: the countdown is its intro
-    this.wireSounds(s.player, true);
+    this.wireSounds(s.player, !s.spectate); // watching, both boards sound like an opponent's
     if (s.bot) this.wireSounds(s.bot, false);
     s.player.on((e) => this.onPlayerEvent(e));
     this.setScreen("play");
@@ -472,7 +493,7 @@ export class App {
     const s = this.session;
     if (!s) return;
     if (e.type === "topout") {
-      if (s.online) return; // input stops; the server's `end` decides the match
+      if (s.online || s.spectate) return; // input stops; the server's `end` decides the match
       if (s.mode.id === "zen") {
         setTimeout(() => s.player.wipe(), 0);
         return;
@@ -491,7 +512,7 @@ export class App {
     if (s.online) s.playerView.marker = s.botView!.marker = null;
     this.syncMusic(); // back to the menu song for the results
     if (outcome === "win") {
-      s.botView!.bigText = { text: "K.O.", t: 0, color: "#ff3f5f" };
+      if (!s.spectate) s.botView!.bigText = { text: "K.O.", t: 0, color: "#ff3f5f" }; // a spectator's K.O. is on the loser's board
       sfx.finish();
     }
   }
@@ -502,7 +523,10 @@ export class App {
     this.startSession(s.mode.id, s.botProfile);
   }
 
-  private exitToMenu(): void {
+  /** Leave the play or results screen: to the menu, or back to WATCH LIVE when watching (`notice` shown there). */
+  private exitToMenu(notice?: string): void {
+    const watched = this.session?.spectate;
+    watched?.client.leave();
     this.session?.online?.leave(); // the opponent wins by forfeit after the server's grace period
     this.session = null;
     this.syncMusic();
@@ -510,7 +534,8 @@ export class App {
     this.renderer.flights = [];
     this.renderer.overlay = { countdown: null, countdownT: 0 };
     this.renderer.accent = "#3f6bff";
-    this.showMenu();
+    if (watched) this.showLive(notice);
+    else this.showMenu();
   }
 
   // ------------------------------------------------------------------ input
@@ -558,8 +583,8 @@ export class App {
       // Game keys (e.g. spamming hard drop after a top-out) must never activate a button.
       if (bind || e.code === "Enter" || e.code === "Space") e.preventDefault();
       if (performance.now() < this.resultsShownAt + 600) return;
-      if (this.session?.online) {
-        // online results have one action, MENU
+      if (this.session?.online || this.session?.spectate) {
+        // online results have one action, MENU (WATCH LIVE for a spectator)
         if (bind === "exit" || e.code === "Enter") this.exitToMenu();
       } else if (bind === "retry" || e.code === "Enter") {
         e.preventDefault();
@@ -593,6 +618,10 @@ export class App {
       } else if (this.screen === "leaderboard") {
         sfx.menu();
         this.showBots();
+      } else if (this.screen === "live") {
+        sfx.menu();
+        this.stopWatching();
+        this.showLeaderboard(this.ladder);
       } else if (this.screen !== "menu") {
         sfx.menu();
         this.showMenu();
@@ -883,21 +912,26 @@ export class App {
    * limit), never a fixed host.
    */
   private connect(code: string, mode: "create" | "join" | "ranked"): OnlineClient {
+    const client: OnlineClient = new OnlineClient(this.socket(code, mode, () => client), () => performance.now());
+    this.room = client;
+    return client;
+  }
+
+  /** The match socket for `code` in `mode`, feeding what arrives to `client()` (OnlineClient or SpectatorClient). */
+  private socket(code: string, mode: string, client: () => { receive(data: string): void; closed(): void }): OnlineSocket {
     const url = new URL(`/api/match/${code}?mode=${mode}`, location.href);
     url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
     const ws = new WebSocket(url);
-    const client = new OnlineClient({
+    ws.addEventListener("message", (e) => {
+      if (typeof e.data === "string") client().receive(e.data);
+    });
+    ws.addEventListener("close", () => client().closed());
+    return {
       send: (data) => {
         if (ws.readyState === WebSocket.OPEN) ws.send(data);
       },
       close: () => ws.close(1000, "left"),
-    }, () => performance.now());
-    ws.addEventListener("message", (e) => {
-      if (typeof e.data === "string") client.receive(e.data);
-    });
-    ws.addEventListener("close", () => client.closed());
-    this.room = client;
-    return client;
+    };
   }
 
   private leaveRoom(): void {
@@ -1050,6 +1084,12 @@ export class App {
     const error = el("p", { class: "form-error", role: "alert" });
     const back = el("button", { class: "ghost-btn", type: "button", "data-nav": "" }, "← BACK");
     back.addEventListener("click", () => this.showBots());
+    // the ranked matches being played now, from the players this page ranks
+    const watch = el("button", { class: "ghost-btn", type: "button", "data-nav": "" }, "WATCH LIVE");
+    watch.addEventListener("click", () => {
+      sfx.confirm();
+      this.showLive();
+    });
     const hint = el("footer", { class: "hint" }, "ESC to go back");
     const page = this.subPage("LEADERBOARD", "Calibrated ranked players by TR. Only rated ranked matches count here.",
       el("section", { class: "account-form room ladder-box" },
@@ -1057,7 +1097,7 @@ export class App {
         list,
         status,
         error,
-        el("div", { class: "actions" }, back),
+        el("div", { class: "actions" }, watch, back),
       ),
       hint,
     );
@@ -1096,7 +1136,7 @@ export class App {
         error.textContent = UNAVAILABLE;
         return;
       }
-      const focused = document.activeElement === back;
+      const focused = document.activeElement === back || document.activeElement === watch;
       fill(rows);
       if (focused) list.querySelector<HTMLElement>("[data-nav]")?.focus();
     });
@@ -1143,6 +1183,175 @@ export class App {
       joined.textContent = new Date(p.joined).toLocaleDateString("en-US", { year: "numeric", month: "short", day: "numeric" });
       if (p.rating.tr === null) status.textContent = "Placed on the leaderboard after calibration: TR shows after enough rated ranked matches.";
     });
+  }
+
+  // ------------------------------------------------------------------ watch live
+
+  /**
+   * WATCH LIVE: the ranked matches being played now, re-fetched every LIVE_POLL_MS while shown (and on
+   * REFRESH). A row opens the match to watch. `notice` (why the last one closed) shows over the list.
+   * Server text only ever goes in as text.
+   */
+  private showLive(notice = ""): void {
+    const list = el("ol", { class: "ladder", "aria-label": "Live ranked matches" });
+    const status = el("p", { class: "note", role: "status" });
+    const error = el("p", { class: "form-error", role: "alert" }, notice);
+    const refresh = el("button", { class: "ghost-btn", type: "button", "data-nav": "" }, "REFRESH");
+    const back = el("button", { class: "ghost-btn", type: "button", "data-nav": "" }, "← BACK");
+    back.addEventListener("click", () => {
+      this.stopWatching();
+      this.showLeaderboard(this.ladder);
+    });
+    const hint = el("footer", { class: "hint" }, "ESC to go back");
+    const page = this.subPage("WATCH LIVE", "Ranked matches being played right now. Pick one to watch both boards live.",
+      el("section", { class: "account-form room ladder-box live" },
+        el("p", { class: "account-label" }, "LIVE NOW"),
+        list,
+        status,
+        error,
+        el("div", { class: "actions" }, refresh, back),
+      ),
+      hint,
+    );
+    let shown: { row: HTMLElement; time: HTMLElement; match: LiveMatch }[] = [];
+    const tick = () => {
+      for (const r of shown) r.time.textContent = clockText(Date.now() - r.match.startedAt);
+    };
+    const tr = (p: LivePlayer) => (p.tr === null ? "TR ?" : `TR ${p.tr.toLocaleString("en-US")}`);
+    const fill = (matches: LiveMatch[]) => {
+      // a refresh keeps the focus on the row it was on, if that match is still listed
+      const focused = shown.find((r) => r.row === document.activeElement)?.match.code;
+      hint.textContent = matches.length ? "ENTER to watch · ESC to go back" : "ESC to go back";
+      status.textContent = matches.length ? "" : NO_LIVE;
+      list.hidden = matches.length === 0;
+      shown = matches.map((m) => {
+        const time = el("span", { class: "ladder-games live-time" });
+        const row = el("button", { class: "ladder-row live-row", type: "button", "data-nav": "" },
+          el("span", { class: "ladder-name" }, m.players[0].username, el("span", { class: "live-vs" }, " vs "), m.players[1].username),
+          el("span", { class: "ladder-tr" }, `${tr(m.players[0])} · ${tr(m.players[1])}`),
+          time,
+        );
+        row.addEventListener("click", () => {
+          sfx.confirm();
+          this.watch(m, status, error);
+        });
+        row.addEventListener("mouseenter", () => sfx.menu());
+        return { row, time, match: m };
+      });
+      list.replaceChildren(...shown.map((r) => el("li", {}, r.row)));
+      tick();
+      shown.find((r) => r.match.code === focused)?.row.focus();
+    };
+    let loading = false;
+    let first = true; // the first answer moves the focus from REFRESH to the first row
+    const load = async () => {
+      if (loading) return;
+      loading = true;
+      const matches = await fetchLive();
+      loading = false;
+      if (!page.isConnected) return; // left the page meanwhile
+      if (matches === "failed") {
+        // the server is there but this answer failed: keep what is shown, and the next poll tries again
+        if (status.textContent === "Loading…") status.textContent = "";
+        error.textContent = LIVE_FAILED;
+        return;
+      }
+      if (matches === "unavailable") {
+        shown = [];
+        list.replaceChildren();
+        list.hidden = true;
+        status.textContent = "";
+        hint.textContent = "ESC to go back";
+        error.textContent = UNAVAILABLE;
+        return;
+      }
+      if (error.textContent === UNAVAILABLE || error.textContent === LIVE_FAILED) error.textContent = "";
+      const moveFocus = first && (document.activeElement === refresh || document.activeElement === document.body);
+      first = false;
+      fill(matches);
+      if (moveFocus) shown[0]?.row.focus();
+    };
+    refresh.addEventListener("click", () => {
+      sfx.confirm();
+      void load();
+    });
+    this.setScreen("live", page);
+    list.hidden = true;
+    status.textContent = "Loading…";
+    // both timers stop themselves once the page is gone
+    const poll = window.setInterval(() => {
+      if (!page.isConnected) return window.clearInterval(poll);
+      void load();
+    }, LIVE_POLL_MS);
+    const clock = window.setInterval(() => {
+      if (!page.isConnected) return window.clearInterval(clock);
+      tick();
+    }, 1000);
+    void load();
+  }
+
+  /** Open match `m` to watch; its play screen mounts when `spectate` arrives. `status`/`error` are the list's. */
+  private watch(m: LiveMatch, status: HTMLElement, error: HTMLElement): void {
+    if (this.watching) return; // already opening one
+    error.textContent = "";
+    status.textContent = "Connecting…";
+    const client: SpectatorClient = new SpectatorClient(this.socket(m.code, "spectate", () => client), () => performance.now());
+    this.watching = client;
+    const names: [string, string] = [m.players[0].username, m.players[1].username];
+    client.events = {
+      start: () => {
+        if (this.watching !== client) return;
+        this.watching = null;
+        this.startSpectate(client, names);
+      },
+      closed: () => {
+        if (this.watching !== client) return;
+        this.watching = null;
+        if (this.screen !== "live") return;
+        status.textContent = "";
+        error.textContent = NOT_LIVE;
+      },
+    };
+  }
+
+  /** Close a WATCH LIVE connection that hasn't started. */
+  private stopWatching(): void {
+    this.watching?.leave();
+    this.watching = null;
+  }
+
+  /**
+   * Watching: both boards the same size, named by the players, stepped only by the server's events (no
+   * countdown, no input). Garbage flies from attacker to receiver; `end` shows the winner, then results.
+   */
+  private startSpectate(client: SpectatorClient, names: [string, string]): void {
+    const mode = modeById("vs");
+    const [a, b] = client.boards!;
+    const views = [a, b].map((g, i) => new BoardView(g, { accent: mode.accent, mode: "vs", label: names[i], compact: true }));
+    // a real element over the canvas: watching, the match clock (it runs while the boards rest), how to leave
+    const clock = el("span", { class: "spectate-clock" }, clockText((client.clock * 1000) / 60));
+    const state = el("span", { class: "spectate-live" }, "LIVE");
+    const tag = el("p", { class: "spectate-tag", "aria-label": `Watching ${names[0]} versus ${names[1]} live. Press Escape to leave.` },
+      state, " · ", clock, " · ESC TO LEAVE");
+    const s: Session = {
+      mode, seed: a.opts.seed, player: a, playerView: views[0], bot: b, botView: views[1], botAI: null, botProfile: null,
+      botAcc: 0, recorder: null, clock: 0, ghost: null, ghostView: null, t: 0, started: true, last: performance.now(),
+      endAt: null, outcome: null, online: null, spectate: { client, names, clock }, away: null, notice: null,
+    };
+    client.events = {
+      garbage: (slot, n) => this.flight(views[1 - slot], views[slot], n, [a, b][slot].opts.garbagespeed),
+      end: (result) => {
+        if (this.session !== s) return;
+        if (result.winner !== null) views[1 - result.winner].bigText = { text: "K.O.", t: 0, color: "#ff3f5f" };
+        state.textContent = "FINAL";
+        this.endSession(result.winner === null ? "draw" : "win");
+      },
+      closed: () => {
+        if (this.session === s && s.endAt === null) this.exitToMenu(NOT_LIVE);
+      },
+    };
+    this.mount(s);
+    this.root.append(tag); // the play screen shows #ui only for this tag (style.css)
   }
 
   /** The lobby screens (CREATE's code, JOIN's field): one box in the VERSUS layout. */
@@ -1393,6 +1602,7 @@ export class App {
 
   private showResults(): void {
     const s = this.session!;
+    if (s.spectate) return this.showSpectateResult(s.spectate.client.result, s.spectate.names, s.mode.accent);
     const g = s.player;
     const stat = (label: string, value: string) => el("div", { class: "stat" }, el("span", {}, label), el("strong", {}, value));
     let headline = "";
@@ -1473,6 +1683,23 @@ export class App {
       trLine,
       el("div", { class: "stats" }, ...stats),
       el("div", { class: "actions" }, ...(s.online ? [back] : [retry, back])),
+    );
+    this.resultsShownAt = performance.now();
+    this.setScreen("results", page);
+  }
+
+  /** A watched match's end: who won (or DRAW) and why, and the way back to WATCH LIVE. */
+  private showSpectateResult(result: SpectatorResult | null, names: [string, string], accent: string): void {
+    const winner = result?.winner ?? null;
+    const reason = result?.reason ?? "connection";
+    const back = el("button", { class: "ghost-btn primary", "data-nav": "" }, "WATCH LIVE  ·  ESC");
+    back.addEventListener("click", () => this.exitToMenu());
+    const page = el("div", { class: "results", style: `--accent:${accent}` },
+      el("p", { class: "headline" }, "MATCH OVER"),
+      el("p", { class: "big winner" }, winner === null ? "DRAW" : `${names[winner]} WINS`),
+      el("p", { class: "badge" }, `FINAL · ${REASON_TEXT[reason] ?? reason.toUpperCase()}`),
+      el("p", { class: "note watched" }, names[0], el("span", { class: "live-vs" }, " vs "), names[1]),
+      el("div", { class: "actions" }, back),
     );
     this.resultsShownAt = performance.now();
     this.setScreen("results", page);
