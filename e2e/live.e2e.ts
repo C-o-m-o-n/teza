@@ -1,4 +1,4 @@
-// WATCH LIVE (VERSUS > WATCH LIVE) in Chromium against the production build in dist/, with /api/live
+// WATCH LIVE (VERSUS > LEADERBOARD > WATCH LIVE) in Chromium against the production build in dist/, with /api/live
 // mocked and the match socket mocked by page.routeWebSocket, in both themes at desktop and phone sizes.
 // Screenshots go to $E2E_SHOTS when it is set.
 import { expect, Page, test, WebSocketRoute } from "@playwright/test";
@@ -119,13 +119,18 @@ async function mockSocket(page: Page, open: (ws: WebSocketRoute) => void = (ws) 
   return { frames, urls, socket: () => socket! };
 }
 
-async function openVersus(page: Page, theme: string, size: { width: number; height: number }): Promise<void> {
+async function openLeaderboard(page: Page, theme: string, size: { width: number; height: number }): Promise<void> {
   await page.setViewportSize(size);
   await seedTheme(page, theme);
   await openMenu(page, server.url);
   await page.locator("button.bar", { hasText: "VERSUS" }).click();
   await expect(ui(page)).toHaveAttribute("data-screen", "bots");
+  await expect(page.locator("nav.bars .bar")).toHaveCount(8); // VERSUS keeps its eight bars: WATCH LIVE is on the LEADERBOARD
+  await page.locator("button.bar", { hasText: "LEADERBOARD" }).click();
+  await expect(ui(page)).toHaveAttribute("data-screen", "leaderboard");
 }
+
+const watchLive = (page: Page) => page.locator("button.ghost-btn", { hasText: "WATCH LIVE" });
 
 for (const theme of ["classic", "poster"]) {
   for (const size of [{ width: 1280, height: 720 }, { width: 390, height: 844 }]) {
@@ -135,8 +140,8 @@ for (const theme of ["classic", "poster"]) {
     test(`${tag}: WATCH LIVE lists the live matches, a row opens the spectator screen, ESC and end lead back`, async ({ page }) => {
       const live = await mockLive(page);
       const sock = await mockSocket(page);
-      await openVersus(page, theme, size);
-      const bar = page.locator("button.bar", { hasText: "WATCH LIVE" });
+      await openLeaderboard(page, theme, size);
+      const bar = watchLive(page);
       await expect(bar).toBeVisible();
       await bar.click();
       await expect(ui(page)).toHaveAttribute("data-screen", "live");
@@ -159,9 +164,9 @@ for (const theme of ["classic", "poster"]) {
       await page.locator("button", { hasText: "REFRESH" }).click();
       await expect.poll(live.fetches).toBe(before + 1);
 
-      // ESC goes back to VERSUS
+      // ESC goes back to the LEADERBOARD
       await page.keyboard.press("Escape");
-      await expect(ui(page)).toHaveAttribute("data-screen", "bots");
+      await expect(ui(page)).toHaveAttribute("data-screen", "leaderboard");
       await bar.click();
       await expect(rows).toHaveCount(3);
 
@@ -172,6 +177,16 @@ for (const theme of ["classic", "poster"]) {
       expect(new URL(sock.urls[0]).pathname).toBe("/api/match/ABCDEF");
       expect(new URL(sock.urls[0]).searchParams.get("mode")).toBe("spectate");
       await expect.poll(() => boardsDrawn(page)).toEqual([true, true]);
+      // the LIVE tag: a real element with the match clock (from the server's elapsed frame), which runs while the boards rest
+      const liveTag = page.locator("#ui .spectate-tag");
+      await expect(liveTag).toBeVisible();
+      await expect(liveTag).toHaveText(/^LIVE · 0:0\d · ESC TO LEAVE$/);
+      await expect(liveTag).toHaveAttribute("aria-label", "Watching Zuri_Top versus <b>x</b> live. Press Escape to leave.");
+      const at = await liveTag.locator(".spectate-clock").textContent();
+      await expect(liveTag.locator(".spectate-clock")).not.toHaveText(at!, { timeout: 2500 });
+      const box = (await liveTag.boundingBox())!;
+      expect(box.x).toBeGreaterThanOrEqual(0);
+      expect(box.x + box.width).toBeLessThanOrEqual(size.width);
       // game keys do nothing and send nothing
       for (const key of ["Space", "ArrowLeft", "ArrowRight", "ArrowDown", "KeyZ", "KeyX", "KeyC", "KeyA", "ShiftLeft", "KeyR"]) await page.keyboard.press(key);
       await page.waitForTimeout(300);
@@ -198,7 +213,7 @@ for (const theme of ["classic", "poster"]) {
       await expect(ui(page)).toHaveAttribute("data-screen", "results");
       const results = page.locator(".results");
       await expect(results.locator(".big")).toHaveText("<b>x</b> WINS");
-      await expect(results.locator(".badge")).toHaveText("LIVE · BY TOP-OUT");
+      await expect(results.locator(".badge")).toHaveText("FINAL · BY TOP-OUT");
       await expect(results.locator("b")).toHaveCount(0);
       await expect(results.locator("button")).toHaveText("WATCH LIVE  ·  ESC");
       expect(await layoutProblems(page)).toEqual([]);
@@ -214,26 +229,28 @@ for (const theme of ["classic", "poster"]) {
   test(`${theme}: an empty list says so, a failing fetch is unavailable, and a refused socket is not live any more`, async ({ page }) => {
     // the match will have ended between the list and the click: the socket closes before spectate
     const sock = await mockSocket(page, (ws) => void ws.close({ code: 1008, reason: "not-live" }));
-    await openVersus(page, theme, { width: 1280, height: 720 });
+    await openLeaderboard(page, theme, { width: 1280, height: 720 });
     // the static server answers /api/* with 204
-    await page.locator("button.bar", { hasText: "WATCH LIVE" }).click();
+    await watchLive(page).click();
     await expect(ui(page)).toHaveAttribute("data-screen", "live");
     await expect(page.locator(".live .form-error")).toHaveText("Online play isn't available here");
     await expect(page.locator(".live-row")).toHaveCount(0);
     await expect(page.locator(".hint")).toHaveText("ESC to go back");
     await shot(page, `${theme}-live-unavailable`);
     await page.keyboard.press("Escape");
-    await expect(ui(page)).toHaveAttribute("data-screen", "bots");
+    await expect(ui(page)).toHaveAttribute("data-screen", "leaderboard");
 
+    // a server error is not "no server": it says so and tries again
     await page.route("**/api/live", (route) => route.fulfill({ status: 500, body: "oops" }));
-    await page.locator("button.bar", { hasText: "WATCH LIVE" }).click();
-    await expect(page.locator(".live .form-error")).toHaveText("Online play isn't available here");
+    await watchLive(page).click();
+    await expect(page.locator(".live .form-error")).toHaveText("Couldn't load the live matches. Trying again…");
+    await expect(page.locator(".live .note")).toHaveText("");
     problems = problems.filter((p) => !p.includes("status of 500")); // the browser logs the failed request itself
     await page.keyboard.press("Escape");
     await page.unroute("**/api/live");
 
     await mockLive(page, []);
-    await page.locator("button.bar", { hasText: "WATCH LIVE" }).click();
+    await watchLive(page).click();
     await expect(page.locator(".live .note")).toHaveText("No ranked matches are live right now.");
     await expect(page.locator(".live .form-error")).toHaveText("");
     await shot(page, `${theme}-live-empty`);
@@ -241,7 +258,7 @@ for (const theme of ["classic", "poster"]) {
     await page.unroute("**/api/live");
 
     await mockLive(page);
-    await page.locator("button.bar", { hasText: "WATCH LIVE" }).click();
+    await watchLive(page).click();
     await page.locator(".live-row").first().click();
     await expect(page.locator(".live .form-error")).toHaveText("That match is not live any more.");
     await expect(ui(page)).toHaveAttribute("data-screen", "live");
@@ -253,8 +270,8 @@ for (const theme of ["classic", "poster"]) {
 
 test("the list re-fetches every 10 s while shown, and stops on leaving", async ({ page }) => {
   const live = await mockLive(page);
-  await openVersus(page, "classic", { width: 1280, height: 720 });
-  await page.locator("button.bar", { hasText: "WATCH LIVE" }).click();
+  await openLeaderboard(page, "classic", { width: 1280, height: 720 });
+  await watchLive(page).click();
   await expect.poll(live.fetches).toBe(1);
   await expect.poll(live.fetches, { timeout: 12_000 }).toBe(2);
   await page.keyboard.press("Escape");

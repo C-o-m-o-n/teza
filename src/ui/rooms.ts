@@ -76,16 +76,21 @@ function liveMatch(x: unknown): LiveMatch | null {
   return a && b ? { code, startedAt, players: [a, b] } : null;
 }
 
-/** The live ranked matches (malformed rows dropped, only known fields kept), or null when there is no server or it answers strangely. */
-export async function fetchLive(): Promise<LiveMatch[] | null> {
+/**
+ * The live ranked matches (malformed rows dropped, only known fields kept). "unavailable" when no game
+ * server answers here (the static servers give 204 or 404); "failed" for a network error, a timeout, a
+ * server error or an unreadable answer, which a later try may not repeat.
+ */
+export async function fetchLive(): Promise<LiveMatch[] | "unavailable" | "failed"> {
   const res = await send("GET", "/api/live");
-  if (res?.status !== 200) return null;
+  if (!res || res.status >= 500 || res.status === 429) return "failed";
+  if (res.status !== 200) return "unavailable";
   try {
     const x: unknown = await res.json();
     const matches = typeof x === "object" && x !== null ? (x as Record<string, unknown>).matches : null;
-    if (!Array.isArray(matches)) return null;
+    if (!Array.isArray(matches)) return "failed";
     return matches.map(liveMatch).filter((m): m is LiveMatch => m !== null);
   } catch {
-    return null;
+    return "failed";
   }
 }

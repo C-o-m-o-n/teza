@@ -105,7 +105,7 @@ interface Session {
   endAt: number | null; // when to show results
   outcome: "win" | "lose" | "draw" | "lost" | "clear" | "fail" | null;
   online: OnlineClient | null; // an online match: `bot` is the opponent as the server relays it
-  spectate: { client: SpectatorClient; names: [string, string] } | null; // watching: `player` and `bot` are boards 0 and 1, no input
+  spectate: { client: SpectatorClient; names: [string, string]; clock: HTMLElement } | null; // watching: `player` and `bot` are boards 0 and 1, no input
   away: number | null; // performance.now() when the absent opponent forfeits
   notice: { text: string; until: number } | null; // a server error, shown over the board for a while
 }
@@ -117,6 +117,7 @@ const NO_PLAYERS = "NO CALIBRATED PLAYERS YET";
 const NO_SUCH_PLAYER = "No such player";
 const NO_LIVE = "No ranked matches are live right now.";
 const NOT_LIVE = "That match is not live any more.";
+const LIVE_FAILED = "Couldn't load the live matches. Trying again…";
 const LIVE_POLL_MS = 10_000; // WATCH LIVE re-fetches the list this often (the server caches it 5 s)
 
 /** `4:07` from milliseconds. */
@@ -307,7 +308,13 @@ export class App {
     s.last = now;
     if (s.endAt !== null) return;
     if (s.online) return this.advanceOnline(s, now);
-    if (s.spectate) return s.spectate.client.update(); // the boards move only with the server's events
+    if (s.spectate) {
+      // the boards move only with the server's events; the match clock runs on, so a resting board still looks live
+      s.spectate.client.update();
+      const text = clockText((s.spectate.client.clock * 1000) / 60);
+      if (s.spectate.clock.textContent !== text) s.spectate.clock.textContent = text;
+      return;
+    }
     s.clock += dt * 60;
     stepToClock(s.player, s.clock, input);
     if (s.ghost && s.ghostView) {
@@ -614,7 +621,7 @@ export class App {
       } else if (this.screen === "live") {
         sfx.menu();
         this.stopWatching();
-        this.showBots();
+        this.showLeaderboard(this.ladder);
       } else if (this.screen !== "menu") {
         sfx.menu();
         this.showMenu();
@@ -889,10 +896,6 @@ export class App {
         accent: "#c9a227", title: "LEADERBOARD", tagline: "The top 50 ranked players by TR.",
         glyph: "#1", index: bars.length + 3, onClick: () => this.showLeaderboard(),
       }),
-      this.bar({
-        accent: "#1f9e8f", title: "WATCH LIVE", tagline: "Spectate a ranked match as it is played.",
-        glyph: "LIVE", index: bars.length + 4, onClick: () => this.showLive(),
-      }),
     );
     const page = this.subPage("VERSUS", "Pick an opponent. First to top out loses.",
       el("nav", { class: "bars dense" }, ...bars),
@@ -1081,6 +1084,12 @@ export class App {
     const error = el("p", { class: "form-error", role: "alert" });
     const back = el("button", { class: "ghost-btn", type: "button", "data-nav": "" }, "← BACK");
     back.addEventListener("click", () => this.showBots());
+    // the ranked matches being played now, from the players this page ranks
+    const watch = el("button", { class: "ghost-btn", type: "button", "data-nav": "" }, "WATCH LIVE");
+    watch.addEventListener("click", () => {
+      sfx.confirm();
+      this.showLive();
+    });
     const hint = el("footer", { class: "hint" }, "ESC to go back");
     const page = this.subPage("LEADERBOARD", "Calibrated ranked players by TR. Only rated ranked matches count here.",
       el("section", { class: "account-form room ladder-box" },
@@ -1088,7 +1097,7 @@ export class App {
         list,
         status,
         error,
-        el("div", { class: "actions" }, back),
+        el("div", { class: "actions" }, watch, back),
       ),
       hint,
     );
@@ -1127,7 +1136,7 @@ export class App {
         error.textContent = UNAVAILABLE;
         return;
       }
-      const focused = document.activeElement === back;
+      const focused = document.activeElement === back || document.activeElement === watch;
       fill(rows);
       if (focused) list.querySelector<HTMLElement>("[data-nav]")?.focus();
     });
@@ -1191,7 +1200,7 @@ export class App {
     const back = el("button", { class: "ghost-btn", type: "button", "data-nav": "" }, "← BACK");
     back.addEventListener("click", () => {
       this.stopWatching();
-      this.showBots();
+      this.showLeaderboard(this.ladder);
     });
     const hint = el("footer", { class: "hint" }, "ESC to go back");
     const page = this.subPage("WATCH LIVE", "Ranked matches being played right now. Pick one to watch both boards live.",
@@ -1241,7 +1250,13 @@ export class App {
       const matches = await fetchLive();
       loading = false;
       if (!page.isConnected) return; // left the page meanwhile
-      if (!matches) {
+      if (matches === "failed") {
+        // the server is there but this answer failed: keep what is shown, and the next poll tries again
+        if (status.textContent === "Loading…") status.textContent = "";
+        error.textContent = LIVE_FAILED;
+        return;
+      }
+      if (matches === "unavailable") {
         shown = [];
         list.replaceChildren();
         list.hidden = true;
@@ -1250,7 +1265,7 @@ export class App {
         error.textContent = UNAVAILABLE;
         return;
       }
-      if (error.textContent === UNAVAILABLE) error.textContent = "";
+      if (error.textContent === UNAVAILABLE || error.textContent === LIVE_FAILED) error.textContent = "";
       const moveFocus = first && (document.activeElement === refresh || document.activeElement === document.body);
       first = false;
       fill(matches);
@@ -1313,16 +1328,22 @@ export class App {
     const mode = modeById("vs");
     const [a, b] = client.boards!;
     const views = [a, b].map((g, i) => new BoardView(g, { accent: mode.accent, mode: "vs", label: names[i], compact: true }));
+    // a real element over the canvas: watching, the match clock (it runs while the boards rest), how to leave
+    const clock = el("span", { class: "spectate-clock" }, clockText((client.clock * 1000) / 60));
+    const state = el("span", { class: "spectate-live" }, "LIVE");
+    const tag = el("p", { class: "spectate-tag", "aria-label": `Watching ${names[0]} versus ${names[1]} live. Press Escape to leave.` },
+      state, " · ", clock, " · ESC TO LEAVE");
     const s: Session = {
       mode, seed: a.opts.seed, player: a, playerView: views[0], bot: b, botView: views[1], botAI: null, botProfile: null,
       botAcc: 0, recorder: null, clock: 0, ghost: null, ghostView: null, t: 0, started: true, last: performance.now(),
-      endAt: null, outcome: null, online: null, spectate: { client, names }, away: null, notice: null,
+      endAt: null, outcome: null, online: null, spectate: { client, names, clock }, away: null, notice: null,
     };
     client.events = {
       garbage: (slot, n) => this.flight(views[1 - slot], views[slot], n, [a, b][slot].opts.garbagespeed),
       end: (result) => {
         if (this.session !== s) return;
         if (result.winner !== null) views[1 - result.winner].bigText = { text: "K.O.", t: 0, color: "#ff3f5f" };
+        state.textContent = "FINAL";
         this.endSession(result.winner === null ? "draw" : "win");
       },
       closed: () => {
@@ -1330,6 +1351,7 @@ export class App {
       },
     };
     this.mount(s);
+    this.root.append(tag); // the play screen shows #ui only for this tag (style.css)
   }
 
   /** The lobby screens (CREATE's code, JOIN's field): one box in the VERSUS layout. */
@@ -1675,7 +1697,7 @@ export class App {
     const page = el("div", { class: "results", style: `--accent:${accent}` },
       el("p", { class: "headline" }, "MATCH OVER"),
       el("p", { class: "big winner" }, winner === null ? "DRAW" : `${names[winner]} WINS`),
-      el("p", { class: "badge" }, `LIVE · ${REASON_TEXT[reason] ?? reason.toUpperCase()}`),
+      el("p", { class: "badge" }, `FINAL · ${REASON_TEXT[reason] ?? reason.toUpperCase()}`),
       el("p", { class: "note watched" }, names[0], el("span", { class: "live-vs" }, " vs "), names[1]),
       el("div", { class: "actions" }, back),
     );

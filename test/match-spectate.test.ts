@@ -627,6 +627,19 @@ describe("SpectatorClient", () => {
     expect(closed).toBe(1);
   });
 
+  it("runs a match clock from the server's elapsed frame, and stops it at the end", () => {
+    let t = 5000;
+    const { c } = client(() => t);
+    expect(c.clock).toBe(0);
+    c.receive(JSON.stringify({ t: "spectate", s: 1, a: 0, d: { seed: 7, options: OPTIONS, handling: {}, events: [], elapsed: 600 } }));
+    expect(c.clock).toBe(600);
+    t += 1500;
+    expect(c.clock).toBe(690); // it runs while no event arrives
+    c.receive(JSON.stringify({ t: "end", s: 2, a: 0, d: { winner: 0, reason: "topout" } }));
+    t += 5000;
+    expect(c.clock).toBe(690);
+  });
+
   it("never sends anything but ping, every PING_MS", () => {
     let t = 0;
     const { c, sent, closes } = client(() => t);

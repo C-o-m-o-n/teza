@@ -136,6 +136,26 @@ button { font: inherit; color: inherit; }
 }
 .results .big.winner { font-size: clamp(44px, 7.5vw, 120px); overflow-wrap: anywhere; }
 .results .watched { margin: 14px 0 0; font-family: var(--display); font-size: 20px; overflow-wrap: anywhere; }
+/* Watching a match: #ui (hidden on the play screen) shows only the LIVE tag, top centre over the boards */
+#ui[data-screen="play"]:has(> .spectate-tag) { display: block; }
+#ui > .spectate-tag {
+  position: absolute;
+  top: 14px;
+  left: 50%;
+  transform: translateX(-50%);
+  margin: 0;
+  padding: 6px 12px;
+  border: 2px solid var(--line);
+  background: var(--bg);
+  color: var(--muted);
+  font-family: var(--display);
+  font-size: 14px;
+  letter-spacing: 0.14em;
+  white-space: nowrap;
+  pointer-events: none;
+}
+.spectate-live { color: #ff3f5f; }
+.spectate-clock { color: var(--ink); font-variant-numeric: tabular-nums; }
 
 /* the results screen's entrance, in every theme */
 @keyframes slide-in {
@@ -269,20 +289,20 @@ button { font: inherit; color: inherit; }
   padding: 6px 12px;
   margin-right: 90px;
 }
-/* VERSUS stacks nine bars (four bots, two online rooms, ranked, leaderboard, watch live): tighter than the menu's */
-:where(html:not([data-theme="poster"])) .bars.dense { gap: 6px; }
-:where(html:not([data-theme="poster"])) .bars.dense .bar { min-height: 80px; padding: 8px 34px 6px 30px; }
+/* VERSUS stacks eight bars (four bots, two online rooms, ranked, leaderboard): tighter than the menu's */
+:where(html:not([data-theme="poster"])) .bars.dense { gap: 8px; }
+:where(html:not([data-theme="poster"])) .bars.dense .bar { min-height: 84px; padding: 12px 34px 11px 30px; }
 :where(html:not([data-theme="poster"])) .bars.dense .bar-title { font-size: 38px; }
-:where(html:not([data-theme="poster"])) .bars.dense .bar-tagline { font-size: 15px; margin-top: 3px; }
+:where(html:not([data-theme="poster"])) .bars.dense .bar-tagline { font-size: 15px; margin-top: 4px; }
 :where(html:not([data-theme="poster"])) .bars.dense .bar-glyph { font-size: 120px; }
-/* VERSUS's nine bars at those sizes need about 900 px of height; shorter side-by-side layouts get a tighter stack
+/* VERSUS's eight bars at those sizes need about 900 px of height; shorter side-by-side layouts get a tighter stack
    (the stacked phone layout scrolls, so it keeps them) */
 @media (max-height: 899px) and (min-width: 861px) {
-  :where(html:not([data-theme="poster"])) .bars.dense { gap: 5px; }
-  :where(html:not([data-theme="poster"])) .bars.dense .bar { min-height: 60px; padding: 7px 34px 6px 30px; }
-  :where(html:not([data-theme="poster"])) .bars.dense .bar-title { font-size: 29px; }
-  :where(html:not([data-theme="poster"])) .bars.dense .bar-tagline { font-size: 13px; margin-top: 2px; }
-  :where(html:not([data-theme="poster"])) .bars.dense .bar-glyph { font-size: 92px; }
+  :where(html:not([data-theme="poster"])) .bars.dense { gap: 6px; }
+  :where(html:not([data-theme="poster"])) .bars.dense .bar { min-height: 70px; padding: 9px 34px 8px 30px; }
+  :where(html:not([data-theme="poster"])) .bars.dense .bar-title { font-size: 32px; }
+  :where(html:not([data-theme="poster"])) .bars.dense .bar-tagline { font-size: 14px; margin-top: 3px; }
+  :where(html:not([data-theme="poster"])) .bars.dense .bar-glyph { font-size: 104px; }
 }
 
 :where(html:not([data-theme="poster"])) .hint {
@@ -645,18 +665,11 @@ button { font: inherit; color: inherit; }
   padding: 5px 10px;
   margin-right: 90px;
 }
-/* VERSUS stacks nine bars (four bots, two online rooms, ranked, leaderboard, watch live): tighter, stepping in
-   one column a row; below 800 px of height (side by side) tighter still, so all nine stay on screen */
+/* VERSUS stacks seven bars (four bots, two online rooms, ranked): tighter, stepping in one column a row */
 :where(html[data-theme="poster"]) .bars.dense .bar { margin-left: calc(var(--i) * var(--col)); padding: 5px 34px 6px 34px; }
 :where(html[data-theme="poster"]) .bars.dense .bar-title { font-size: 40px; }
 :where(html[data-theme="poster"]) .bars.dense .bar-tagline { margin-top: 2px; }
 :where(html[data-theme="poster"]) .bars.dense .bar-glyph { font-size: 120px; }
-@media (max-height: 799px) and (min-width: 861px) {
-  :where(html[data-theme="poster"]) .bars.dense .bar { padding: 4px 34px 4px 34px; }
-  :where(html[data-theme="poster"]) .bars.dense .bar-title { font-size: 33px; }
-  :where(html[data-theme="poster"]) .bars.dense .bar-tagline { font-size: 14px; margin-top: 1px; }
-  :where(html[data-theme="poster"]) .bars.dense .bar-glyph { font-size: 100px; }
-}
 
 :where(html[data-theme="poster"]) .menu-foot {
   display: flex;

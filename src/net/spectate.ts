@@ -46,13 +46,23 @@ export class SpectatorClient {
   private seq = 0; // last `s` sent
   private ack = 0; // last `s` received
   private lastSend: number;
+  private elapsed = 0; // the server's wall frame when `spectate` arrived
+  private joinedAt = 0; // now() then
+  private stoppedAt: number | null = null; // now() when the match (or the watching) ended
 
   constructor(private socket: OnlineSocket, private now: () => number) {
     this.lastSend = now();
   }
 
+  /** The match clock in frames: the server's at `spectate`, run on from there by wall time; it stops at the end. 0 before. */
+  get clock(): number {
+    if (!this.boards) return 0;
+    return this.elapsed + (((this.stoppedAt ?? this.now()) - this.joinedAt) * 60) / 1000;
+  }
+
   /** Close the socket and stop watching. */
   leave(): void {
+    this.stoppedAt ??= this.now();
     this.phase = "over";
     this.socket.close();
   }
@@ -83,6 +93,7 @@ export class SpectatorClient {
       case "end": {
         if (this.phase === "over") return;
         const winner = d.winner === 0 || d.winner === 1 ? d.winner : null;
+        this.stoppedAt ??= this.now();
         this.phase = "over";
         this.result = { winner, reason: typeof d.reason === "string" ? d.reason : "" };
         this.events.end?.(this.result);
@@ -98,6 +109,7 @@ export class SpectatorClient {
   /** The socket closed (or failed to open). */
   closed(): void {
     if (this.phase === "over") return;
+    this.stoppedAt ??= this.now();
     this.phase = "over";
     this.events.closed?.();
   }
@@ -111,6 +123,8 @@ export class SpectatorClient {
     const handling = d.handling as unknown as Handling;
     this.boards = [new Game(options, handling), new Game(options, handling)];
     this.phase = "watching";
+    this.elapsed = finite(d.elapsed) && d.elapsed >= 0 ? d.elapsed : 0;
+    this.joinedAt = this.now();
     for (const e of d.events) if (isObject(e)) this.apply(e, false); // silent: the screen listens after `start`
     this.events.start?.();
   }
