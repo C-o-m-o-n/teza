@@ -12,15 +12,17 @@
 // object by the queue over RPC; its socket needs a session, which the Worker resolves to an
 // account and hands to `Match` in ACCOUNT_HEADER. Without a well-formed session cookie it is
 // refused here, without a call to `Accounts`.
+// `?mode=spectate` watches a live ranked match (no session, no slot, no resume). A ranked `Match`
+// tells `Accounts` when it starts and finishes (`matchLive`), which lists them at GET /api/live.
 
 import { DurableObject } from "cloudflare:workers";
 import {
   AccountRow, AccountStore, CalibratedRow, cookieToken, handleAccount, MAX_BODY_BYTES, PAIR_WINDOW_MS, REGISTRATION_WINDOW_MS, pairAllowed, RankedMatchRow,
   QueueHost, RatingChange, rateRankedMatch, RatingRow, readBody, reportNoShow, sessionKey, SessionRow, withTimeout,
 } from "../src/server/accounts";
-import { handlePublic, isPublicRoute } from "../src/server/leaderboard";
+import { handleLive, handlePublic, isPublicRoute, LIVE_ROUTE, LiveMatches, matchLive } from "../src/server/leaderboard";
 import {
-  admit, CLAIM_KEY, ClaimStorage, cryptoRandom, issueClaim, MatchSession, newRoomCode, REPORT_TIMEOUT_MS, resumeRequest, ROOM_CODE, SlotIndex,
+  admit, CLAIM_KEY, ClaimStorage, cryptoRandom, issueClaim, MatchSession, newRoomCode, Peer, REPORT_TIMEOUT_MS, resumeRequest, ROOM_CODE, SlotIndex,
   SlotRating, upgradeHeaders,
 } from "../src/server/match";
 import { RD_HIDDEN } from "../src/server/rating";
@@ -58,7 +60,7 @@ function badResume(url: URL, headers: Headers): string | null {
 export default {
   async fetch(request, env): Promise<Response> {
     const path = new URL(request.url).pathname;
-    if (path.startsWith("/api/account/") || isPublicRoute(path)) {
+    if (path.startsWith("/api/account/") || isPublicRoute(path) || path === LIVE_ROUTE) {
       // Hand the Durable Object a buffered body: a streamed one breaks the connection when the
       // object answers (e.g. 403, 415) before reading it.
       const body = request.body ? await readBody(request) : null;
@@ -94,7 +96,9 @@ export default {
     if (bad) return new Response(bad, { status: 400 });
     const headers = new Headers(request.headers);
     headers.delete(ACCOUNT_HEADER);
-    if (url.searchParams.get("mode") === "ranked" && resumeRequest(request.headers) === undefined) {
+    const mode = url.searchParams.get("mode");
+    if (mode === "spectate" && resumeRequest(request.headers) !== undefined) return new Response("Spectators do not resume", { status: 400 });
+    if (mode === "ranked" && resumeRequest(request.headers) === undefined) {
       const cookie = request.headers.get("Cookie");
       // no session token at all: answered here, so cookieless upgrades never reach the Accounts object
       if (cookieToken(cookie) === null) return new Response("Sign in to play ranked", { status: 401 });
@@ -161,6 +165,8 @@ export class Match extends DurableObject<Env> {
         return ratings[0] && ratings[1] ? [ratings[0], ratings[1]] : null;
       },
       noShow: (absent: string) => withTimeout(accounts(this.env).reportNoShow(code, absent), REPORT_TIMEOUT_MS),
+      // the live list's players by slot, so WATCH LIVE can name each board
+      live: (on: boolean) => withTimeout(accounts(this.env).matchLive(code, on, [session.accountOf(0), session.accountOf(1)]), REPORT_TIMEOUT_MS),
     });
     this.session = session;
     return true;
@@ -176,6 +182,7 @@ export class Match extends DurableObject<Env> {
     const resume = resumeRequest(request.headers) ?? undefined;
     if (resume && !this.session.hasToken(resume.token)) return new Response("Unknown resume token", { status: 403 });
     const account = request.headers.get(ACCOUNT_HEADER);
+    const spectate = !resume && url.searchParams.get("mode") === "spectate";
     if (!resume) {
       // a new player says whether they open the room (an issued code), join it or take a ranked slot, so nobody takes over a live code
       const refused = await admit(this.session, this.claims, url.searchParams.get("mode"), account, Date.now());
@@ -183,7 +190,7 @@ export class Match extends DurableObject<Env> {
     }
     const [client, server] = Object.values(new WebSocketPair());
     server.accept();
-    const conn = this.session.connect({
+    const peer: Peer = {
       send: (data) => {
         try {
           server.send(data);
@@ -198,7 +205,8 @@ export class Match extends DurableObject<Env> {
           // already closed
         }
       },
-    }, resume, account ?? undefined);
+    };
+    const conn = spectate ? this.session.connectSpectator(peer) : this.session.connect(peer, resume, account ?? undefined);
     server.addEventListener("message", (event) => this.session.message(conn, event.data));
     server.addEventListener("close", () => {
       this.session.disconnect(conn);
@@ -218,6 +226,7 @@ export class Accounts extends DurableObject<Env> {
   private store: AccountStore;
   private matchmaker: Matchmaker;
   private cooldowns = new Map<string, number>(); // no-show cooldowns, in memory only
+  private live: LiveMatches = new Map(); // ranked matches being played, for GET /api/live; in memory only
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
@@ -358,7 +367,9 @@ export class Accounts extends DurableObject<Env> {
   }
 
   async fetch(request: Request): Promise<Response> {
-    if (isPublicRoute(new URL(request.url).pathname)) return handlePublic(request, this.store);
+    const path = new URL(request.url).pathname;
+    if (path === LIVE_ROUTE) return handleLive(request, this.store, this.live, Date.now());
+    if (isPublicRoute(path)) return handlePublic(request, this.store);
     return handleAccount(request, this.store, Date.now, this.queueHost());
   }
 
@@ -377,7 +388,13 @@ export class Accounts extends DurableObject<Env> {
 
   /** RPC from a ranked `Match`: rate its result once. Null if it was not a ranked match or was rated already. */
   async reportRanked(code: string, winnerKey: string | null): Promise<RatingChange[] | null> {
+    this.live.delete(code);
     return rateRankedMatch(this.store, code, winnerKey);
+  }
+
+  /** RPC from a ranked `Match` when it starts (`on`, with its account keys by slot) and finishes. */
+  async matchLive(code: string, on: boolean, slots?: (string | null)[]): Promise<void> {
+    matchLive(this.live, this.store, code, on, Date.now(), slots);
   }
 
   /** RPC from a ranked `Match` whose lobby timed out with one account missing: drop the room unrated and cool that account down. */

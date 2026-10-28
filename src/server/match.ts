@@ -14,6 +14,11 @@
 // result is reported once and `end` waits for the new ratings (REPORT_TIMEOUT_MS at most).
 // Its lobby waits only RANKED_LOBBY_TIMEOUT_MS (the queue just told both players to connect); if
 // only one account arrived by then, the absent one is reported with `noShow`.
+//
+// A started ranked match can be watched (`connectSpectator`): spectators hold no slot and send
+// nothing but `ping`. The match keeps a log of the inputs and garbage its engines applied, in
+// engine order (MAX_SPECTATE_EVENTS at most); a spectator gets `start`'s data and the log so far in
+// one `spectate` message, then each new entry as a `specEvent`, and replays both boards from them.
 
 import { Action, DEFAULT_HANDLING, Game, Handling } from "../engine/game";
 import { stepTo, stepToClock } from "../engine/stepping";
@@ -36,6 +41,8 @@ export const LOBBY_TIMEOUT_MS = 120_000; // a match without an opponent by then 
 export const RANKED_LOBBY_TIMEOUT_MS = 30_000; // the same for a ranked room
 export const IDLE_TIMEOUT_MS = 60_000; // a started match where nobody sends anything for this long ends
 export const REPORT_TIMEOUT_MS = 3000; // a ranked `end` waits this long for the ratings at most
+export const MAX_SPECTATORS = 50; // sockets watching one match at once
+export const MAX_SPECTATE_EVENTS = 20_000; // log entries kept for spectators; a longer match takes no new ones
 
 /** Room codes (= match ids) are issued by `POST /api/room`: 6 symbols, no 0/O, 1/I/L look-alikes. */
 export const ROOM_CLAIM_MS = LOBBY_TIMEOUT_MS; // an issued code must be created within this time
@@ -112,7 +119,17 @@ export interface RankedConfig {
   report(winner: SlotIndex | null): Promise<readonly [SlotRating, SlotRating] | null>;
   /** The lobby timed out with only one account connected: `absent` never came. Not waited on; failures are ignored. */
   noShow(absent: string): Promise<unknown>;
+  /** The match started (true) or finished (false), for the live list. Not waited on; failures are ignored. */
+  live?(on: boolean): Promise<unknown> | void;
 }
+
+/**
+ * One entry of the spectator log: an input a slot's engine applied at `frame` (as relayed in
+ * `opponentInput`), or garbage slot `slot` received at `frame` (as in `garbage`/`opponentGarbage`).
+ */
+export type SpectateEvent =
+  | { k: "input"; slot: SlotIndex; frame: number; action: Action; kind: "press" | "release" }
+  | { k: "garbage"; slot: SlotIndex; amount: number; frame: number };
 
 interface Slot {
   index: SlotIndex;
@@ -129,13 +146,15 @@ interface Slot {
   grace: unknown; // forfeit timer while disconnected mid-match
 }
 
-/** Opaque handle for one socket, returned by `connect`. */
+/** Opaque handle for one socket, returned by `connect` (or `connectSpectator`). */
 export interface Conn {
   readonly peer: Peer;
   slot: Slot | null;
   rejected: number;
   closed: boolean;
   timer: unknown; // resume deadline while the socket holds no slot
+  spectator: boolean; // watching: never holds a slot, only pings
+  seq: number; // a spectator's last `s` sent
 }
 
 type Message = { t: string; s?: unknown; d?: unknown };
@@ -196,6 +215,9 @@ export class MatchSession {
   private idle: unknown = null; // ends a started match nobody is talking in
   private lastActive = 0; // clock time of the last valid message from a player
   private garbageOut: { slot: Slot; amount: number; frame: number }[] = [];
+  private spectators = new Set<Conn>();
+  private log: SpectateEvent[] = []; // what the engines applied, for spectators (emptied at the end)
+  private startData: { seed: number; options: ReturnType<typeof matchOptions>; handling: Handling } | null = null;
 
   constructor(private clock: Clock, private random: Random = cryptoRandom, private ranked: RankedConfig | null = null) {}
 
@@ -222,6 +244,16 @@ export class MatchSession {
     return this.ended;
   }
 
+  /** Started and not finished: what a spectator may watch (ranked matches only, see `admission`). */
+  get isLive(): boolean {
+    return this.started && !this.ended;
+  }
+
+  /** Sockets watching the match. */
+  get spectatorCount(): number {
+    return this.spectators.size;
+  }
+
   /** Whether anyone holds a slot, so the adapter can tell `create` (needs none) from `join` (needs one). */
   get hasPlayers(): boolean {
     return this.slots.length > 0;
@@ -244,7 +276,7 @@ export class MatchSession {
    * at once and never waits among the pending sockets, so others can't crowd the owner out.
    */
   connect(peer: Peer, resume?: ResumeRequest, account?: string): Conn {
-    const conn: Conn = { peer, slot: null, rejected: 0, closed: false, timer: null };
+    const conn: Conn = { peer, slot: null, rejected: 0, closed: false, timer: null, spectator: false, seq: 0 };
     if (this.ended) {
       this.reject(conn, "ended", "the match is over");
     } else if (resume) {
@@ -276,8 +308,26 @@ export class MatchSession {
     return conn;
   }
 
+  /**
+   * A socket that watches: it gets one `spectate` message with the match's rules and the log so far,
+   * then live `specEvent`s and the `end`. Refused (an `error`, then closed) unless the match is a live
+   * ranked one, with room for another spectator (`busy`) and a log that is still complete (`too-long`).
+   */
+  connectSpectator(peer: Peer): Conn {
+    const conn: Conn = { peer, slot: null, rejected: 0, closed: false, timer: null, spectator: true, seq: 0 };
+    if (!this.ranked || !this.isLive || !this.startData) this.refuseSpectator(conn, "not-live", "no such live match");
+    else if (this.spectators.size >= MAX_SPECTATORS) this.refuseSpectator(conn, "busy", "too many spectators");
+    else if (this.log.length >= MAX_SPECTATE_EVENTS) this.refuseSpectator(conn, "too-long", "this match is too long to join");
+    else {
+      this.spectators.add(conn);
+      this.sendSpectator(conn, "spectate", { ...this.startData, events: this.log, elapsed: this.wallFrame() });
+    }
+    return conn;
+  }
+
   message(conn: Conn, data: string | ArrayBuffer): void {
     if (conn.closed) return;
+    if (conn.spectator) return this.spectatorMessage(conn, data); // no catch-up: a spectator never moves the match
     this.catchUp(MAX_LAG_FRAMES);
     if (conn.closed) return; // the catch-up ended the match
     const msg = parse(data);
@@ -303,6 +353,10 @@ export class MatchSession {
   disconnect(conn: Conn): void {
     if (conn.closed) return;
     conn.closed = true;
+    if (conn.spectator) {
+      this.spectators.delete(conn);
+      return;
+    }
     this.unpend(conn);
     const slot = conn.slot;
     if (!slot) return;
@@ -323,6 +377,45 @@ export class MatchSession {
     this.pending.delete(conn);
     if (conn.timer !== null) this.clock.clearTimeout(conn.timer);
     conn.timer = null;
+  }
+
+  /** A spectator may only ping (answered without touching `lastActive`); anything else counts as rejected. */
+  private spectatorMessage(conn: Conn, data: string | ArrayBuffer): void {
+    const msg = parse(data);
+    if (typeof msg === "string") return this.rejectSpectator(conn, msg, "unreadable message");
+    if (msg.t === "ping") return conn.peer.send(JSON.stringify({ t: "pong", s: 0, a: 0 }));
+    if (msg.t === "input") return this.rejectSpectator(conn, "spectator", "spectators can't play");
+    this.rejectSpectator(conn, "bad-type", "unknown message type");
+  }
+
+  private sendSpectator(conn: Conn, t: string, d?: unknown): void {
+    const pkt: Envelope = { t, s: ++conn.seq, a: 0, d };
+    conn.peer.send(JSON.stringify(pkt));
+  }
+
+  private rejectSpectator(conn: Conn, code: string, message: string): void {
+    this.sendSpectator(conn, "error", { code, message });
+    if (++conn.rejected > MAX_REJECTED) this.drop(conn, 1008, code);
+  }
+
+  private refuseSpectator(conn: Conn, code: string, message: string): void {
+    this.sendSpectator(conn, "error", { code, message });
+    this.drop(conn, 1008, code);
+  }
+
+  /** Log what an engine applied (until the log is full) and pass it to every spectator. */
+  private record(event: SpectateEvent): void {
+    if (this.log.length < MAX_SPECTATE_EVENTS) this.log.push(event);
+    for (const conn of this.spectators) this.sendSpectator(conn, "specEvent", event);
+  }
+
+  /** Tell the ranked config the match is (no longer) live. Never throws into the match. */
+  private announce(on: boolean): void {
+    try {
+      void Promise.resolve(this.ranked?.live?.(on)).catch(() => {});
+    } catch {
+      // the live list is only a directory
+    }
   }
 
   /** Close every socket the match knows about; ones still waiting to resume get an `error` first. */
@@ -400,6 +493,7 @@ export class MatchSession {
       // the attacker's client simulates the target's board, so it learns the frame the garbage landed at
       this.send(g.slot, "garbage", { amount: g.amount, frame: g.frame });
       this.send(this.other(g.slot), "opponentGarbage", { amount: g.amount, frame: g.frame });
+      this.record({ k: "garbage", slot: g.slot.index, amount: g.amount, frame: g.frame });
     }
     // VS has no objective, so over = topped out; both on the same catch-up frame is a draw
     const out = this.slots.filter((s) => s.game?.over);
@@ -457,6 +551,8 @@ export class MatchSession {
       slot.game = game;
     }
     for (const slot of this.slots) this.send(slot, "start", { seed, options, handling: MATCH_HANDLING });
+    this.startData = { seed, options, handling: MATCH_HANDLING };
+    this.announce(true);
   }
 
   private resume(conn: Conn, d: unknown): void {
@@ -532,6 +628,7 @@ export class MatchSession {
     else game.release(action);
 
     this.send(this.other(slot), "opponentInput", { frame: applied, action, kind: d.kind });
+    this.record({ k: "input", slot: slot.index, frame: applied, action, kind: d.kind });
     this.settle();
   }
 
@@ -546,6 +643,8 @@ export class MatchSession {
       slot.grace = null;
       if (slot.game) slot.game.onAttack = null;
     }
+    this.log = [];
+    this.announce(false);
     if (this.ranked) return this.rate(this.ranked, winner, reason);
     this.end(winner, reason, null);
   }
@@ -580,6 +679,10 @@ export class MatchSession {
       const rating = ratings?.[slot.index];
       this.send(slot, "end", rating ? { winner, reason, rating: { tr: rating.tr, delta: rating.delta } } : { winner, reason });
     }
+    for (const conn of [...this.spectators]) {
+      this.sendSpectator(conn, "end", { winner, reason });
+      this.drop(conn, 1000, "ended");
+    }
     this.closeAll(1000, "ended", "the match is over");
   }
 }
@@ -598,15 +701,18 @@ function isSlotRating(v: unknown): v is SlotRating {
  * Whether a new socket (no resume) may open with `mode`, given the account the Worker
  * resolved from its session cookie: null if so, else the refusal. Only `mode=ranked` takes a
  * ranked room's slots, and only for its two accounts; create and join can't touch it (409).
+ * `mode=spectate` watches a started, unfinished ranked match; every other room (unranked, free,
+ * still in its lobby, finished) gets the same 404, so a code's state can't be told from it.
  */
 export function admission(session: MatchSession, mode: string | null, account: string | null): { status: number; message: string } | null {
+  if (mode === "spectate") return session.isRanked && session.isLive ? null : { status: 404, message: "No such live match" };
   if (mode === "ranked") {
     if (!session.isRanked) return { status: 404, message: "No such ranked match" };
     if (account === null) return { status: 401, message: "Sign in to play ranked" };
     if (!session.mayTake(account)) return { status: 403, message: "This ranked match is not yours" };
     return null;
   }
-  if (mode !== "create" && mode !== "join") return { status: 400, message: "Expected ?mode=create, ?mode=join or ?mode=ranked" };
+  if (mode !== "create" && mode !== "join") return { status: 400, message: "Expected ?mode=create, ?mode=join, ?mode=ranked or ?mode=spectate" };
   if (session.isRanked) return { status: 409, message: "That code is a ranked match" };
   if (mode === "create" && session.hasPlayers) return { status: 409, message: "Room code taken" };
   if (mode === "join" && !session.hasPlayers) return { status: 404, message: "No such room" };
