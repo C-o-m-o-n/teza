@@ -352,3 +352,16 @@
 **Still open**
 - The client still has no auto-reconnect over the resume subprotocol.
 - Remove `LEGACY_COOKIE_NAME` 30 days after this deploys.
+
+## 2026-10-28 — Spectator mode: WATCH LIVE (factory job 017)
+
+**What changed**
+- `GET /api/match/<code>?mode=spectate` watches a started, unfinished ranked match; everything else gets one 404 `No such live match` (no claim used, nothing stored). Spectators hold no slot, send only `ping`, never run the catch-up or touch `lastActive`/idle/ratings; at most 50 per match (`busy`).
+- `MatchSession` logs what its engines applied (inputs where `opponentInput` goes out, garbage in `settle()`), capped at 20000 entries (then `too-long` for new spectators). A spectator gets `spectate {seed, options, handling, events, elapsed}`, then `specEvent`s, then `end {winner, reason}` and a 1000 close.
+- A ranked `Match` tells `Accounts` when it starts and finishes (`RankedConfig.live` → RPC `matchLive(code, on, slots)`); `GET /api/live` lists up to 30, newest first, players by slot, `Cache-Control: public, max-age=5`.
+- Client: `src/net/spectate.ts` (`SpectatorClient`), `fetchLive` in `rooms.ts`, and VERSUS's ninth bar WATCH LIVE (list re-fetched every 10 s, spectator screen with both boards named, no input, `<name> WINS`/`DRAW` at the end). VERSUS bars are a little tighter in both themes so nine fit where eight did.
+- Checked on `wrangler dev --local-upstream` (4.150.0): two Node `OnlineClient`s played a ranked match, a Classic and a Poster Slab browser watched it from WATCH LIVE (Poster joining 3 s in, replaying 491 logged events); the frames each page received, replayed, gave boards equal to both players' at the end; both showed `alice017 WINS`; `/api/live` listed the match during play and was empty after.
+
+**Still open**
+- Spectator boards rest at the last event (no gravity in between), like the opponent board.
+- A full 20000-event `spectate` is about 1.5 MB in one message; not tried against production's WebSocket message limit.
